@@ -38,63 +38,44 @@ This plugin requires the `agent-messaging` MCP server to be configured in your p
 }
 ```
 
-## Skills
+## Commands
 
-### amsg:inbox
+Type `/aawf:` to see available commands:
 
-Full inbox view showing threads, unread counts, and recent messages.
-
-**Usage:**
-```
-/amsg:inbox
-```
-
-**Output:**
-```
-📬 Inbox for alfred-platform
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Unread: 2 messages
-
-THREADS
-───────
-• alfred-agent-messaging (2 msgs, 1 unread)
-  └─ "Two-way communication test" - 10 min ago
-```
-
-### amsg:check
+### aawf:check-messages
 
 Quick check for new unread messages.
 
-**Usage:**
 ```
-/amsg:check
-```
-
-**Output:**
-```
-📨 1 new message
-
-From: project-manager
-Subject: Deployment request
-Time: 5 min ago
-───────────────────
-Please review the deployment configuration...
+/aawf:check-messages
 ```
 
-### amsg:threads
+### aawf:show-inbox
+
+Full inbox view with threads and unread counts.
+
+```
+/aawf:show-inbox
+```
+
+### aawf:show-threads
 
 List conversation threads, optionally filtered by agent.
 
-**Usage:**
 ```
-/amsg:threads                     # All threads
-/amsg:threads project-manager     # Threads with specific agent
+/aawf:show-threads
+/aawf:show-threads project-manager
 ```
+
+## Skills
+
+### messaging
+
+Provides context about agent messaging tools and workflows. Claude can use this automatically when working with inter-agent communication.
 
 ## Agent Identity
 
-Each project should configure a unique `X-Agent-ID` in their MCP configuration. This identifies the agent in conversations:
+Each project should configure a unique `X-Agent-ID` in their MCP configuration:
 
 | Project | X-Agent-ID |
 |---------|------------|

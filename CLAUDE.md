@@ -11,35 +11,32 @@ This is a Claude Code plugin providing agent workflow utilities for the Alfred p
 ```
 ccplugin-alfred-agent-workflow/
 ├── .claude-plugin/
-│   └── plugin.json          # Plugin metadata
+│   └── plugin.json          # Plugin metadata (name: aawf)
+├── commands/
+│   ├── check-messages.md    # /aawf:check-messages
+│   ├── show-inbox.md        # /aawf:show-inbox
+│   └── show-threads.md      # /aawf:show-threads
 ├── skills/
-│   ├── inbox/
-│   │   └── SKILL.md         # amsg:inbox skill
-│   ├── check/
-│   │   └── SKILL.md         # amsg:check skill
-│   └── threads/
-│       └── SKILL.md         # amsg:threads skill
+│   └── messaging/
+│       └── SKILL.md         # General messaging context
 ├── CLAUDE.md                # This file
 └── README.md                # User documentation
 ```
 
-## Skills
+## Commands vs Skills
 
-| Skill | Command | Description |
-|-------|---------|-------------|
-| inbox | `/amsg:inbox` | Full inbox view with threads and unread counts |
-| check | `/amsg:check` | Quick unread message check |
-| threads | `/amsg:threads [agent]` | List conversation threads |
+- **Commands** (`commands/*.md`) → User-invoked via `/aawf:*` menu
+- **Skills** (`skills/*/SKILL.md`) → Context Claude can use automatically
 
 ## Naming Convention
 
-All skills use the `amsg:` prefix to namespace agent messaging commands:
-- `amsg:` = agent messaging
-- Consistent with other Alfred plugins (e.g., `beads:` for issue tracking)
+- Plugin name: `aawf` (Alfred Agent WorkFlow)
+- Commands: `aawf:check-messages`, `aawf:show-inbox`, `aawf:show-threads`
+- Command filenames use hyphens: `check-messages.md`
 
 ## Dependencies
 
-Skills depend on the `agent-messaging` MCP server being configured. The MCP provides these tools:
+Commands depend on the `agent-messaging` MCP server being configured. The MCP provides these tools:
 - `mcp__agent-messaging__send_message`
 - `mcp__agent-messaging__get_messages`
 - `mcp__agent-messaging__mark_read`
@@ -53,13 +50,13 @@ Skills depend on the `agent-messaging` MCP server being configured. The MCP prov
 This plugin is published via the alfred-cc-tools marketplace:
 
 1. Ensure changes are committed and pushed to this repo
-2. Update marketplace entry in `alfred-cc-tools/.claude-plugin/marketplace.json`
+2. Marketplace entry exists in `alfred-cc-tools/.claude-plugin/marketplace.json`
 3. Users install via: `/plugin install alfred-agent-workflow@alfred-cc-tools`
 
 ## Development
 
-When modifying skills:
-1. Edit the relevant `SKILL.md` file
+When modifying commands/skills:
+1. Edit the relevant `.md` file
 2. Test locally with `/plugin validate .`
 3. Commit and push changes
-4. Marketplace will pick up changes automatically
+4. Marketplace picks up changes automatically

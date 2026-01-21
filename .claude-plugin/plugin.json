@@ -1,5 +1,5 @@
 {
-  "name": "alfred-agent-workflow",
-  "description": "Agent workflow utilities - messaging, coordination, and inter-agent communication for the Alfred platform",
-  "version": "1.0.0"
+  "name": "aawf",
+  "description": "Alfred Agent Workflow - messaging, coordination, and inter-agent communication for the Alfred platform",
+  "version": "1.0.1"
 }
