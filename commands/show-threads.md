@@ -6,7 +6,7 @@ List conversation threads using the agent-messaging MCP service.
 
 **First, check for project config:**
 
-1. Look for `.claude/alfred-agent.json` in project root
+1. Look for `.alfred/config.json` in project root
 2. If found, read `agent_id` from it
 3. If NOT found, display:
    ```

@@ -7,7 +7,7 @@ Initialize alfred-agent messaging for the current project.
 **Steps:**
 
 1. **Check if already initialized:**
-   - Look for `.claude/alfred-agent.json` in project root
+   - Look for `.alfred/config.json` in project root
    - If exists, show current config and ask if user wants to reconfigure
 
 2. **Detect project identity:**
@@ -23,18 +23,17 @@ Initialize alfred-agent messaging for the current project.
    - If user chooses custom, ask for the name
 
 4. **Create config directory and file:**
-   - Create `.claude/` directory if not exists
-   - Write `.claude/alfred-agent.json`:
+   - Create `.alfred/` directory if not exists
+   - Write `.alfred/config.json`:
      ```json
      {
        "agent_id": "{chosen_name}",
-       "initialized_at": "{ISO timestamp}",
-       "initialized_by": "jochem"
+       "tokens": {}
      }
      ```
 
 5. **Update .gitignore if needed:**
-   - Check if `.claude/` or `.claude/alfred-agent.json` is in .gitignore
+   - Check if `.alfred/` or `.alfred/config.json` is in .gitignore
    - If not, suggest adding it (don't auto-modify)
 
 6. **Confirm success:**
@@ -48,10 +47,10 @@ Detected project: secret-service (from git remote)
 Use 'secret-service' as this project's agent identity?
 > Yes, use secret-service
 
-Created .claude/alfred-agent.json
+Created .alfred/config.json
 Initialized alfred-agent for project 'secret-service'
 
 You can now use /alfred-agent:check-messages to receive messages as 'secret-service'
 
-Note: Consider adding .claude/ to your .gitignore
+Note: Consider adding .alfred/ to your .gitignore
 ```
