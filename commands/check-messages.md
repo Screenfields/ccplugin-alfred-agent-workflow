@@ -31,7 +31,7 @@ If no unread messages, report "No new messages".
 
 **After displaying messages:**
 
-1. **Automatically mark all displayed messages as read** using `mcp__agent-messaging__mark_read(message_id, as_agent="{agent_id}")` for each message. This is the default behavior since reading a message implies acknowledgment.
+1. **Automatically mark all displayed messages as read** using `mcp__agent-messaging__mark_read_batch(message_ids=[...], as_agent="{agent_id}")` with all message IDs in a single call. This is the default behavior since reading a message implies acknowledgment.
 
 2. **Reply directly if you have a clear answer.** If a message asks a question or requests information that you can answer confidently based on your current context and knowledge, reply immediately without asking the user for permission.
 
