@@ -29,7 +29,20 @@ For each message, display:
 
 If no unread messages, report "No new messages".
 
-After displaying messages, ask if user wants to:
-- Reply to any message
-- Mark messages as read
-- View full thread
+**After displaying messages:**
+
+1. **Automatically mark all displayed messages as read** using `mcp__agent-messaging__mark_read(message_id, as_agent="{agent_id}")` for each message. This is the default behavior since reading a message implies acknowledgment.
+
+2. **Reply directly if you have a clear answer.** If a message asks a question or requests information that you can answer confidently based on your current context and knowledge, reply immediately without asking the user for permission.
+
+3. **Validate with user first if unsure.** Ask for user input when:
+   - The answer requires decisions outside your authority
+   - You're uncertain about the correct response
+   - The message involves commitments, deadlines, or significant actions
+   - Multiple valid approaches exist and user preference matters
+
+4. Offer to view full thread if relevant context might be needed.
+
+**Exception:** Do NOT auto-mark as read if:
+- The message requires urgent action that hasn't been taken yet
+- The user explicitly asks to keep messages unread
