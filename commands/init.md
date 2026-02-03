@@ -10,7 +10,7 @@ Alfred uses a three-level config hierarchy (each level overrides the previous):
 
 ```
 /etc/alfred/config.json        # Global (system-wide, CF-Access credentials)
-~/.alfred/config.json          # User (personal read-only token)
+~/.config/alfred/config.json          # User (personal read-only token)
 <project>/.alfred/config.json  # Project (agent_id + write token if needed)
 ```
 
@@ -18,21 +18,21 @@ Alfred uses a three-level config hierarchy (each level overrides the previous):
 
 ### 1. Check User-Level Config
 
-First, check if user has `~/.alfred/config.json`:
+First, check if user has `~/.config/alfred/config.json`:
 
 ```bash
-cat ~/.alfred/config.json 2>/dev/null || echo "NOT_FOUND"
+cat ~/.config/alfred/config.json 2>/dev/null || echo "NOT_FOUND"
 ```
 
 If NOT_FOUND, ask user:
-- "No user-level config found. Do you want to set up ~/.alfred/config.json?"
+- "No user-level config found. Do you want to set up ~/.config/alfred/config.json?"
 - Options:
   - "Yes, set up user config first"
   - "Skip, just set up this project"
 
 If user chooses to set up user config:
 - Ask for their read-only secret-service token (from platform admin or sf-admin vault)
-- Create `~/.alfred/config.json`:
+- Create `~/.config/alfred/config.json`:
   ```json
   {
     "secret_service": {
@@ -41,7 +41,7 @@ If user chooses to set up user config:
     }
   }
   ```
-- Set permissions: `chmod 600 ~/.alfred/config.json`
+- Set permissions: `chmod 600 ~/.config/alfred/config.json`
 
 ### 2. Check if Project Already Initialized
 
@@ -128,7 +128,7 @@ Alfred agent initialized for '{agent_id}'
 
 Config hierarchy:
   Global:  /etc/alfred/config.json [EXISTS/MISSING]
-  User:    ~/.alfred/config.json [EXISTS/MISSING]
+  User:    ~/.config/alfred/config.json [EXISTS/MISSING]
   Project: .alfred/config.json [CREATED]
 
 You can now:
@@ -141,7 +141,7 @@ You can now:
 
 ```
 Checking user config...
-✓ User config exists at ~/.alfred/config.json
+✓ User config exists at ~/.config/alfred/config.json
 
 Detected project: secret-service (from git remote)
 
@@ -161,7 +161,7 @@ Alfred agent initialized for 'secret-service'
 
 Config hierarchy:
   Global:  /etc/alfred/config.json ✓
-  User:    ~/.alfred/config.json ✓
+  User:    ~/.config/alfred/config.json ✓
   Project: .alfred/config.json ✓
 
 You can now:
