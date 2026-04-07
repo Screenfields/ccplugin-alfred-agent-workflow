@@ -75,17 +75,24 @@ Be concise and direct.
 ### Step 2: Query Models in Parallel
 
 ```bash
-LITELLM_KEY=$(docker exec litellm env | grep LITELLM_MASTER_KEY | cut -d= -f2)
+# LiteLLM runs on dock, accessible via CF Access
+LITELLM_URL="https://litellm.screenfields.dev"
+LITELLM_KEY=$(op read "op://sf-platform/litellm/virtual-key/ecr-reviews/password" 2>/dev/null || echo "$LITELLM_MASTER_KEY")
+CF_ID="$CF_ACCESS_CLIENT_ID"
+CF_SECRET="$CF_ACCESS_CLIENT_SECRET"
 PROMPT=$(cat /tmp/ecr-prompt.txt)
 
 # Run all 3 in parallel
-curl -s http://localhost:5302/v1/chat/completions \
+curl -s "$LITELLM_URL/v1/chat/completions" \
+  -H "CF-Access-Client-Id: $CF_ID" \
+  -H "CF-Access-Client-Secret: $CF_SECRET" \
   -H "Authorization: Bearer $LITELLM_KEY" \
   -H "Content-Type: application/json" \
-  -d "$(jq -n --arg p "$PROMPT" '{model: "MODEL_ID", messages: [{role: "user", content: $p}], max_tokens: 5000}')" \
+  -d "$(jq -n --arg p "$PROMPT" '{model: "MODEL_ID", messages: [{role: "user", content: $p}], max_tokens: 5000, metadata: {tags: ["ecr"]}}')" \
   | jq -r '.choices[0].message.content'
 ```
 
+The CF Access credentials are available as environment variables (set in Claude Code settings).
 Use the Agent tool or parallel Bash calls to query all models simultaneously.
 
 ### Step 3: Synthesize Results
@@ -128,7 +135,11 @@ Before sending any prompt to external models:
 
 ## LiteLLM Configuration
 
-LiteLLM proxy runs on dev-server at `localhost:5302`.
+LiteLLM proxy runs on dock cluster, accessible at `https://litellm.screenfields.dev`.
+
+**Auth requires two layers:**
+1. CF Access headers: `CF-Access-Client-Id` + `CF-Access-Client-Secret` (from env vars)
+2. LiteLLM virtual key: `Authorization: Bearer <key>` (use ecr-reviews key from 1Password)
 
 Available top-tier models:
 ```
@@ -140,7 +151,7 @@ deepseek-v3.2    Fireworks (DeepSeek)
 o3               OpenAI (reasoning)
 ```
 
-Auth: `Authorization: Bearer $LITELLM_MASTER_KEY`
+ECR virtual key: `op://sf-platform/litellm/virtual-key/ecr-reviews/password`
 
 ## ECR Types
 
