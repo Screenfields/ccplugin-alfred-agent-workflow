@@ -1,5 +1,5 @@
 ---
-name: commit
+name: git-commit
 description: >
   Create git commits with proper messages. ALWAYS use this skill before creating any git
   commit — whether the user says "commit", "commit this", "/commit", asks to save changes,
