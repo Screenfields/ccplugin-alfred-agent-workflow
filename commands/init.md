@@ -6,13 +6,15 @@ Initialize alfred-agent configuration for the current project and optionally set
 
 ## Config Hierarchy
 
-Alfred uses a three-level config hierarchy (each level overrides the previous):
+Alfred uses a three-level config hierarchy:
 
 ```
-/etc/alfred/config.json        # Global (system-wide, CF-Access credentials)
-~/.config/alfred/config.json          # User (personal read-only token)
-<project>/.alfred/config.json  # Project (agent_id + write token if needed)
+/etc/alfred/config.json             # Global (system-wide, CF-Access credentials)
+~/.config/alfred/config.json        # User (personal secret-service token)
+<project>/.alfred/config.json       # Project (agent identity only)
 ```
+
+**Important:** Credentials are tied to the Linux user, not the project. All projects running as a user share that user's secret-service access level. Project config only contains the agent identity for messaging.
 
 ## Steps
 
@@ -31,7 +33,7 @@ If NOT_FOUND, ask user:
   - "Skip, just set up this project"
 
 If user chooses to set up user config:
-- Ask for their read-only secret-service token (from platform admin or sf-admin vault)
+- Ask for their secret-service token (from platform admin or sf-admin vault)
 - Create `~/.config/alfred/config.json`:
   ```json
   {
@@ -64,43 +66,20 @@ Ask user using AskUserQuestion:
   - "No, let me specify a different name"
 - If user chooses custom, ask for the name
 
-### 5. Determine Token Scope
-
-Ask user:
-- Question: "Does this project need write access to secret-service?"
-- Options:
-  - "No, use user's read-only token (default)"
-  - "Yes, I have a write token for this project"
-
-If write access needed:
-- Ask for the project-specific write token
-
-### 6. Create Config Directory and File
+### 5. Create Config Directory and File
 
 - Create `.alfred/` directory if not exists
 - Write `.alfred/config.json`:
 
-**If using user's read-only token (no project token):**
 ```json
 {
   "agent_id": "{chosen_name}"
 }
 ```
 
-**If project has its own write token:**
-```json
-{
-  "agent_id": "{chosen_name}",
-  "secret_service": {
-    "token": "{project_token}",
-    "scope": "write"
-  }
-}
-```
-
 - Set permissions: `chmod 600 .alfred/config.json`
 
-### 7. Update .gitignore
+### 6. Update .gitignore
 
 - Check if `.alfred/` is in .gitignore
 - If not, add it automatically:
@@ -108,7 +87,7 @@ If write access needed:
   echo ".alfred/" >> .gitignore
   ```
 
-### 8. Verify Global Config
+### 7. Verify Global Config
 
 Check if `/etc/alfred/config.json` exists:
 ```bash
@@ -120,7 +99,7 @@ If NOT_FOUND, warn user:
 - "CF-Access credentials are required to reach secret-service"
 - "Contact platform admin to set up global config on this host"
 
-### 9. Confirm Success
+### 8. Confirm Success
 
 Display summary:
 ```
@@ -134,7 +113,7 @@ Config hierarchy:
 You can now:
   - Check messages: /alfred-agent:check-messages
   - Send messages: Use agent-messaging MCP tools
-  - Access secrets: Use secret-service MCP tools (if configured)
+  - Access secrets: Use secret-service MCP tools (via user credentials)
 ```
 
 ## Example Output
@@ -147,12 +126,6 @@ Detected project: secret-service (from git remote)
 
 Use 'secret-service' as this project's agent identity?
 > Yes, use secret-service
-
-Does this project need write access to secret-service?
-> Yes, I have a write token for this project
-
-Enter your project write token:
-> ********
 
 Created .alfred/config.json
 Added .alfred/ to .gitignore
@@ -169,6 +142,15 @@ You can now:
   - Send messages: Use agent-messaging MCP tools
   - Access secrets: Use secret-service MCP tools
 ```
+
+## Different Permission Levels
+
+If a project needs elevated permissions (e.g., write access to secret-service):
+1. Create a dedicated Linux user for that service
+2. Set up that user's `~/.config/alfred/config.json` with appropriate token
+3. Run the service as that user
+
+This maintains clear permission boundaries without project-level token management.
 
 ## Reference
 
