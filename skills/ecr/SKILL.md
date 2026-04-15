@@ -45,34 +45,41 @@ Query multiple top-tier AI models via LiteLLM for independent architectural feed
 
 ## How to Run an ECR
 
-### Step 1: Prepare the Prompt
+### Step 1: Write the Prompt (with real names)
 
-Write a clear prompt with:
+Draft the prompt with real names first — this makes it easier to write correctly:
 - **Context**: What system/platform, current state, constraints
 - **Proposal**: The design or decision to review
 - **Specific questions**: What you want feedback on (numbered)
-- **Anonymize**: Replace company names, domains, emails with generic placeholders
 
-Template:
-```
-You are a senior [role] with expertise in [domain]. Please provide critical, constructive feedback.
+### Step 2: Anonymize (MANDATORY — do NOT skip)
 
-## Context
-[Current system state, constraints, scale]
+**This step is a hard blocker. NEVER send the prompt to models without completing it.**
 
-## Proposal
-[The design to review]
+Apply these replacements consistently throughout the entire prompt:
 
-## Questions
-1. Is this approach sound?
-2. Are there blocking issues?
-3. What improvements before implementation?
-4. Rate: APPROVE / APPROVE WITH CONDITIONS / REQUEST CHANGES
+| Real | Replacement |
+|------|-------------|
+| Company/org names | `acme`, `example` |
+| `*.screenfields.dev` | `*.platform.dev` |
+| `*.screenfields.net` | `*.platform.net` |
+| `*.screenfields.app` | `*.platform.app` |
+| `*.screenfields.ai` | `*.platform.ai` |
+| `*.screenfields.info` | `*.platform.info` |
+| `*.hilltribe.nl` | `*.gaming.nl` |
+| Email addresses | `user@example.com` |
+| 1Password item paths | Generic names (`db-credentials/env/app`) |
+| API keys, tokens, credentials | Remove entirely |
+| GitHub org/user names | `acme`, `user` |
+| Server hostnames (dock, prod, pve, pbs) | `dev-cluster`, `prod-cluster`, `backup-server` |
+| IP addresses | `10.0.0.x`, `192.168.0.x` |
 
-Be concise and direct.
-```
+**Keep intact:** K8s resource types, YAML structure, architecture patterns, port numbers, tool names, version numbers.
 
-### Step 2: Query Models in Parallel
+**Verification:** After anonymizing, grep the prompt for these strings. If ANY match, fix before proceeding:
+`screenfields`, `hilltribe`, `jheuvel`, `jochem`, `Screenfields`, any real IP address, any 1Password path with vault names (`sf-dev`, `sf-prod`, `sf-platform`).
+
+### Step 3: Query Models in Parallel
 
 ```bash
 # LiteLLM runs on dock, accessible via CF Access
@@ -95,7 +102,7 @@ curl -s "$LITELLM_URL/v1/chat/completions" \
 The CF Access credentials are available as environment variables (set in Claude Code settings).
 Use the Agent tool or parallel Bash calls to query all models simultaneously.
 
-### Step 3: Synthesize Results
+### Step 4: Synthesize Results
 
 Present results as:
 1. **Consensus**: What all models agree on
@@ -124,14 +131,7 @@ Format:
 
 ## Anonymization Rules
 
-Before sending any prompt to external models:
-- Replace company/org names with `example`, `acme`, etc.
-- Replace real domain names (*.screenfields.dev) with `*.example.dev`
-- Replace email addresses with `user@example.com`
-- Replace 1Password item paths with generic names
-- Remove API keys, tokens, and credentials
-- Replace GitHub org/user names with generic names
-- Keep technical details (K8s resources, YAML structure, architecture patterns) intact
+See Step 2 above. Anonymization is part of the flow, not an optional checklist.
 
 ## LiteLLM Configuration
 
@@ -186,8 +186,9 @@ ECR virtual key: `op://sf-platform/litellm/virtual-key/ecr-reviews/password`
 
 **Full ECR flow:**
 1. User provides design document or decision
-2. Agent prepares anonymized prompt with context + questions
-3. Agent queries 3 models in parallel via LiteLLM
-4. Agent synthesizes results into consensus + conditions
-5. Agent presents actionable summary to user
-6. If approved: update document with ECR decisions log
+2. Agent writes prompt with real names
+3. Agent anonymizes prompt (Step 2 — MANDATORY, verify with grep)
+4. Agent queries 3 models in parallel via LiteLLM
+5. Agent synthesizes results into consensus + conditions
+6. Agent presents actionable summary to user
+7. If approved: update document with ECR decisions log
