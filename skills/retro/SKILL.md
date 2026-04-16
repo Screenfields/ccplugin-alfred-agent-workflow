@@ -41,22 +41,36 @@ For each finding, determine:
 | **New capability** | Memory / baseline docs | "ArgoCD API is accessible from dev-server" |
 | **Instruction improvement** | CLAUDE.md or skill files | "Instructions should say to use rancher/k3s image" |
 
-### Step 3: Abstract and Generalize
+### Step 3: Abstract, Generalize, and Assign a Concrete Action
 
 For each learning, abstract it:
 - **Bad**: "Don't use bitnami/kubectl:1.31 because the tag doesn't exist"
 - **Good**: "Always verify image tags exist before using them. Check the registry, don't assume version tags follow a pattern"
 
-- **Bad**: "Use 'production' not 'prod' for the destination name"
-- **Good**: "Always verify naming conventions by checking the actual resource (cluster secrets, labels, etc.) rather than assuming"
+Then assign EXACTLY ONE concrete action. Every finding MUST result in a change to one of:
 
-### Step 4: Apply Updates
+| Action type | What changes | Example |
+|-------------|-------------|---------|
+| **CLAUDE.md rule** | Add/update rule in project or global CLAUDE.md | "Add rule: always use ArgoCD API before asking user for kubectl" |
+| **Skill update** | Modify a SKILL.md file | "Update ECR skill to auto-fetch CF Access headers" |
+| **Doc update** | Modify a baseline doc, onboarding doc, or checklist | "Add service selector pitfall to deployment checklist" |
+| **Template update** | Modify a scaffold/devbox template | "Add component:app label to default deployment template" |
+| **Memory rule** | Add feedback memory (only if not covered by above) | "Save as feedback: timestamps in local time" |
 
-1. **Update CLAUDE.md** for rules that prevent recurring mistakes
-2. **Update memory files** for project-specific context
-3. **Update baseline docs** for system state changes
-4. **Update onboarding checklists** for process improvements
-5. **Commit and push** all changes
+**No finding without an action.** If you can't identify a concrete action, ask the user what should change. Don't drop findings — every correction or failure has a root cause that can be prevented.
+
+### Step 4: Execute All Actions
+
+For each finding, execute the concrete action immediately:
+
+1. Make the actual file change (Edit/Write)
+2. Verify the change is correct
+3. Mark it as done
+
+Do NOT defer actions to "later" or create issues for things that can be done now. Only create issues for actions that require infrastructure changes, user intervention, or significant implementation work.
+
+After all actions are executed:
+5. **Commit and push** all changes in a single commit
 
 ### Step 5: Prepare Next Session
 
