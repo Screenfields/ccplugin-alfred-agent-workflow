@@ -54,6 +54,8 @@ Ensure memory has a clear "pick up here" for the next session:
 - Any open decisions or blockers
 - Reference the relevant memory file (e.g., `memory/project_next_steps_april.md`)
 
+**Every open action must be a GitHub Issue.** Before landing, verify that all next steps, pending tasks, and follow-ups have a corresponding GitHub Issue with a priority label. If an action only exists in memory or conversation but not as an issue, create it now. The next session should be able to start by looking at the issue list — not by reading memory files to discover untracked work.
+
 ### Step 5: Confirm to User
 
 Report:
