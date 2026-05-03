@@ -46,21 +46,45 @@ git status                    # Must show "nothing to commit, working tree clean
 git log --oneline -3          # Show recent commits for confirmation
 ```
 
-### Step 4: Next Steps Summary
+### Step 4: Update next-steps memory (canonical file)
 
-Ensure memory has a clear "pick up here" for the next session:
-- What was completed this session
-- What to work on next
-- Any open decisions or blockers
-- Reference the relevant memory file (e.g., `memory/project_next_steps_april.md`)
+Write the full end-of-session next-steps memory to the **canonical** filename:
 
-**Every open action must be a GitHub Issue.** Before landing, verify that all next steps, pending tasks, and follow-ups have a corresponding GitHub Issue with a priority label. If an action only exists in memory or conversation but not as an issue, create it now. The next session should be able to start by looking at the issue list — not by reading memory files to discover untracked work.
+```
+~/.claude/projects/<project-slug>/memory/project_next_steps.md
+```
+
+Do NOT use a dated suffix (`project_next_steps_april.md`, etc.). Dated snapshots cause stale-file bugs in SessionStart hooks that hardcode older filenames — a real failure mode that has bitten previous sessions. The hook should be reading the rolling canonical file; this skill's responsibility is to keep that file fresh.
+
+The file MUST include, at minimum:
+
+- **A session-boundary continuity banner at the top** instructing future-you to verify the source path + mtime printed by the SessionStart hook against the current canonical filename. If the hook surfaces a non-canonical or stale-mtime file, STOP and reconcile against the GitHub Issues queue + recent git log before treating any item as current.
+- A clear "what landed this session" summary (PRs merged by repo, issues changed state)
+- A clear "what's next" pick-up list, ranked by priority and ownership (yours, user's, other agents')
+- Pending external/user actions explicitly called out (e.g., dashboard edits, manual approvals)
+- Cross-references to baseline docs and key 1Password secrets touched
+
+The frontmatter `name` and `description` should reflect the current session's outcome. Re-running `/land` should produce a fresh `mtime` on this file every time — that mtime is the SessionStart hook's primary freshness signal.
+
+**Every open action must be a GitHub Issue.** Before landing, verify that all next steps, pending tasks, and follow-ups have a corresponding GitHub Issue with a priority label. If an action only exists in memory or conversation but not as an issue, create it now. The memory file is for handoff context (what landed, what's next at a glance, what's the operational state); the GitHub Issues queue is the authoritative work list.
+
+### Step 4a: Verify SessionStart hook will surface the right file
+
+Before declaring the landing complete, confirm the chain that future-you will see on `/clear`:
+
+1. Read the SessionStart hook script (`.claude/hooks/session-start-status.sh` or equivalent) and confirm it points at the **canonical** `project_next_steps.md`, not a dated snapshot.
+2. Check the file's mtime is from this session (`stat -c '%y' <path>`).
+3. If either check fails, fix the hook OR rewrite the file before clearing — otherwise the next session will resume from stale context.
+
+This step is the durable defense against the cross-session-state-loss failure mode (alfred-platform#275 originating incident).
 
 ### Step 5: Confirm to User
 
 Report:
 - Retro completed (summary of learnings captured)
 - All changes committed and pushed
+- Next-steps memory file path + mtime (proves the file is fresh)
+- SessionStart hook verification result (will surface the canonical file)
 - Next session starting point
 
 ## Output Format
@@ -75,9 +99,15 @@ Report:
 - alfred-platform: clean, pushed (commit: {sha})
 - gitops changes: [list any API-pushed changes]
 
+### Next-steps memory
+- File: memory/project_next_steps.md
+- Mtime: {timestamp from this session}
+- SessionStart hook verified: [✓ canonical file / ✗ needs fix]
+
 ### Next Session
 - Pick up: [topic]
 - Open decisions: [list]
+- Pending external actions (user-side): [list]
 
 Ready for context clear.
 ```
