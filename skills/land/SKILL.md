@@ -68,6 +68,10 @@ The frontmatter `name` and `description` should reflect the current session's ou
 
 **Every open action must be a GitHub Issue.** Before landing, verify that all next steps, pending tasks, and follow-ups have a corresponding GitHub Issue with a priority label. If an action only exists in memory or conversation but not as an issue, create it now. The memory file is for handoff context (what landed, what's next at a glance, what's the operational state); the GitHub Issues queue is the authoritative work list.
 
+**Also verify that all open issues in GitHub are actually open and not already done.** Issues silently staying open after their work has shipped is a recurring failure mode — it inflates the queue, hides what's actually pending, and confuses future sessions. For every issue this session's work landed against (PR merged, decision made, scope clarified), explicitly close the issue with an evidence comment linking to the PR(s) and any baseline doc updates. Do NOT rely on `Closes #N` in commit messages alone — the close-with-evidence-comment is the durable artifact that proves to a future reader why the issue closed.
+
+Concretely, for each issue mentioned in this session's work or this session's PR descriptions, run `gh issue view N` and ask: is this still open? If yes, was the work that resolves it already done this session? If yes, close it with a multi-line comment containing PR refs + acceptance-criteria checkmarks + any deferred sub-scopes (which become their own issues per the rule above).
+
 ### Step 4a: Verify SessionStart hook will surface the right file
 
 Before declaring the landing complete, confirm the chain that future-you will see on `/clear`:
