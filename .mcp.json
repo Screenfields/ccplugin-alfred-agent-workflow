@@ -2,7 +2,7 @@
   "mcpServers": {
     "agent-messaging": {
       "type": "http",
-      "url": "https://agent-messaging.screenfields.dev/mcp/",
+      "url": "${AGENT_MESSAGING_URL:-https://agent-messaging.screenfields.dev/mcp/}",
       "headers": {
         "CF-Access-Client-Id": "${CF_ACCESS_CLIENT_ID}",
         "CF-Access-Client-Secret": "${CF_ACCESS_CLIENT_SECRET}",
