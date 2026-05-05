@@ -26,7 +26,7 @@ This plugin requires the `agent-messaging` MCP server to be configured in your p
   "mcpServers": {
     "agent-messaging": {
       "type": "http",
-      "url": "https://agent-messaging.screenfields.dev/mcp/",
+      "url": "${AGENT_MESSAGING_URL:-https://agent-messaging.screenfields.dev/mcp/}",
       "headers": {
         "CF-Access-Client-Id": "<cloudflare-access-id>",
         "CF-Access-Client-Secret": "<cloudflare-access-secret>",
