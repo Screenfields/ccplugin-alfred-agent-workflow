@@ -82,10 +82,9 @@ Apply these replacements consistently throughout the entire prompt:
 ### Step 3: Query Models in Parallel
 
 ```bash
-# LITELLM_URL: defaults to dock tier; set the env var to override per cluster
-# (e.g. https://litellm.screenfields.net for the prod platform tier on Hetzner —
-# see alfred-platform#306). Defaulted via shell parameter expansion.
-LITELLM_URL="${LITELLM_URL:-https://litellm.screenfields.dev}"
+# LITELLM_URL: defaults to prod platform tier; set the env var to override
+# (e.g. for a non-default cluster). Defaulted via shell parameter expansion.
+LITELLM_URL="${LITELLM_URL:-https://litellm.screenfields.net}"
 LITELLM_KEY=$(op read "op://sf-platform/litellm/virtual-key/ecr-reviews/password" 2>/dev/null || echo "$LITELLM_MASTER_KEY")
 CF_ID="$CF_ACCESS_CLIENT_ID"
 CF_SECRET="$CF_ACCESS_CLIENT_SECRET"
@@ -137,7 +136,7 @@ See Step 2 above. Anonymization is part of the flow, not an optional checklist.
 
 ## LiteLLM Configuration
 
-LiteLLM proxy is reachable via the `LITELLM_URL` env var. Default if unset: `https://litellm.screenfields.dev` (dock tier). Override to `https://litellm.screenfields.net` for the prod platform tier (post-migration per alfred-platform#306).
+LiteLLM proxy is reachable via the `LITELLM_URL` env var. Default if unset: `https://litellm.screenfields.net` (prod platform tier). Override only if running against a non-default cluster.
 
 **Auth requires two layers:**
 1. CF Access headers: `CF-Access-Client-Id` + `CF-Access-Client-Secret` (from env vars)
