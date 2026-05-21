@@ -86,21 +86,16 @@ Apply these replacements consistently throughout the entire prompt:
 # (e.g. for a non-default cluster). Defaulted via shell parameter expansion.
 LITELLM_URL="${LITELLM_URL:-https://litellm.screenfields.net}"
 LITELLM_KEY=$(op read "op://sf-platform/litellm/virtual-key/ecr-reviews/password" 2>/dev/null || echo "$LITELLM_MASTER_KEY")
-CF_ID="$CF_ACCESS_CLIENT_ID"
-CF_SECRET="$CF_ACCESS_CLIENT_SECRET"
 PROMPT=$(cat /tmp/ecr-prompt.txt)
 
 # Run all 3 in parallel
 curl -s "$LITELLM_URL/v1/chat/completions" \
-  -H "CF-Access-Client-Id: $CF_ID" \
-  -H "CF-Access-Client-Secret: $CF_SECRET" \
   -H "Authorization: Bearer $LITELLM_KEY" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg p "$PROMPT" '{model: "MODEL_ID", messages: [{role: "user", content: $p}], max_tokens: 5000, metadata: {tags: ["ecr"]}}')" \
   | jq -r '.choices[0].message.content'
 ```
 
-The CF Access credentials are available as environment variables (set in Claude Code settings).
 Use the Agent tool or parallel Bash calls to query all models simultaneously.
 
 ### Step 4: Synthesize Results
@@ -138,9 +133,9 @@ See Step 2 above. Anonymization is part of the flow, not an optional checklist.
 
 LiteLLM proxy is reachable via the `LITELLM_URL` env var. Default if unset: `https://litellm.screenfields.net` (prod platform tier). Override only if running against a non-default cluster.
 
-**Auth requires two layers:**
-1. CF Access headers: `CF-Access-Client-Id` + `CF-Access-Client-Secret` (from env vars)
-2. LiteLLM virtual key: `Authorization: Bearer <key>` (use ecr-reviews key from 1Password)
+**Requires platform-routing context.** The skill is only usable from machines where `litellm.screenfields.net` resolves through the internal-routing path (in-cluster pods via CoreDNS catalog, or platform machines with the equivalent local resolver override). On those hosts the public CF gate is bypassed and the request reaches LiteLLM directly over the tailnet. From environments without that override the request hits public CF and is rejected.
+
+**Auth:** LiteLLM virtual key via `Authorization: Bearer <key>` (use the ecr-reviews key from 1Password).
 
 Available top-tier models:
 ```
