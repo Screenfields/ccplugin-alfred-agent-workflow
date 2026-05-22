@@ -11,11 +11,11 @@ This is a Claude Code plugin providing agent workflow utilities for the Alfred p
 ```
 ccplugin-alfred-agent-workflow/
 ├── .claude-plugin/
-│   └── plugin.json          # Plugin metadata (name: aawf)
+│   └── plugin.json          # Plugin metadata (name: alfred-agent)
 ├── commands/
-│   ├── check-messages.md    # /aawf:check-messages
-│   ├── show-inbox.md        # /aawf:show-inbox
-│   └── show-threads.md      # /aawf:show-threads
+│   ├── check-messages.md    # /alfred-agent:check-messages
+│   ├── show-inbox.md        # /alfred-agent:show-inbox
+│   └── show-threads.md      # /alfred-agent:show-threads
 ├── skills/
 │   └── messaging/
 │       └── SKILL.md         # General messaging context
@@ -25,13 +25,13 @@ ccplugin-alfred-agent-workflow/
 
 ## Commands vs Skills
 
-- **Commands** (`commands/*.md`) → User-invoked via `/aawf:*` menu
+- **Commands** (`commands/*.md`) → User-invoked via `/alfred-agent:*` menu
 - **Skills** (`skills/*/SKILL.md`) → Context Claude can use automatically
 
 ## Naming Convention
 
-- Plugin name: `aawf` (Alfred Agent WorkFlow)
-- Commands: `aawf:check-messages`, `aawf:show-inbox`, `aawf:show-threads`
+- Plugin name: `alfred-agent`
+- Commands: `alfred-agent:check-messages`, `alfred-agent:show-inbox`, `alfred-agent:show-threads`
 - Command filenames use hyphens: `check-messages.md`
 
 ## Dependencies
@@ -51,7 +51,7 @@ This plugin is published via the alfred-cc-tools marketplace:
 
 1. Ensure changes are committed and pushed to this repo
 2. Marketplace entry exists in `alfred-cc-tools/.claude-plugin/marketplace.json`
-3. Users install via: `/plugin install alfred-agent-workflow@alfred-cc-tools`
+3. Users install via: `/plugin install alfred-agent@alfred-cc-tools`
 
 ## Development
 
