@@ -62,3 +62,8 @@ Requires `agent-messaging` MCP server configured in `.mcp.json` with:
 - CF-Access headers for Cloudflare Access
 - Authorization bearer token
 - X-Agent-ID header
+
+## Discipline reminders
+
+- **Namespace disambiguation.** When referencing cross-system artifact names (PR numbers, GitHub App identities, env names, phase labels) in a message, prefix with system+context at first mention — e.g. "PM PR #233" not "PR #233", "alfred-lead-agent App" not "the App" (Doctrine 03).
+- **Scope filter.** When sending a coordination message, filter to cross-team-relevant content only — don't leak internal project work into a coordination channel (Doctrine 02).
