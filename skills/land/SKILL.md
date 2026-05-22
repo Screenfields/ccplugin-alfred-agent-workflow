@@ -69,6 +69,8 @@ For every issue this session's work touched (any issue referenced in commits, PR
 
 Do NOT rely on `Closes #N` keywords in commit messages alone — those silently fail when PRs squash-merge differently than expected, when work spans multiple PRs, or when commit messages get edited. The close-with-evidence-comment is the durable artifact that proves to a future reader why the issue closed.
 
+Before marking any issue closed, re-verify the actual merge state via `gh pr view {N}` — do not rely on memory or "Closes #N" keywords alone; squash merges may not trigger keyword closes (Doctrine 01 + 07).
+
 #### Why no memory file write step
 
 Future sessions read GitHub Issues to know what's next. They don't read memory files for forward-looking content. Memory files in this project's `memory/` directory are for: doctrine context, identity history, retrospective learnings, gotcha references, and other persistent knowledge that doesn't fit the issue-tracker model. If you find yourself wanting to write a "next steps" memory file, that's a signal to file issues instead.

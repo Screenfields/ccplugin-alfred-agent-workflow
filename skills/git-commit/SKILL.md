@@ -66,3 +66,8 @@ EOF
 ## Step 6: Verify
 
 Run `git status` to confirm the commit succeeded. Report the result briefly — do not summarize what you just did, the user can read the diff.
+
+## Rules
+
+- Never commit a partial fix. If this commit corrects a pattern, grep for analogous uses in the same scope and fix siblings in the same commit or a follow-on in the same session — leaving siblings unaddressed is a partial correction (Doctrine 05).
+- Follow Steps 1-6 in order. No exceptions.

@@ -28,6 +28,8 @@ Before continuing, search the codebase for related work:
 
 Present what you found: "I found these existing patterns: [X]. Should we follow the same approach?"
 
+- **Verify live state before designing.** Run the cheapest ground-truth query (gh api, kubectl get, git log) to confirm existing infrastructure before proposing designs that depend on it. A design built on an unverified state claim is wrong when that claim is stale (Doctrine 01).
+
 ## Step 2: Cover all dimensions
 
 Work through each section. State "N/A" with a reason if one doesn't apply — don't skip silently.
