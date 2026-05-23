@@ -53,6 +53,14 @@ This plugin is published via the alfred-cc-tools marketplace:
 2. Marketplace entry exists in `alfred-cc-tools/.claude-plugin/marketplace.json`
 3. Users install via: `/plugin install alfred-agent-workflow@alfred-cc-tools`
 
+## Session startup checklist
+
+At the start of every session using this plugin, agents MUST:
+
+1. **Run `/alfred-agent:check-messages` unconditionally** — do NOT rely solely on the Monitor (inbox-watcher) to surface unread messages. The Monitor is a best-effort real-time channel that can fail silently (process crash, stale log, crash loop). `get_messages` is the reliable baseline. See `commands/check-messages.md` for full session-start mandate.
+
+2. **Review any watcher-liveness warnings** emitted by `check-messages`. A `⚠ WATCHER POTENTIALLY UNHEALTHY` warning means messages may be sitting undelivered even when the inbox appears empty.
+
 ## Development
 
 When modifying commands/skills:
