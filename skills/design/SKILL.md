@@ -122,6 +122,81 @@ If there are open questions or significant design decisions, ask: "Want to run a
 
 Recommend ECR when multiple valid approaches exist or the technology is unfamiliar. Skip if the design follows an established pattern exactly.
 
+## Step 4.5: Coupled-ADR review gate
+
+Before declaring the design complete, count how many ADRs (Decision Log entries) were produced in this session.
+
+**Single-ADR bypass:** If the Decision Log contains exactly one entry, skip this gate entirely — no review pass required, proceed directly to Step 5.
+
+**When ≥2 ADRs are present**, check for coupling before proceeding:
+
+### Coupling detection heuristic
+
+Two ADRs are coupled if either condition holds:
+
+1. **Cross-reference:** one ADR entry's Decision or Rationale text explicitly names or references another ADR by number, topic, or component name.
+2. **Shared boundary:** both ADRs touch the same component, interface, or contract (e.g., two decisions that both affect the API shape, the same database schema, or the same deployment unit).
+
+If no coupling is detected among the ≥2 ADRs, document that finding ("ADRs are independent — gate skipped") and proceed to Step 5.
+
+If coupling is detected, **the following mandatory review pass is required before the design is marked complete.**
+
+### Mandatory critical-review pass (coupled ADRs only)
+
+**a. `file_refs_verified` lint**
+
+Collect every file path referenced anywhere in the ADRs (and in the design document). For each path run:
+
+```bash
+ls <path>   # or: find . -path "<path>" -maxdepth 5
+```
+
+Produce a table:
+
+| Referenced path | Exists? |
+|-----------------|---------|
+| `docs/baseline/foo.md` | yes / NO |
+
+Any missing path is a blocking finding that must be resolved or explicitly deferred before the design is marked complete.
+
+**b. Critical-review agent pass**
+
+Dispatch a reviewer using the Agent tool. The reviewer must evaluate the coupled ADRs across three angles:
+
+- **Architecture** — are the coupled decisions internally consistent? Do they create a hidden dependency or circular constraint?
+- **Security / correctness** — does the coupling introduce an attack surface, a race, or a correctness gap that neither ADR addresses alone?
+- **Operability** — can the decisions be deployed, rolled back, and debugged independently, or does coupling create an operational blast radius?
+
+Suggested Agent prompt:
+
+```
+You are a critical reviewer. Review the following coupled ADRs:
+
+[paste ADR entries]
+
+Evaluate across three angles: architecture consistency, security/correctness, operability.
+For each finding, state:
+- Angle (architecture | security | operability)
+- Severity (blocking | advisory)
+- Finding (one sentence)
+- Suggested resolution (one sentence)
+
+Return a structured findings list only. No preamble.
+```
+
+**c. Structured findings list and dispositions**
+
+Collect all findings (from the `file_refs_verified` lint and the Agent reviewer) into a single list:
+
+| # | Source | Angle | Severity | Finding | Disposition |
+|---|--------|-------|----------|---------|-------------|
+| 1 | file_refs_verified | — | blocking | `docs/baseline/foo.md` does not exist | addressed / deferred-to-PR |
+| 2 | critical-review | architecture | advisory | ADR-1 and ADR-3 both own the API contract with no clear precedence | addressed / deferred-to-PR |
+
+Each finding requires an explicit disposition of **"addressed"** (fix applied now) or **"deferred-to-PR"** (tracked as a GitHub Issue or PR comment) before the design may be marked complete. A finding may not remain blank.
+
+Only after all findings have dispositions is the design considered complete.
+
 ## Step 5: Prerequisites
 
 Before any implementation, present this checklist and complete each item:
