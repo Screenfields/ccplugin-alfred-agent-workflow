@@ -71,6 +71,32 @@ If a probe changes system state, note it explicitly.
 
 ## Step 5 — Conclude or escalate
 
+### Escalation thresholds (check before each probe)
+
+Stop immediately and escalate if either threshold is breached:
+
+- **Side-effects ≥ 5** — you have created 5 or more side-effects during this session
+- **30+ minutes elapsed without progress** — 30 or more minutes have passed since the last confirmed or eliminated hypothesis
+
+**Definition of side-effect** — any of the following counts as one side-effect:
+- Created a K8s resource (Pod, Deployment, Job, Namespace, Secret, etc.)
+- Scaffolded a repo or directory structure outside the working directory
+- Made a persistent host config change (modified `/etc/`, systemd unit, cron entry)
+- Created a `/tmp` artifact that will outlive the current troubleshoot loop
+- Sent an agent-message to another agent
+
+**Definition of progress** — a hypothesis confirmed OR eliminated by evidence:
+- "Checked logs, error X is NOT present → hypothesis A eliminated" = progress
+- "Reproduced the failure with input Y → hypothesis B confirmed" = progress
+- Spinning in place, retrying the same command, or generating new hypotheses without confirming/eliminating old ones does NOT count as progress
+
+**On threshold breach:**
+1. Stop immediately — do not take further actions
+2. Summarise current state: hypotheses tested, which were confirmed, which were eliminated
+3. List all side-effects created so far (for cleanup)
+4. Escalate to user before continuing:
+   > "Escalation threshold reached. Summary: [state]. Side-effects: [list]. Please review before I continue."
+
 ### If root cause confirmed
 
 - State it clearly: "Root cause: ..."
@@ -102,3 +128,4 @@ Leave the system in the same state it was in before diagnosis began (or better, 
 - **Narrow probes only** — test one hypothesis at a time
 - **Conclude-or-escalate** — do not leave the user with an open-ended "maybe it's X"
 - **Note state changes** — if a probe changes system state, say so explicitly
+- **Escalate at threshold** — side-effects ≥ 5 or 30+ min without progress: stop, summarise, list side-effects, escalate before continuing
