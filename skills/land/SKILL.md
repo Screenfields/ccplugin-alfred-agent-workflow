@@ -13,6 +13,15 @@ allowed-tools: Read, Edit, Write, Glob, Grep, Bash, Agent, AskUserQuestion, Skil
 
 Full session close-out: capture learnings, commit everything, prepare for next session.
 
+## Flags
+
+| Flag | Effect |
+|------|--------|
+| *(none)* | Default mode — inline `/retro` runs as Step 1 |
+| `--mode=team` | Skip inline `/retro`; note that team retro is in progress async; proceed directly to health-check then git housekeeping + issue reconciliation |
+
+Flags compose: `--mode=team` and the health-check gate (Step 0) both apply simultaneously regardless of which mode is active.
+
 ## When to Use
 
 - User says "land", "land the plane", "wrap up", "close out"
@@ -21,13 +30,108 @@ Full session close-out: capture learnings, commit everything, prepare for next s
 
 ## Process
 
-### Step 1: Run Retrospective
+### Step 0: Health-Check Gate (always runs, regardless of mode)
 
-Execute `/retro` first — capture corrections, discoveries, and apply updates.
+Before proceeding further, assert the following three conditions. If any assertion fails, **surface the specific failure and recovery steps immediately and do NOT continue with land**. Do not silently skip a failing assertion.
+
+#### Assertion 1 — Armed Monitor tasks produced recent activity or have a documented quiet reason
+
+For each Monitor task that was armed during this session:
+
+1. Determine when the Monitor was last armed (check transcript / task list).
+2. Check whether it produced ≥1 event in the last hour.
+   - If yes: assertion passes for this task.
+   - If no: a documented reason why the monitor is legitimately quiet (e.g., "no deployments were triggered", "inbox-watcher only fires on incoming messages — none expected") must be noted.
+3. If a Monitor is silent with no documented reason, **fail this assertion**.
+
+Failure diagnosis template:
+```
+HEALTH CHECK FAILURE — Monitor silent with no documented reason
+  Monitor: <task description>
+  Armed at: <time>
+  Last event: <time or "none recorded">
+Recovery: document why the monitor is legitimately quiet, or re-arm the monitor
+  and confirm it fires on a known event, then re-run /land.
+```
+
+#### Assertion 2 — Inbox-watcher process alive and events.log recently modified
+
+Run the following checks:
+
+```bash
+# Check that the watcher process is alive
+pgrep -f "alfred-inbox-watcher" && echo "watcher: alive" || echo "watcher: DEAD"
+
+# Check last modification time of events.log
+stat /workspace/.alfred/events.log 2>/dev/null \
+  && find /workspace/.alfred/events.log -mmin -10 -print \
+  || echo "events.log: NOT FOUND or NOT MODIFIED in last 10 min"
+```
+
+Assertion passes if:
+- The watcher process is alive, AND
+- `/workspace/.alfred/events.log` exists and was modified within the last 10 minutes.
+
+Failure diagnosis template:
+```
+HEALTH CHECK FAILURE — Watcher process or events.log stale
+  Watcher alive: <yes/no>
+  events.log last modified: <timestamp or "not found">
+Recovery:
+  - If watcher dead: restart with `alfred-inbox-watcher-hook.sh` or re-arm the
+    SessionStart hook and reopen the session.
+  - If events.log stale (>10 min): check whether any monitored process wrote
+    events; if the project truly has no events, document that as the quiet reason
+    and re-run /land.
+```
+
+#### Assertion 3 — No stale pendingOperation records
+
+This assertion is **conditional on the project stack**. Apply it only if the project uses a system that tracks `pendingOperation` records (e.g., a task queue, job scheduler, or platform workflow engine with operation-state storage).
+
+- If the project stack does not use such a system: mark this assertion as **N/A** and note "no pendingOperation system in this stack" in the health-check summary.
+- If the project stack does use such a system: query the relevant store and confirm no records have been in a pending/in-progress state beyond the expected threshold (threshold is project-specific; use 30 minutes as a safe default if no project-specific value is defined).
+
+Failure diagnosis template:
+```
+HEALTH CHECK FAILURE — Stale pendingOperation records found
+  Records found: <count>
+  Oldest record age: <duration>
+  Threshold: <threshold>
+Recovery: investigate why those operations are stuck, resolve or manually close
+  them, then re-run /land.
+```
+
+#### Health-check summary
+
+After evaluating all three assertions, output a compact summary before proceeding:
+
+```
+## Health-Check Gate
+- Monitor activity: PASS | FAIL | (description)
+- Watcher + events.log: PASS | FAIL | (description)
+- Stale pendingOperations: PASS | FAIL | N/A | (description)
+```
+
+If all assertions pass (or are N/A), proceed to Step 1. If any assertion fails, stop here and surface recovery steps.
+
+---
+
+### Step 1: Run Retrospective (skipped in --mode=team)
+
+**Default mode:** Execute `/retro` — capture corrections, discoveries, and apply updates.
+
+**`--mode=team`:** Skip inline `/retro`. Output the following notice instead and proceed directly to Step 2:
+
+```
+NOTE: --mode=team active — team retro is in progress async. Retro step skipped.
+When the team retro output is finalised, it may produce additional GitHub Issues;
+those should be filed against this repo at that time.
+```
 
 ### Step 2: Git Housekeeping
 
-After the retro, ensure ALL changes are committed and pushed:
+After the retro (or retro-skip notice), ensure ALL changes are committed and pushed:
 
 ```bash
 git status                    # Check for uncommitted changes
@@ -78,7 +182,8 @@ Future sessions read GitHub Issues to know what's next. They don't read memory f
 ### Step 5: Confirm to User
 
 Report:
-- Retro completed (summary of learnings captured)
+- Health-check gate result (pass/fail per assertion)
+- Retro completed (summary of learnings captured) — or retro-skip notice if `--mode=team`
 - All changes committed and pushed
 - Issues filed this session (count + numbers)
 - Issues closed this session with evidence comments (count + numbers)
@@ -89,8 +194,15 @@ Report:
 ```
 ## Landing Complete — {date}
 
+### Health-Check Gate
+- Monitor activity: PASS | (description)
+- Watcher + events.log: PASS | (description)
+- Stale pendingOperations: PASS | N/A | (description)
+
 ### Retro
 [summary from /retro — corrections, discoveries, updates applied]
+— OR —
+[NOTE: --mode=team — team retro in progress async; retro step skipped]
 
 ### Git Status
 - alfred-platform: clean, pushed (commit: {sha})
