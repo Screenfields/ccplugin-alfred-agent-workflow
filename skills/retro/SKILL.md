@@ -72,13 +72,21 @@ Do NOT defer actions to "later" or create issues for things that can be done now
 After all actions are executed:
 5. **Commit and push** all changes in a single commit
 
-### Step 5: Prepare Next Session
+### Step 5: File GitHub Issues for Outstanding Actions
 
-Write a clear "next steps" summary in memory so the next session knows:
-- What was completed
-- What's in progress
-- What to pick up next
-- Any open decisions
+**Do NOT write forward-looking content to memory files.** GitHub Issues are the only forward-looking source of truth (see `alfred-agent:land`, Step 4).
+
+For every outstanding action, deferred sub-scope, follow-up, or open decision that was not completed this session:
+
+1. Check whether a GitHub Issue already exists for it
+2. If not, file one now — with a clear title, body with context and acceptance criteria, and a priority label (P1–P4)
+3. Cross-reference related PRs or issues
+
+**What stays in memory (backwards-pointing):** learnings, feedback notes, doctrine references, gotcha records, and other persistent knowledge that a future session needs for context. These are historical artifacts, not work queue entries.
+
+**What does NOT go in memory:** next steps, pending tasks, items to "pick up next session", open decisions that require action. Those must be Issues.
+
+If you find yourself drafting a "next steps" or "what to pick up" memory block — stop. File Issues instead.
 
 ## Output Format
 
@@ -101,9 +109,10 @@ Present the retro as:
 - [ ] Memory: [file]
 - [ ] Docs: [file]
 
-### Next Session
-- Pick up: [topic]
-- Open decisions: [list]
+### Issues Filed
+- #N1 [P?]: [title]
+- #N2 [P?]: [title]
+(File an Issue for each outstanding action; do not write next-steps to memory — see `alfred-agent:land` Step 4)
 ```
 
 ## Anti-Patterns
@@ -112,3 +121,4 @@ Present the retro as:
 - **Don't add rules for one-off issues** — only for patterns that will recur
 - **Don't bloat CLAUDE.md** — if it can be derived from the code, don't write a rule
 - **Don't skip the abstraction step** — "use X not Y" is worse than "verify Z before assuming"
+- **Don't write "next steps" or "pick up next" to memory files** — that pattern causes stale-snapshot bugs and work that never reaches the issue tracker. File GitHub Issues instead (`alfred-agent:land` Step 4 is the authority on this).
