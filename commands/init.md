@@ -97,7 +97,9 @@ cat /etc/alfred/config.json 2>/dev/null || echo "NOT_FOUND"
 If NOT_FOUND, warn user:
 - "Warning: Global config not found at /etc/alfred/config.json"
 - "CF-Access credentials are required to reach secret-service"
-- "Contact platform admin to set up global config on this host"
+- Either:
+  - Contact a platform admin to provision `/etc/alfred/config.json`, OR
+  - See `docs/baseline/platform/secret-naming-convention.md` in the alfred-platform repo for self-provisioning the underlying secrets
 
 ### 8. Confirm Success
 
@@ -105,16 +107,42 @@ Display summary:
 ```
 Alfred agent initialized for '{agent_id}'
 
-Config hierarchy:
+Config hierarchy (purpose of each tier):
   Global:  /etc/alfred/config.json [EXISTS/MISSING]
+           → managed by the devbox image; provides shared platform endpoints (CF-Access)
   User:    ~/.config/alfred/config.json [EXISTS/MISSING]
+           → OPTIONAL — needed only when accessing secret-service or per-user credentials
   Project: .alfred/config.json [CREATED]
+           → REQUIRED — sets agent_id for messaging; every project needs this
 
 You can now:
   - Check messages: /alfred-agent:check-messages
   - Send messages: Use agent-messaging MCP tools
   - Access secrets: Use secret-service MCP tools (via user credentials)
 ```
+
+### 9. Post-Init Connectivity Smoke-Test
+
+After displaying the success summary, verify end-to-end connectivity with the agent-messaging service.
+
+Skip this step if the user passed `--skip-smoke-test` or if the environment variable `ALFRED_SKIP_SMOKE_TEST=1` is set (useful for offline/CI/testing scenarios).
+
+Otherwise, call `mcp__agent-messaging__list_threads` (or `mcp__agent-messaging__get_messages`) using the newly configured `agent_id`:
+
+- **If the call succeeds:** append a confirmation line to the summary:
+  ```
+  ✓ Connectivity check passed — agent-messaging reachable, agent_id '{agent_id}' resolves
+  ```
+
+- **If the call fails:** emit a clear remediation hint instead of a silent failure:
+  ```
+  ✗ Connectivity check failed — could not reach agent-messaging service
+    Remediation:
+      1. Confirm the agent-messaging MCP plugin is installed and listed in .mcp.json
+      2. Confirm the agent_id '{agent_id}' is registered in the messaging server
+      3. Confirm network egress to the agent-messaging endpoint is allowed from this host
+      4. Re-run /alfred-agent:init after resolving the above, or use --skip-smoke-test to skip
+  ```
 
 ## Example Output
 
@@ -132,16 +160,47 @@ Added .alfred/ to .gitignore
 
 Alfred agent initialized for 'secret-service'
 
-Config hierarchy:
+Config hierarchy (purpose of each tier):
   Global:  /etc/alfred/config.json ✓
+           → managed by the devbox image; provides shared platform endpoints (CF-Access)
   User:    ~/.config/alfred/config.json ✓
+           → OPTIONAL — needed only when accessing secret-service or per-user credentials
   Project: .alfred/config.json ✓
+           → REQUIRED — sets agent_id for messaging; every project needs this
 
 You can now:
   - Check messages: /alfred-agent:check-messages
   - Send messages: Use agent-messaging MCP tools
   - Access secrets: Use secret-service MCP tools
+
+✓ Connectivity check passed — agent-messaging reachable, agent_id 'secret-service' resolves
 ```
+
+### Example: Missing Global Config
+
+```
+Warning: Global config not found at /etc/alfred/config.json
+CF-Access credentials are required to reach secret-service.
+Either:
+  - Contact a platform admin to provision /etc/alfred/config.json, OR
+  - See docs/baseline/platform/secret-naming-convention.md in the alfred-platform repo
+    for self-provisioning the underlying secrets
+```
+
+### Example: Smoke-Test Failure
+
+```
+✗ Connectivity check failed — could not reach agent-messaging service
+  Remediation:
+    1. Confirm the agent-messaging MCP plugin is installed and listed in .mcp.json
+    2. Confirm the agent_id 'secret-service' is registered in the messaging server
+    3. Confirm network egress to the agent-messaging endpoint is allowed from this host
+    4. Re-run /alfred-agent:init after resolving the above, or use --skip-smoke-test to skip
+```
+
+### Opt-out (offline / CI / testing)
+
+Pass `--skip-smoke-test` or set `ALFRED_SKIP_SMOKE_TEST=1` to bypass the connectivity check.
 
 ## Different Permission Levels
 
@@ -155,3 +214,13 @@ This maintains clear permission boundaries without project-level token managemen
 ## Reference
 
 See: `docs/baseline/platform/alfred-platform-secrets-management.md` in alfred-platform repo for full documentation on the config hierarchy.
+
+See: `docs/baseline/platform/secret-naming-convention.md` in alfred-platform repo for self-provisioning the underlying secrets referenced by global config.
+
+## Future Test Plan
+
+- **Fresh-scaffold E2E validation:** On the next HA-N fresh-scaffold run, confirm the updated init flow (config-tier annotations + smoke-test) surfaces less manual intervention than the baseline run (ha12, 2026-05-01). Specifically verify:
+  - Agent does not ask "will skipping user config break anything?" — the in-flow annotations answer it
+  - Smoke-test green-tick appears in summary when messaging is reachable
+  - Smoke-test remediation hint is clear when messaging is unreachable (e.g., `.mcp.json` missing)
+  - Missing-global-config warning includes the self-service doc link
