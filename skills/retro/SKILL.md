@@ -29,6 +29,17 @@ Scan the conversation for:
 - **Surprises**: Things discovered that weren't in the docs or instructions
 - **Wins**: Approaches that worked well and should be reinforced
 
+**Under-spawn check (required on every retro):** Ask explicitly:
+
+> "Was there work this session that should have been a worker but wasn't?"
+
+Work qualifies as worker-appropriate if it has a known output shape and can run in an isolated context without ongoing judgment from the lead. Concrete examples:
+- "Scan 40+ files for a pattern" — search work with a defined output shape; no lead judgment needed during execution
+- "Summarize a long log or large inbox dump" — mechanical reduction; the lead only needs the result, not the process
+- "Draft a templated document from a set of inputs" — narrow, isolated-context-safe; inputs are known up front
+
+If any such work was done inline by the lead, file a learning under **Instruction improvement** in Step 2 and consider updating CLAUDE.md or the relevant skill. See cross-project doctrine 06 (lead-worker pattern) for the authoritative guidance on spawn boundaries.
+
 ### Step 2: Categorize Findings
 
 For each finding, determine:
