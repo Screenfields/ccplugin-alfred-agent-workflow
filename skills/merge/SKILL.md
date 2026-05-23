@@ -48,17 +48,35 @@ gh pr view {N} --json number,title,labels,statusCheckRollup,headRefName,state,me
 
 ## Step 4 — CI gate (hard)
 
-Inspect `statusCheckRollup`. Find any check where `conclusion` is `FAILURE`, `CANCELLED`, or `TIMED_OUT`.
+First, determine how many checks are configured on this PR:
 
-If any such check exists:
+```bash
+gh pr view {N} --json statusCheckRollup --jq '.statusCheckRollup | length'
+```
 
-- **Refuse merge.** Print the names of the failing/cancelled/timed-out checks.
-- Report: "Merge blocked: CI is not green. Fix the following checks before merging: {check names}."
-- Stop. Do not proceed under any circumstances. Never merge on red CI. No exceptions.
+Then apply exactly one of the four cases below based on the result:
 
-If all checks are `SUCCESS` or `SKIPPED`, proceed.
+**Case A — No CI configured (empty `statusCheckRollup`, length = 0):**
 
-If checks are still pending (`IN_PROGRESS`, `QUEUED`), report: "CI checks are still running. Re-run this skill once they complete, or query `gh pr checks {N}` to monitor progress." Stop.
+- Output: "No CI configured on this repo — merging without check verification."
+- This is distinct from "all checks passed." There are zero checks, not passing checks.
+- Proceed. Do not block.
+
+**Case B — Checks still running (any check with state `PENDING`, `IN_PROGRESS`, or `QUEUED`):**
+
+- Output: "CI checks are still pending. Wait for checks to complete before merging."
+- Stop. Do not merge yet. The agent may re-run this skill once checks finish, or run `gh pr checks {N}` to monitor progress.
+
+**Case C — All checks passed (all checks in `SUCCESS` or `SKIPPED` state, count > 0):**
+
+- Output: "All {N} checks passed."
+- Proceed normally.
+
+**Case D — Checks failed (any check with conclusion `FAILURE`, `CANCELLED`, or `TIMED_OUT`):**
+
+- Collect the names of all failing/cancelled/timed-out checks.
+- Output: "CI checks failed: {list of failing check names}. Halting merge."
+- Halt. Do not proceed under any circumstances. Never merge on red CI. No exceptions.
 
 ## Step 5 — Label gate (role-authorization)
 
@@ -103,7 +121,7 @@ Report: PR number, title, and merge SHA.
 
 ## Rules
 
-- **CI gate is absolute** — any check with conclusion `FAILURE`, `CANCELLED`, or `TIMED_OUT` = refuse merge. No exceptions, no `--admin` bypass.
+- **CI gate is absolute** — any check with conclusion `FAILURE`, `CANCELLED`, or `TIMED_OUT` = refuse merge. No exceptions, no `--admin` bypass. Empty `statusCheckRollup` (no CI configured) is not a failure — it is explicitly permitted with a distinct "No CI configured" message.
 - **Label gate applies to regular agents** — `requires-elevated-merge` = refuse unless identity is `alfred-platform-manager` or `alfred-project-manager`.
 - **`requires-coverage-decision` does NOT block merge** — it is informational only; proceed normally when this label is present.
 - **Never use `--admin`** to bypass checks. If checks can't be bypassed legitimately, escalate.
