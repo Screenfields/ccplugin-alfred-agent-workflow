@@ -20,11 +20,27 @@ Standard workflow for implementing features in a devbox. Every code change follo
 
 ## Step 2: Create a branch
 
+> **Role-switching modes:** Some devboxes (e.g., project-manager) have multiple roles and the `switch-role` command installed. Most projects use a **single-role devbox** where `switch-role` is not installed. To detect which mode applies:
+> ```bash
+> command -v switch-role >/dev/null 2>&1 && echo "multi-role" || echo "single-role"
+> ```
+> - **Multi-role devbox** (e.g., project-manager): `switch-role` is installed; run role-switch commands as shown.
+> - **Single-role devbox** (most projects): `switch-role` is not installed; skip role-switch steps and use the same token throughout.
+
+**If multi-role devbox** (`switch-role` is installed):
 ```bash
 switch-role build
 git checkout main && git pull
 git checkout -b feature/issue-{N}-{short-description}
 ```
+
+**If single-role devbox** (`switch-role` is not installed — skip the role switch):
+```bash
+git checkout main && git pull
+git checkout -b feature/issue-{N}-{short-description}
+```
+
+This is a single-role devbox — `switch-role` is not installed. Use the same token throughout.
 
 Always branch from up-to-date main. Use `feature/` prefix for new work, `fix/` for bug fixes.
 
@@ -148,18 +164,32 @@ And since this file was scaffold-generated (from `project-manager/templates/web-
 
 ## Step 7: Merge
 
-Switch to the lead role and merge only if CI is green:
+Merge only if CI is green. Role-switching is conditional on devbox mode (see Step 2 for detection):
 
+**If multi-role devbox** (`switch-role` is installed — switch to lead role to merge):
 ```bash
 switch-role lead
+gh pr merge --squash
+```
+
+**If single-role devbox** (`switch-role` is not installed — merge with the current token):
+```bash
 gh pr merge --squash
 ```
 
 If CI is red, go back to Step 6.5. **Never merge on red CI** — no exceptions, regardless of urgency, diff size, or how confident you are the failure is unrelated.
 
 Then clean up:
+
+**If multi-role devbox:**
 ```bash
 switch-role build
+git checkout main && git pull
+git branch -d feature/issue-{N}-{short-description}
+```
+
+**If single-role devbox:**
+```bash
 git checkout main && git pull
 git branch -d feature/issue-{N}-{short-description}
 ```
@@ -170,8 +200,8 @@ git branch -d feature/issue-{N}-{short-description}
 - **Tests run before PR.** Don't create a PR with failing tests.
 - **Build must pass.** `npm run build` clean before PR.
 - **One issue per PR.** Keep changes focused and reviewable.
-- **Build role creates, lead role merges.** Never merge with the same role that created the PR.
-- **Token expired?** Run `switch-role build` (or `lead`) to refresh. Try this first when git auth fails.
+- **Build role creates, lead role merges (multi-role devboxes only).** In devboxes where `switch-role` is installed, never merge with the same role that created the PR. In single-role devboxes, use the same token throughout — this rule does not apply.
+- **Token expired?** In multi-role devboxes, run `switch-role build` (or `lead`) to refresh. Try this first when git auth fails. In single-role devboxes, re-authenticate via the platform's normal token refresh path.
 - **CI status is queried, never inferred.** ALWAYS run `gh pr checks {PR}` before claiming a PR is merge-ready. NEVER reason from diff size, change complexity, or author intuition to CI outcome.
 - **Red CI blocks merge-ready.** FAILURE / CANCELLED / TIMED_OUT on any required check means the PR is NOT ready to merge — regardless of merge-conflict status or diff size. Either fix the root cause or escalate.
 - **If an API seems unavailable, verify by calling it.** NEVER claim "not visible in this context" without trying the call first.
