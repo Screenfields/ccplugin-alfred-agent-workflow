@@ -4,6 +4,10 @@ description: Check for new unread messages from other agents
 
 Check for new unread messages using the agent-messaging MCP service.
 
+## Session-start mandate
+
+**Call `get_messages` unconditionally at every session start**, regardless of Monitor state. Monitor armed does NOT mean messages have been delivered — the inbox-watcher is a best-effort real-time supplement, not a reliable delivery channel. Silent watcher failures (process crash, log staleness, consecutive errors) leave unread messages sitting undetected for hours. `get_messages` is the reliable baseline.
+
 **First, check for project config:**
 
 1. Look for `.alfred/config.json` in project root
@@ -21,13 +25,28 @@ Call `mcp__agent-messaging__get_messages(unread_only=true, as_agent="{agent_id}"
 
 Note: If the `as_agent` parameter is not yet supported by the server, fall back to `mcp__agent-messaging__get_messages(unread_only=true)` and note that messages are being checked for the default identity.
 
-For each message, display:
+## Large-inbox handling (auto-summarize)
+
+**Threshold:** If there are more than 20 unread messages, do NOT dump full message bodies. Instead, display a one-liner summary per message:
+
+```
+[{index}] From: {from_agent} | Subject: {subject} | {timestamp_relative}
+```
+
+Then display:
+```
+{N} unread messages — showing summaries (> 20 threshold). Request full body for specific messages by index or subject.
+```
+
+This prevents exceeding response-token budgets on large inboxes (e.g. 41 messages ≈ 68k tokens). Let the user request full bodies explicitly.
+
+**Below threshold:** For 20 or fewer unread messages, display each message in full:
 - From agent
 - Subject
 - Body (formatted)
 - Timestamp (relative, e.g., "5 min ago")
 
-If no unread messages, report "No new messages".
+If no unread messages, report "No new messages" then run the watcher-liveness check below.
 
 **After displaying messages:**
 
@@ -46,3 +65,36 @@ If no unread messages, report "No new messages".
 **Exception:** Do NOT auto-mark as read if:
 - The message requires urgent action that hasn't been taken yet
 - The user explicitly asks to keep messages unread
+
+## Watcher-liveness assertion
+
+After `get_messages` returns 0 unread messages, verify that the inbox-watcher is actually healthy before reporting all-clear. Run these checks:
+
+**1. Log freshness** — check when `/workspace/.alfred/events.log` was last modified:
+```bash
+stat -c %Y /workspace/.alfred/events.log 2>/dev/null
+```
+If the file does not exist or the last modification time is more than 600 seconds ago, flag as stale.
+
+**2. Watcher process alive** — check whether the watcher Python process is running:
+```bash
+ps -ef | grep alfred-inbox-watch.py | grep -v grep
+```
+If no output, the watcher process is not running.
+
+**3. Consecutive error check** — inspect `watcher.err` for repeated failures:
+```bash
+tail -20 /workspace/.alfred/watcher.err 2>/dev/null
+```
+If the last 10+ lines are identical (same error repeated), the watcher is stuck in a crash loop.
+
+**On any failure:** emit a single consolidated warning block — do NOT produce walls of debug output:
+
+```
+⚠ WATCHER POTENTIALLY UNHEALTHY
+Diagnosis: {specific failure: stale log / process not found / crash loop}
+Recovery: kill your current bash session to trigger a respawn via the SessionStart hook, then re-run /alfred-agent:check-messages.
+Note: 0 unread may be accurate, or messages may be sitting undelivered.
+```
+
+If all three checks pass, no additional output is needed — silently confirm the watcher is healthy.
