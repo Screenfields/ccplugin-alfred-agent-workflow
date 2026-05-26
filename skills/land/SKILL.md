@@ -60,7 +60,7 @@ Run the following checks:
 
 ```bash
 # Check that the watcher process is alive
-pgrep -f "alfred-inbox-watcher" && echo "watcher: alive" || echo "watcher: DEAD"
+pgrep -f "alfred-inbox-watch" && echo "watcher: alive" || echo "watcher: DEAD"
 
 # Check last modification time of events.log
 stat /workspace/.alfred/events.log 2>/dev/null \
