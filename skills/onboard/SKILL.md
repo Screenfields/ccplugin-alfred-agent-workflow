@@ -1,19 +1,19 @@
 ---
-name: standup
+name: onboard
 description: >
-  Template the spoke standup process — standing up a new project/agent on the Alfred platform.
+  Template the spoke onboarding process — standing up a new project/agent on the Alfred platform.
   Use when bootstrapping a new spoke (project, service, or plugin constellation member) that
   needs a devbox, messaging identity, lead CLAUDE.md, and gitops token. All outputs are drafts
   for human review; nothing is auto-committed.
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep
 ---
 
-# Spoke Standup
+# Spoke Onboarding
 
 Orchestrate the artifacts needed to stand up a new spoke on the Alfred platform. Produces a
 complete set of drafts — human reviews and commits each one. Not a one-shot auto-apply.
 
-**Full doctrine:** `alfred-platform-docs/spoke-standup-playbook.md`
+**Full doctrine:** `alfred-platform-docs/spoke-onboarding-playbook.md`
 
 ## When to Use
 
@@ -252,7 +252,7 @@ spec:
 
 ### Step 6: Out-of-Band Escalation
 
-Some spoke standups hit a self-referential dependency: the new spoke is needed to validate its
+Some spoke onboardings hit a self-referential dependency: the new spoke is needed to validate its
 own auth token, but the token doesn't exist yet, so the spoke can't run.
 
 **When this applies:**
@@ -272,13 +272,13 @@ Out-of-band resolution steps (human executes):
    curl -H "Authorization: Bearer $(cat /path/to/token)" \
         https://api.github.com/repos/Screenfields/{project-name}
 3. Admin confirms to the spoke (via agent-messaging or direct) that the token is valid
-4. Spoke proceeds with the rest of the standup checklist
+4. Spoke proceeds with the rest of the onboarding checklist
 
 DO NOT have the spoke attempt to use an unvalidated token — silent auth failures are
 the most common cause of stale gitops state.
 ```
 
-For detailed escalation doctrine, see `alfred-platform-docs/spoke-standup-playbook.md §
+For detailed escalation doctrine, see `alfred-platform-docs/spoke-onboarding-playbook.md §
 Out-of-Band Resolution`.
 
 ### Step 7: Summary Checklist for Human
@@ -286,7 +286,7 @@ Out-of-Band Resolution`.
 After all drafts are produced, output this checklist for the human to work through:
 
 ```
-## Spoke Standup Checklist — {project-name}
+## Spoke Onboarding Checklist — {project-name}
 
 ### Drafts to review and commit
 - [ ] Devbox K8s manifest → alfred-projects-gitops/apps/{project-name}/devbox.yaml
@@ -326,8 +326,8 @@ After all drafts: output the Step 7 summary checklist.
 - **Ask before generating** (Step 1 confirmation). Producing drafts for the wrong project
   wastes review cycles.
 - **Self-referential dependency check is mandatory.** Always include Step 6 output, even if
-  it seems unlikely to apply — omitting it is the most common error in spoke standups.
+  it seems unlikely to apply — omitting it is the most common error in spoke onboardings.
 - **Reference the playbook, don't inline it.** For edge cases not covered here, cite
-  `alfred-platform-docs/spoke-standup-playbook.md` rather than inventing doctrine.
+  `alfred-platform-docs/spoke-onboarding-playbook.md` rather than inventing doctrine.
 - **Identity = project-name, always.** Do not suggest creative identity names. The platform
   identity model uses project-name for all spoke agents (per retro #2 decision).
