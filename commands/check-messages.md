@@ -88,7 +88,7 @@ tail -20 /workspace/.alfred/watcher.err 2>/dev/null
 ```
 If the last 10+ lines are identical (same error repeated), the watcher is stuck in a crash loop.
 
-**On any failure:** emit a single consolidated warning block — do NOT produce walls of debug output:
+**On any failure (checks 1–3):** emit a single consolidated warning block — do NOT produce walls of debug output:
 
 ```
 ⚠ WATCHER POTENTIALLY UNHEALTHY
@@ -97,4 +97,23 @@ Recovery: kill your current bash session to trigger a respawn via the SessionSta
 Note: 0 unread may be accurate, or messages may be sitting undelivered.
 ```
 
-If all three checks pass, no additional output is needed — silently confirm the watcher is healthy.
+**4. Monitor grep pattern** — verify the armed Monitor is filtering for `new_message`, not a wrong pattern that silently drops all events:
+```bash
+# Is a Monitor tailing events.log?
+ps -ef | grep "tail.*events\.log" | grep -v grep
+# Does it filter for new_message?
+ps -ef | grep "grep.*new_message" | grep -v grep
+```
+If a `tail` process watching `events.log` is found but no `grep.*new_message` process accompanies it in the pipeline, the Monitor has the wrong grep filter. The watcher may be healthy and writing events correctly, but all real-time notifications are silently dropped.
+
+Warn with a **distinct message** — this is a Claude-side Monitor misconfiguration, not a watcher failure:
+
+```
+⚠ MONITOR GREP PATTERN MISMATCH
+Diagnosis: Monitor process found tailing events.log but grep filter does not match 'new_message' — real-time event notifications are silently dropped.
+Recovery: Stop the current Monitor (TaskStop with the task ID — retrieve it via `cat /workspace/.alfred/monitor_task_id` if the sentinel file exists), then re-arm with the canonical command:
+  tail -F -n 0 /workspace/.alfred/events.log | grep --line-buffered '^type=new_message '
+Note: the 0-unread result above is still accurate — this only affects future real-time delivery.
+```
+
+If all four checks pass, no additional output is needed — silently confirm the watcher is healthy.
