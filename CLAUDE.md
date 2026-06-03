@@ -68,3 +68,11 @@ When modifying commands/skills:
 2. Test locally with `/plugin validate .`
 3. Commit and push changes
 4. Marketplace picks up changes automatically
+
+### Versioning convention
+
+Every PR that changes plugin contents (skills, commands, rules, MCP config) **must bump the version in `.claude-plugin/plugin.json`**. Use semantic versioning: patch for fixes, minor for new skills/commands/rules, major for breaking changes.
+
+After merging here, open a follow-up PR in `Screenfields/alfred-cc-tools` to bump the `version` field for `alfred-agent` in `.claude-plugin/marketplace.json` to match. This is what triggers cache-invalidation and distributes the new version to devboxes on next cold-restart.
+
+The two version numbers must stay in sync. If they drift, devboxes load stale skill versions without any warning (see ccplugin-alfred-agent-workflow#51 for the detection work).
