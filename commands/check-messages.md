@@ -111,7 +111,7 @@ Warn with a **distinct message** — this is a Claude-side Monitor misconfigurat
 ```
 ⚠ MONITOR GREP PATTERN MISMATCH
 Diagnosis: Monitor process found tailing events.log but grep filter does not match 'new_message' — real-time event notifications are silently dropped.
-Recovery: Stop the current Monitor (TaskStop on the monitor task ID), then re-arm with the canonical command:
+Recovery: Stop the current Monitor (TaskStop with the task ID — retrieve it via `cat /workspace/.alfred/monitor_task_id` if the sentinel file exists), then re-arm with the canonical command:
   tail -F -n 0 /workspace/.alfred/events.log | grep --line-buffered '^type=new_message '
 Note: the 0-unread result above is still accurate — this only affects future real-time delivery.
 ```
