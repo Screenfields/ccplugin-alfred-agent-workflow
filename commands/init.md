@@ -69,12 +69,21 @@ Ask user using AskUserQuestion:
 ### 5. Create Config Directory and File
 
 - Create `.alfred/` directory if not exists
-- Write `.alfred/config.json`:
+- Write `.alfred/config.json` — **merge, do not overwrite**. If the file already exists, read it and update only `agent_id`; preserve all other keys (e.g. `shorthand`):
 
-```json
-{
-  "agent_id": "{chosen_name}"
-}
+```bash
+if [ -f .alfred/config.json ]; then
+  python3 -c "
+import json
+with open('.alfred/config.json') as f:
+    d = json.load(f)
+d['agent_id'] = '${chosen_name}'
+with open('.alfred/config.json', 'w') as f:
+    json.dump(d, f)
+"
+else
+  echo '{"agent_id":"${chosen_name}"}' > .alfred/config.json
+fi
 ```
 
 - Set permissions: `chmod 600 .alfred/config.json`
