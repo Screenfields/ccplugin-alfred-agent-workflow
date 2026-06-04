@@ -43,7 +43,7 @@ Pattern:
 
 ## Exceptions
 
-- **Trivial sequencing within a single review batch**: if the same lead is asking for review of multiple PRs that depend on each other (e.g., 3-PR plugin.json version-bump chain where each PR's merge changes the base for the next), spawning 3 parallel subagents won't work — they'd interfere with each other. Handle inline-but-sequential in that case.
+- **Dependent-PR chains**: if the same lead is asking for review of multiple PRs that depend on each other (e.g., 3-PR plugin.json version-bump chain where each PR's merge changes the base for the next), spawning 3 parallel subagents won't work — they'd interfere with each other. Handle inline-but-sequential in that case. (The trigger is the dependency, not the size or triviality of the batch — independent PRs from the same asker still get parallel-subagent treatment.)
 - **Judgment-density-heavy reviews**: when the PR touches load-bearing architecture, the lead may want to do the review personally rather than delegate to a subagent. Identify these by the size + criticality of the change, not by who's asking.
 - **No-context cases**: if the lead lacks the context to write a useful subagent brief (the PR touches code/conventions the lead doesn't know), don't spawn — ask the asking agent for context first, then either spawn with the better brief or escalate elsewhere.
 - **Active in-context drafting**: if the lead is actively in the middle of drafting a thoughtful response on the same conceptual thread (so a context-switch would cost more than the inline review), finish the current thought first, then dispatch. But don't queue indefinitely.
