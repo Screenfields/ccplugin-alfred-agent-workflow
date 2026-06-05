@@ -23,19 +23,19 @@ Query multiple top-tier AI models via LiteLLM for independent architectural feed
 
 ### Recommended Panel (3 models, 3 providers)
 
-| Model ID | Provider | Strength |
-|----------|----------|----------|
-| `gpt-5.4` | OpenAI | Strongest overall reasoning, thorough implementation details |
-| `gemini-3.1-pro` | Google | Practical, concise, good at catching operational risks |
-| `glm-5` | Fireworks (Zhipu) | Strong structured analysis, good at edge cases |
+| Model ID | Provider | Strength | Timeout |
+|----------|----------|----------|---------|
+| `gpt-5.4` | OpenAI | Strongest overall reasoning, thorough implementation details | 90s |
+| `gemini-3.1-pro` | Google | Practical, concise, good at catching operational risks | 90s |
+| `glm-5` | Fireworks (Zhipu) | Strong structured analysis, good at edge cases | 180s |
 
 ### Alternative Models
 
-| Model ID | Provider | Use when |
-|----------|----------|----------|
-| `kimi-k2.5` | Fireworks (Moonshot) | Alternative to GLM-5, strong on complex reasoning |
-| `deepseek-v3.2` | Fireworks (DeepSeek) | Budget option, good for code-heavy reviews |
-| `o3` | OpenAI | Deep reasoning (same provider as GPT 5.4, avoid using both) |
+| Model ID | Provider | Use when | Timeout |
+|----------|----------|----------|---------|
+| `kimi-k2.5` | Fireworks (Moonshot) | Alternative to GLM-5, strong on complex reasoning | 180s |
+| `deepseek-v3.2` | Fireworks (DeepSeek) | Budget option, good for code-heavy reviews | 180s |
+| `o3` | OpenAI | Deep reasoning (same provider as GPT 5.4, avoid using both) | 90s |
 
 ### Rules
 - Always use models from **different providers** for diverse perspectives
@@ -88,15 +88,19 @@ LITELLM_URL="${LITELLM_URL:-https://litellm.screenfields.net}"
 LITELLM_KEY=$(op read "op://sf-platform/litellm/virtual-key/ecr-reviews/password" 2>/dev/null || echo "$LITELLM_MASTER_KEY")
 PROMPT=$(cat /tmp/ecr-prompt.txt)
 
-# Run all 3 in parallel
-curl -s "$LITELLM_URL/v1/chat/completions" \
+# Timeout: 90s for OpenAI/Google; 180s for Fireworks (kimi-k2.5, glm-5, deepseek-v3.2)
+TIMEOUT=90  # override to 180 for Fireworks models
+RESULT=$(curl -s --max-time "$TIMEOUT" "$LITELLM_URL/v1/chat/completions" \
   -H "Authorization: Bearer $LITELLM_KEY" \
   -H "Content-Type: application/json" \
-  -d "$(jq -n --arg p "$PROMPT" '{model: "MODEL_ID", messages: [{role: "user", content: $p}], max_tokens: 5000, metadata: {tags: ["ecr"]}}')" \
-  | jq -r '.choices[0].message.content'
+  -d "$(jq -n --arg p "$PROMPT" '{model: "MODEL_ID", messages: [{role: "user", content: $p}], max_tokens: 5000, metadata: {tags: ["ecr"]}}')"); CURL_EXIT=$?
+if   [ $CURL_EXIT -eq 28 ]; then echo "TIMEOUT (>${TIMEOUT}s)"
+elif [ -z "$RESULT" ];       then echo "ERROR (empty response)"
+else echo "$RESULT" | jq -r '.choices[0].message.content // "ERROR (unexpected response)"'
+fi
 ```
 
-Use the Agent tool or parallel Bash calls to query all models simultaneously.
+Use the Agent tool or parallel Bash calls to query all models simultaneously. Each model call uses its own `TIMEOUT` value from the table above.
 
 ### Step 4: Synthesize Results
 
@@ -110,20 +114,22 @@ Format:
 ```
 ## ECR Results: [Topic]
 
-### Verdict: [APPROVE / APPROVE WITH CONDITIONS / REQUEST CHANGES]
+### Verdict (N/3 voices): [APPROVE / APPROVE WITH CONDITIONS / REQUEST CHANGES]
 
 | Model | Verdict | Key insight |
 |-------|---------|-------------|
 | GPT 5.4 | ... | ... |
 | Gemini 3.1 Pro | ... | ... |
-| GLM-5 | ... | ... |
+| GLM-5 | TIMEOUT (>180s) | — |
 
 ### Consensus
-[What all agree on]
+[What responding voices agree on]
 
 ### Conditions / Changes Required
 [Numbered list]
 ```
+
+If one or more voices timed out, include them in the table with `TIMEOUT (>Xs)` and note the partial panel count in the verdict header (e.g. `Verdict (2/3 voices)`). A partial panel is still useful; a silently-partial panel is not.
 
 ## Anonymization Rules
 
