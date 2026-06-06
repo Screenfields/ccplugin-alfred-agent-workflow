@@ -2,6 +2,17 @@
 description: Walk through blocked and 'waiting for' items one-by-one. For each item, summarize and simplify for a user decision. Move to the next item only when the current one is resolved or the user says to skip.
 ---
 
+**First, check for project config:**
+
+1. Look for `.alfred/config.json` in project root
+2. If found, read `agent_id` from it
+3. If NOT found, display:
+   ```
+   Project not initialized for alfred-agent messaging.
+   Run /alfred-agent:init to set up this project's identity.
+   ```
+   And stop here.
+
 Interactively resolve blocked and waiting items one at a time.
 
 ## Step 1: Gather waiting items
