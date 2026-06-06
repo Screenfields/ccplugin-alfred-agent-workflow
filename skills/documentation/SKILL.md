@@ -17,8 +17,9 @@ Authoritative reference: `alfred-platform/docs/baseline/platform/documentation-s
 
 1. **Writing/updating baseline** (functional, technical) → Step 1
 2. **Writing an ADR** (capturing an architectural decision) → Step 2
-3. **Auditing an existing doc for drift** → Step 3
+3. **Auditing a single doc for drift** → Step 3
 4. **PR quality gate** (about to merge a behavior change) → Step 4
+5. **Auditing the full project + published docs against the production release** → use `/alfred-agent:documentation-audit` instead of this skill
 
 If two apply (e.g. a PR ships a feature + needs an ADR), do them in order: ADR first (Step 2), then baseline updates (Step 1), then quality-gate check (Step 4).
 
@@ -102,4 +103,4 @@ Exception: pure refactor with zero behavior change. State that explicitly in the
 - Strategy doc: `alfred-platform/docs/baseline/platform/documentation-strategy.md`
 - ADR template: `alfred-platform/docs/templates/adr.md`
 - Example ADRs: `alfred-platform/docs/decisions/`
-- Related skills: `design` (for TOBE design docs on a feature branch — that's delta), `git-commit` (don't commit doc-less PRs)
+- Related skills: `documentation-audit` (project-wide, retrospective audit against the production release — use this after a release or quarterly), `design` (for TOBE design docs on a feature branch — that's delta), `git-commit` (don't commit doc-less PRs)
