@@ -2,13 +2,24 @@
 description: Structured status overview — open/closed issues, pending PRs, inbox state, and items blocked waiting on other actors or the user.
 ---
 
+**First, check for project config:**
+
+1. Look for `.alfred/config.json` in the project root.
+2. If found, read `agent_id` from it.
+3. If NOT found, display:
+   ```
+   Project not initialized for alfred-agent messaging.
+   Run /alfred-agent:init to set up this project's identity.
+   ```
+   And stop here.
+
 Generate a structured status report for this agent's current work.
 
 ## Steps
 
 **1. Read project identity**
 
-Check `.alfred/config.json` for `agent_id` and any repo references. If the file has a `repos` list use it; otherwise derive from `gh repo list` in the current org context or from recent `git remote` output.
+Read `agent_id` from `.alfred/config.json`. If the file has a `repos` list use it; otherwise derive from `gh repo list` in the current org context or from recent `git remote` output.
 
 **2. Open issues**
 
@@ -20,9 +31,7 @@ gh issue list --state open --limit 20 --json number,title,labels,assignees,creat
 **3. Recently closed (last 7 days)**
 
 ```bash
-gh issue list --state closed --limit 10 \
-  --search "closed:>$(date -d '7 days ago' +%Y-%m-%d 2>/dev/null || date -v-7d +%Y-%m-%d)" \
-  --json number,title,closedAt
+gh issue list --state closed --limit 10 --search "closed:>$(date -d '7 days ago' +%Y-%m-%d 2>/dev/null || date -v-7d +%Y-%m-%d)" --json number,title,closedAt
 ```
 
 **4. Open PRs**
