@@ -79,12 +79,6 @@ PREOF
   )"
 ```
 
-Enable auto-merge if supported:
-
-```bash
-gh pr merge --auto --squash
-```
-
 ## Step 5 — Emit completion signal
 
 After the PR is successfully opened, emit this exact phrase on its own line:
