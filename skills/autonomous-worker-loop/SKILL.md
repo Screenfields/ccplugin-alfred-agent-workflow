@@ -28,10 +28,11 @@ If `attempt > 1`, study `prior_attempts`. Do not repeat approaches that already 
 
 ## Step 2 — Implement
 
-Create a feature branch:
+The wrapper has already created and checked out your branch (`issue-<N>-attempt-<M>`).
+Do not create a new branch. Verify you are on the correct branch before making changes:
 
 ```bash
-git checkout -b worker/attempt-{attempt}-{issue-slug}
+git branch --show-current
 ```
 
 Implement the code changes the task requires. Write or update tests. Follow the project's
@@ -64,7 +65,7 @@ Commit, push, and open a PR:
 ```bash
 git add -A
 git commit -m "{concise description of what was implemented}"
-git push -u origin worker/attempt-{attempt}-{issue-slug}
+git push -u origin HEAD
 gh pr create \
   --title "{task title from issue}" \
   --body "$(cat <<'PREOF'
