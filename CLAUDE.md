@@ -57,9 +57,9 @@ This plugin is published via the alfred-cc-tools marketplace:
 
 At the start of every session using this plugin, agents MUST:
 
-1. **Run `/alfred-agent:check-messages` unconditionally** — do NOT rely solely on the Monitor (inbox-watcher) to surface unread messages. The Monitor is a best-effort real-time channel that can fail silently (process crash, stale log, crash loop). `get_messages` is the reliable baseline. See `commands/check-messages.md` for full session-start mandate.
+1. **Run `/alfred-agent:check-messages` unconditionally.** This is the ONLY delivery mechanism — the automated inbox-watcher architecture was retired 2026-06-09. See `commands/check-messages.md` for full session-start mandate.
 
-2. **Review any watcher-liveness warnings** emitted by `check-messages`. A `⚠ WATCHER POTENTIALLY UNHEALTHY` warning means messages may be sitting undelivered even when the inbox appears empty.
+2. **For active multi-turn conversations**, if you need to wait synchronously on a peer reply, use the bounded ad-hoc poll pattern documented in `commands/check-messages.md` (Ad-hoc poll loop section). Never spin an unbounded background poller.
 
 ## Development
 

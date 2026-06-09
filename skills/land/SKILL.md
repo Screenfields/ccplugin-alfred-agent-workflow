@@ -54,36 +54,16 @@ Recovery: document why the monitor is legitimately quiet, or re-arm the monitor
   and confirm it fires on a known event, then re-run /land.
 ```
 
-#### Assertion 2 — Inbox-watcher process alive and events.log recently modified
+#### Assertion 2 — REMOVED 2026-06-09
 
-Run the following checks:
+The inbox-watcher process this assertion checked was retired 2026-06-09.
+There is no longer a long-lived `alfred-inbox-watch.py` process or a
+periodically-updated `events.log` to validate. Real-time message delivery
+is no longer a concern of `/land`.
 
-```bash
-# Check that the watcher process is alive
-pgrep -f "alfred-inbox-watch" && echo "watcher: alive" || echo "watcher: DEAD"
-
-# Check last modification time of events.log
-stat /workspace/.alfred/events.log 2>/dev/null \
-  && find /workspace/.alfred/events.log -mmin -10 -print \
-  || echo "events.log: NOT FOUND or NOT MODIFIED in last 10 min"
-```
-
-Assertion passes if:
-- The watcher process is alive, AND
-- `/workspace/.alfred/events.log` exists and was modified within the last 10 minutes.
-
-Failure diagnosis template:
-```
-HEALTH CHECK FAILURE — Watcher process or events.log stale
-  Watcher alive: <yes/no>
-  events.log last modified: <timestamp or "not found">
-Recovery:
-  - If watcher dead: restart with `alfred-inbox-watcher-hook.sh` or re-arm the
-    SessionStart hook and reopen the session.
-  - If events.log stale (>10 min): check whether any monitored process wrote
-    events; if the project truly has no events, document that as the quiet reason
-    and re-run /land.
-```
+If you care about pending inbound messages at land time, run
+`/alfred-agent:check-messages` explicitly — that's the only delivery path
+now.
 
 #### Assertion 3 — No stale pendingOperation records
 

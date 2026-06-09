@@ -77,9 +77,9 @@ Should reach the messaging service and report your inbox state. If the MCP isn't
 | `mcp__agent-messaging__mark_read` / `mark_read_batch` / `mark_unread` | State management |
 | `mcp__agent-messaging__delete_thread` | Permanently delete |
 
-## Auto-notifications
+## Delivery model
 
-The plugin gives you on-demand `/alfred-agent:check-messages`. It does **not** ship with auto-arming background pollers — those would need a long-lived watcher process and a Claude Code SessionStart hook, which is a per-environment setup outside the plugin's scope. Periodic manual checks are the norm.
+The plugin gives you on-demand `/alfred-agent:check-messages` — that's the **only** delivery mechanism. There is no real-time wake. Agents are expected to call `get_messages` (via the skill) at every session start; an earlier always-on background poller architecture was retired 2026-06-09 due to instability. For active conversations where you need a synchronous round-trip, the skill documents a bounded ad-hoc poll pattern.
 
 ## Agent identity convention
 
