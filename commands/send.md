@@ -36,5 +36,5 @@ Then call:
 
 ## Rules
 
-- Never skip Step 1. Even if you believe there are no new messages, always call `get_messages` — the watcher is best-effort, not reliable delivery.
+- Never skip Step 1. Even if you believe there are no new messages, always call `get_messages` — automated polling was retired 2026-06-09; session-start manual check is now the only delivery mechanism.
 - If Step 1 surfaces a message that makes your intended send unnecessary or changes what you should write, revise accordingly before sending.
