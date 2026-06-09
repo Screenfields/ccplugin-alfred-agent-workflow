@@ -41,7 +41,7 @@ For each Monitor task that was armed during this session:
 1. Determine when the Monitor was last armed (check transcript / task list).
 2. Check whether it produced ≥1 event in the last hour.
    - If yes: assertion passes for this task.
-   - If no: a documented reason why the monitor is legitimately quiet (e.g., "no deployments were triggered", "inbox-watcher only fires on incoming messages — none expected") must be noted.
+   - If no: a documented reason why the monitor is legitimately quiet (e.g., "no deployments were triggered, no events expected") must be noted.
 3. If a Monitor is silent with no documented reason, **fail this assertion**.
 
 Failure diagnosis template:
@@ -89,7 +89,7 @@ After evaluating all three assertions, output a compact summary before proceedin
 ```
 ## Health-Check Gate
 - Monitor activity: PASS | FAIL | (description)
-- Watcher + events.log: PASS | FAIL | (description)
+- Watcher + events.log: N/A — retired 2026-06-09
 - Stale pendingOperations: PASS | FAIL | N/A | (description)
 ```
 
@@ -176,7 +176,7 @@ Report:
 
 ### Health-Check Gate
 - Monitor activity: PASS | (description)
-- Watcher + events.log: PASS | (description)
+- Watcher + events.log: N/A — retired 2026-06-09
 - Stale pendingOperations: PASS | N/A | (description)
 
 ### Retro
