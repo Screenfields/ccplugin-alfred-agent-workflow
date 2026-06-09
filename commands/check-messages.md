@@ -6,7 +6,7 @@ Check for new unread messages using the agent-messaging MCP service.
 
 ## Session-start mandate
 
-**Call `get_messages` unconditionally at every session start**, regardless of Monitor state. Monitor armed does NOT mean messages have been delivered — the inbox-watcher is a best-effort real-time supplement, not a reliable delivery channel. Silent watcher failures (process crash, log staleness, consecutive errors) leave unread messages sitting undetected for hours. `get_messages` is the reliable baseline.
+**Call `get_messages` unconditionally at every session start.** This is the only delivery mechanism — the automated inbox-watcher architecture was retired 2026-06-09 (see retirement memo in `alfred-platform/docs/baseline/`). There is no real-time wake; agents must explicitly check their own inbox.
 
 **First, check for project config:**
 
@@ -46,7 +46,7 @@ This prevents exceeding response-token budgets on large inboxes (e.g. 41 message
 - Body (formatted)
 - Timestamp (relative, e.g., "5 min ago")
 
-If no unread messages, report "No new messages" then run the watcher-liveness check below.
+If no unread messages, report "No new messages" — that's the full answer, nothing else needed.
 
 **After displaying messages:**
 
@@ -66,54 +66,21 @@ If no unread messages, report "No new messages" then run the watcher-liveness ch
 - The message requires urgent action that hasn't been taken yet
 - The user explicitly asks to keep messages unread
 
-## Watcher-liveness assertion
+## Ad-hoc poll loop when actively waiting on a reply
 
-After `get_messages` returns 0 unread messages, verify that the inbox-watcher is actually healthy before reporting all-clear. Run these checks:
+If you are mid-conversation and need to wait for a peer agent's reply before continuing, you may run a **bounded** poll loop using the Bash tool with `run_in_background: true`:
 
-**1. Log freshness** — check when `/workspace/.alfred/events.log` was last modified:
 ```bash
-stat -c %Y /workspace/.alfred/events.log 2>/dev/null
-```
-If the file does not exist or the last modification time is more than 600 seconds ago, flag as stale.
-
-**2. Watcher process alive** — check whether the watcher Python process is running:
-```bash
-ps -ef | grep alfred-inbox-watch.py | grep -v grep
-```
-If no output, the watcher process is not running.
-
-**3. Consecutive error check** — inspect `watcher.err` for repeated failures:
-```bash
-tail -20 /workspace/.alfred/watcher.err 2>/dev/null
-```
-If the last 10+ lines are identical (same error repeated), the watcher is stuck in a crash loop.
-
-**On any failure (checks 1–3):** emit a single consolidated warning block — do NOT produce walls of debug output:
-
-```
-⚠ WATCHER POTENTIALLY UNHEALTHY
-Diagnosis: {specific failure: stale log / process not found / crash loop}
-Recovery: kill your current bash session to trigger a respawn via the SessionStart hook, then re-run /alfred-agent:check-messages.
-Note: 0 unread may be accurate, or messages may be sitting undelivered.
+deadline=$(( $(date +%s) + 300 ))  # 5-minute ceiling
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  result=$(mcp_call get_messages '{"unread_only":true,"limit":5}' | jq '.messages | length')
+  [ "$result" -gt 0 ] && break
+  sleep 30
+done
 ```
 
-**4. Monitor grep pattern** — verify the armed Monitor is filtering for the canonical `^type=new_message ` pattern, not a wrong pattern that silently drops all events:
-```bash
-# Is a Monitor tailing events.log?
-ps -ef | grep "tail.*events\.log" | grep -v grep
-# Does it filter for ^type=new_message?
-ps -ef | grep "type=new_message" | grep -v grep
-```
-If a `tail` process watching `events.log` is found but no process containing `type=new_message` accompanies it in the pipeline, the Monitor has the wrong grep filter. The watcher may be healthy and writing events correctly, but all real-time notifications are silently dropped.
-
-Warn with a **distinct message** — this is a Claude-side Monitor misconfiguration, not a watcher failure:
-
-```
-⚠ MONITOR GREP PATTERN MISMATCH
-Diagnosis: Monitor process found tailing events.log but grep filter does not contain 'type=new_message' — real-time event notifications are silently dropped.
-Recovery: Stop the current Monitor (TaskStop with the task ID — retrieve it via `cat /workspace/.alfred/monitor_task_id` if the sentinel file exists), then re-arm with the canonical command:
-  tail -F -n 0 /workspace/.alfred/events.log | grep --line-buffered '^type=new_message '
-Note: the 0-unread result above is still accurate — this only affects future real-time delivery.
-```
-
-If all four checks pass, no additional output is needed — silently confirm the watcher is healthy.
+Rules:
+- **Always bounded.** Never an unbounded `while true` — that's how we got the failure mode we just retired.
+- **Polite cadence.** 30s minimum between polls.
+- **Timeout reported back.** If the deadline elapses with no reply, surface that to the user rather than silently giving up.
+- **Not the default.** Only spin one up when you explicitly need a synchronous round-trip; one-shot `get_messages` at session start handles 90% of cases.
