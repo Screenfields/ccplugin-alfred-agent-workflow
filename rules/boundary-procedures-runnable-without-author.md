@@ -1,0 +1,1 @@
+Any procedure that crosses an ownership boundary (recovery, pre-flight, restore) must be executable and verifiable by a non-author — versioned, parameterized, with a mechanical pass/fail signal; "ask the owner" is not a procedure.

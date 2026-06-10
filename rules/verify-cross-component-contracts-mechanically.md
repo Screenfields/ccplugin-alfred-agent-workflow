@@ -1,0 +1,1 @@
+When one component depends on another honoring a contract (env names, flags, headers, field formats), validate that contract mechanically at your own boundary fail-closed — written instructions in specs, prompts, or PR bodies are documentation, never enforcement.

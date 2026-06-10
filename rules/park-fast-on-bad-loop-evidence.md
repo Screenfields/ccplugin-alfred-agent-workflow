@@ -1,0 +1,1 @@
+At the first evidence of systematic malfunction in an automated loop (repeated identical failures, spawn churn, resets of completed work), pull its work items out of the eligible set BEFORE diagnosing — park within one decision cycle, and un-park only after the fix is deployed.
