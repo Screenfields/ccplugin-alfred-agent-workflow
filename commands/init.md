@@ -9,7 +9,7 @@ Initialize alfred-agent configuration for the current project and optionally set
 Alfred uses a three-level config hierarchy:
 
 ```
-/etc/alfred/config.json             # Global (system-wide, CF-Access credentials)
+/etc/alfred/config.json             # Global (system-wide credentials)
 ~/.config/alfred/config.json        # User (personal secret-service token)
 <project>/.alfred/config.json       # Project (agent identity only)
 ```
@@ -105,7 +105,7 @@ cat /etc/alfred/config.json 2>/dev/null || echo "NOT_FOUND"
 
 If NOT_FOUND, warn user:
 - "Warning: Global config not found at /etc/alfred/config.json"
-- "CF-Access credentials are required to reach secret-service"
+- "Global credentials (e.g. service tokens for off-platform deployments) are provisioned here by the platform team."
 - Either:
   - Contact a platform admin to provision `/etc/alfred/config.json`, OR
   - See `docs/baseline/platform/secret-naming-convention.md` in the alfred-platform repo for self-provisioning the underlying secrets
@@ -118,7 +118,7 @@ Alfred agent initialized for '{agent_id}'
 
 Config hierarchy (purpose of each tier):
   Global:  /etc/alfred/config.json [EXISTS/MISSING]
-           → managed by the devbox image; provides shared platform endpoints (CF-Access)
+           → managed by the devbox image; provides shared platform endpoints
   User:    ~/.config/alfred/config.json [EXISTS/MISSING]
            → OPTIONAL — needed only when accessing secret-service or per-user credentials
   Project: .alfred/config.json [CREATED]
@@ -171,7 +171,7 @@ Alfred agent initialized for 'secret-service'
 
 Config hierarchy (purpose of each tier):
   Global:  /etc/alfred/config.json ✓
-           → managed by the devbox image; provides shared platform endpoints (CF-Access)
+           → managed by the devbox image; provides shared platform endpoints
   User:    ~/.config/alfred/config.json ✓
            → OPTIONAL — needed only when accessing secret-service or per-user credentials
   Project: .alfred/config.json ✓
@@ -189,7 +189,7 @@ You can now:
 
 ```
 Warning: Global config not found at /etc/alfred/config.json
-CF-Access credentials are required to reach secret-service.
+Global credentials are provisioned here by the platform team.
 Either:
   - Contact a platform admin to provision /etc/alfred/config.json, OR
   - See docs/baseline/platform/secret-naming-convention.md in the alfred-platform repo
