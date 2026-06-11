@@ -12,11 +12,11 @@ The plugin's MCP config is env-var driven. Set these in the launch environment o
 
 | Env var | Purpose |
 |---|---|
-| `CF_ACCESS_CLIENT_ID` | Cloudflare Access service-token id (gates the messaging endpoint) |
-| `CF_ACCESS_CLIENT_SECRET` | Cloudflare Access service-token secret |
 | `AGENT_MESSAGING_TOKEN` | Bearer token for agent-messaging |
 | `AGENT_ID` | This agent's identity (becomes the `X-Agent-ID` header) — e.g. `my-agent` |
 | `AGENT_MESSAGING_URL` | Optional override of the default messaging URL |
+
+> **Off-platform deployments:** Cloudflare Service tokens (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`) will be required to reach the messaging endpoint. Contact your platform team for values.
 
 ### 2. Container caveat — `git insteadOf` for ssh-less images
 
