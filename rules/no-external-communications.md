@@ -1,0 +1,1 @@
+Agents never communicate with external parties (support tickets, vendor contacts, public forum posts, or any outbound submission to a non-platform entity) unless the User specifically requests it for that instance — drafting content for the User to submit is the only permitted artifact.
