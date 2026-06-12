@@ -22,9 +22,15 @@ Complete every field. A brief with any field left blank is invalid — do not sp
 
 > Link to the issue, ADR, design doc, or accepted spec this change implements. If no written spec exists, paste the acceptance criteria inline. Review without a spec is vibes — do not spawn without this field.
 
-**Diff:**
+**Diff (file path — lead fetches before spawning):**
 
-> File path on disk, or PR ref. For a PR: the worker should run `gh pr diff {N} --repo {owner/repo}`. Paste the command, or paste the diff directly if small.
+> Fetch the diff yourself before spawning and write it to a file, then pass that path:
+>
+> ```bash
+> gh pr diff {N} --repo {owner/repo} > /tmp/review-{N}.diff
+> ```
+>
+> Then set this field to `/tmp/review-{N}.diff`. The worker will Read it. Do not ask the worker to run `gh pr diff` — code-reviewer agent types commonly lack a Bash tool. Passing a diff inline is acceptable for small diffs (< ~200 lines).
 
 **Lens list** (remove any that do not apply; add domain-specific lenses as needed):
 
@@ -72,7 +78,7 @@ If the diff does touch a write-boundary guard, append the following section to t
 
 Spawn via the Agent tool. Use `subagent_type: "code-reviewer"` if that type is available in the session's agent registry; otherwise omit and use the default.
 
-Pass the completed brief (Steps 1–2) as the prompt verbatim — the brief IS the prompt; do not add preamble.
+Pass the completed brief (Steps 1–2) as the prompt verbatim — the brief IS the prompt; do not add preamble. The diff file written in Step 1 must exist on disk before spawning; the worker will Read it.
 
 ```javascript
 Agent({
@@ -81,6 +87,8 @@ Agent({
   prompt: "<full brief from Steps 1–2>"
 })
 ```
+
+> **Note:** code-reviewer agent types commonly have Read/Grep/Glob/WebFetch only — no Bash. The lead-fetches-diff pattern in Step 1 is the default for this reason. If you know the chosen agent type has Bash available, you may instead include `gh pr diff {N} --repo {owner/repo}` in the brief and let the worker fetch it.
 
 ---
 
