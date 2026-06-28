@@ -27,14 +27,14 @@ Query multiple top-tier AI models via LiteLLM for independent architectural feed
 |----------|----------|----------|---------|
 | `gpt-5.4` | OpenAI | Strongest overall reasoning, thorough implementation details | 90s |
 | `gemini-3.1-pro` | Google | Practical, concise, good at catching operational risks | 90s |
-| `glm-5` | Fireworks (Zhipu) | Strong structured analysis, good at edge cases | 180s |
+| `glm-5.1` | Fireworks (Zhipu) | Strong structured analysis, good at edge cases; thinking model | 180s |
 
 ### Alternative Models
 
 | Model ID | Provider | Use when | Timeout |
 |----------|----------|----------|---------|
-| `kimi-k2.5` | Fireworks (Moonshot) | Alternative to GLM-5, strong on complex reasoning | 180s |
-| `deepseek-v3.2` | Fireworks (DeepSeek) | Budget option, good for code-heavy reviews | 180s |
+| `kimi-k2` | Fireworks (Moonshot) | Alternative to GLM-5.1, strong on complex reasoning; thinking model | 180s |
+| `deepseek-v4-pro` | Fireworks (DeepSeek) | Budget option, good for code-heavy reviews; thinking model | 180s |
 | `o3` | OpenAI | Deep reasoning (same provider as GPT 5.4, avoid using both) | 90s |
 
 ### Rules
@@ -88,7 +88,7 @@ LITELLM_URL="${LITELLM_URL:-https://litellm.screenfields.net}"
 LITELLM_KEY=$(op read "op://sf-platform/litellm/virtual-key/ecr-reviews/password" 2>/dev/null || echo "$LITELLM_MASTER_KEY")
 PROMPT=$(cat /tmp/ecr-prompt.txt)
 
-# Timeout: 90s for OpenAI/Google; 180s for Fireworks (kimi-k2.5, glm-5, deepseek-v3.2)
+# Timeout: 90s for OpenAI/Google; 180s for Fireworks (glm-5.1, kimi-k2, deepseek-v4-pro)
 TIMEOUT=90  # override to 180 for Fireworks models
 RESULT=$(curl -s --max-time "$TIMEOUT" "$LITELLM_URL/v1/chat/completions" \
   -H "Authorization: Bearer $LITELLM_KEY" \
@@ -120,7 +120,7 @@ Format:
 |-------|---------|-------------|
 | GPT 5.4 | ... | ... |
 | Gemini 3.1 Pro | ... | ... |
-| GLM-5 | TIMEOUT (>180s) | — |
+| GLM-5.1 | TIMEOUT (>180s) | — |
 
 ### Consensus
 [What responding voices agree on]
@@ -147,9 +147,9 @@ Available top-tier models:
 ```
 gpt-5.4          OpenAI
 gemini-3.1-pro   Google
-glm-5            Fireworks (Zhipu)
-kimi-k2.5        Fireworks (Moonshot)
-deepseek-v3.2    Fireworks (DeepSeek)
+glm-5.1          Fireworks (Zhipu)
+kimi-k2          Fireworks (Moonshot)
+deepseek-v4-pro  Fireworks (DeepSeek)
 o3               OpenAI (reasoning)
 ```
 
