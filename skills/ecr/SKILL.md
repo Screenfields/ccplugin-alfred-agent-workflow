@@ -10,7 +10,7 @@ allowed-tools: Bash, Read, Write, Agent
 
 # Expert Consulting Review (ECR)
 
-Query multiple top-tier AI models via LiteLLM for independent architectural feedback on design decisions. Synthesize consensus and unique insights into actionable recommendations.
+Query three external top-tier AI models via LiteLLM **plus** a Claude sub-agent running the highest available model — four independent voices in total. Synthesize consensus and unique insights into actionable recommendations.
 
 ## When to Use
 
@@ -21,7 +21,7 @@ Query multiple top-tier AI models via LiteLLM for independent architectural feed
 
 ## ECR Panel Configuration
 
-### Recommended Panel (3 models, 3 providers)
+### External Panel (3 models, 3 providers — via LiteLLM)
 
 | Model ID | Provider | Strength | Timeout |
 |----------|----------|----------|---------|
@@ -29,7 +29,17 @@ Query multiple top-tier AI models via LiteLLM for independent architectural feed
 | `gemini-3.1-pro` | Google | Practical, concise, good at catching operational risks | 90s |
 | `glm-5.1` | Fireworks (Zhipu) | Strong structured analysis, good at edge cases; thinking model | 180s |
 
-### Alternative Models
+### Self-Review Sub-Agent (4th voice — via Agent tool)
+
+Spawn a Claude sub-agent using the **highest available Claude model** with the same anonymized prompt. This gives a same-provider but highest-tier perspective running independently of the currently active session model.
+
+| Runtime | Highest model | Agent tool `model` param |
+|---------|--------------|--------------------------|
+| Claude Code | Fable 5 | `claude-fable-5` |
+
+The sub-agent is given the ECR prompt and asked to return: verdict, top-3 insights, and specific conditions. It runs in parallel with the LiteLLM calls.
+
+### Alternative External Models
 
 | Model ID | Provider | Use when | Timeout |
 |----------|----------|----------|---------|
@@ -38,10 +48,11 @@ Query multiple top-tier AI models via LiteLLM for independent architectural feed
 | `o3` | OpenAI | Deep reasoning (same provider as GPT 5.4, avoid using both) | 90s |
 
 ### Rules
-- Always use models from **different providers** for diverse perspectives
+- External panel: always use models from **different providers** for diverse perspectives
 - Never use GPT 5.4 and o3 together (same underlying provider)
-- Default to 3 models; use 2 for quick validations
-- Run all model queries **in parallel** for speed
+- Sub-agent always uses the highest available Claude model — not the currently-running model
+- Run all four queries **in parallel** for speed
+- For quick validations: 2 external models + sub-agent (3 voices total)
 
 ## How to Run an ECR
 
@@ -79,7 +90,11 @@ Apply these replacements consistently throughout the entire prompt:
 **Verification:** After anonymizing, grep the prompt for these strings. If ANY match, fix before proceeding:
 `screenfields`, `hilltribe`, `jheuvel`, `jochem`, `Screenfields`, any real IP address, any 1Password path with vault names (`sf-dev`, `sf-prod`, `sf-platform`).
 
-### Step 3: Query Models in Parallel
+### Step 3: Query All Four Voices in Parallel
+
+Fire all four queries simultaneously — three external via LiteLLM, one sub-agent via Agent tool.
+
+**External models (LiteLLM bash template — replicate for each model):**
 
 ```bash
 # LITELLM_URL: defaults to prod platform tier; set the env var to override
@@ -100,7 +115,26 @@ else echo "$RESULT" | jq -r '.choices[0].message.content // "ERROR (unexpected r
 fi
 ```
 
-Use the Agent tool or parallel Bash calls to query all models simultaneously. Each model call uses its own `TIMEOUT` value from the table above.
+**Self-review sub-agent (Agent tool — run in parallel with the bash calls):**
+
+```
+Agent(
+  model: "claude-fable-5",
+  prompt: "You are acting as an independent peer reviewer in an Expert Consulting Review (ECR).
+Your task: review the following anonymized proposal and return exactly:
+1. Verdict: APPROVE | APPROVE WITH CONDITIONS | REQUEST CHANGES
+2. Key insights (up to 3 bullet points — be specific, no platitudes)
+3. Conditions or required changes (numbered list, or 'None' if approving outright)
+
+Do not explain your role. Return the review directly.
+
+---
+{paste anonymized ECR prompt here}
+---"
+)
+```
+
+The sub-agent runs at `claude-fable-5` regardless of which Claude model the lead session is using, ensuring a highest-tier independent perspective. Its output feeds directly into the synthesis step.
 
 ### Step 4: Synthesize Results
 
@@ -114,13 +148,14 @@ Format:
 ```
 ## ECR Results: [Topic]
 
-### Verdict (N/3 voices): [APPROVE / APPROVE WITH CONDITIONS / REQUEST CHANGES]
+### Verdict (N/4 voices): [APPROVE / APPROVE WITH CONDITIONS / REQUEST CHANGES]
 
-| Model | Verdict | Key insight |
-|-------|---------|-------------|
-| GPT 5.4 | ... | ... |
-| Gemini 3.1 Pro | ... | ... |
-| GLM-5.1 | TIMEOUT (>180s) | — |
+| Voice | Provider | Verdict | Key insight |
+|-------|----------|---------|-------------|
+| GPT 5.4 | OpenAI | ... | ... |
+| Gemini 3.1 Pro | Google | ... | ... |
+| GLM-5.1 | Fireworks | TIMEOUT (>180s) | — |
+| Claude Fable 5 | Anthropic (sub-agent) | ... | ... |
 
 ### Consensus
 [What responding voices agree on]
@@ -129,7 +164,7 @@ Format:
 [Numbered list]
 ```
 
-If one or more voices timed out, include them in the table with `TIMEOUT (>Xs)` and note the partial panel count in the verdict header (e.g. `Verdict (2/3 voices)`). A partial panel is still useful; a silently-partial panel is not.
+If one or more voices timed out, include them in the table with `TIMEOUT (>Xs)` and note the partial panel count in the verdict header (e.g. `Verdict (3/4 voices)`). A partial panel is still useful; a silently-partial panel is not.
 
 ## Anonymization Rules
 
@@ -190,7 +225,7 @@ ECR virtual key: `op://sf-platform/litellm/virtual-key/ecr-reviews/password`
 1. User provides design document or decision
 2. Agent writes prompt with real names
 3. Agent anonymizes prompt (Step 2 — MANDATORY, verify with grep)
-4. Agent queries 3 models in parallel via LiteLLM
-5. Agent synthesizes results into consensus + conditions
+4. Agent queries 3 external models via LiteLLM **and** spawns Claude Fable 5 sub-agent — all 4 in parallel
+5. Agent synthesizes 4-voice results into consensus + conditions
 6. Agent presents actionable summary to user
 7. If approved: update document with ECR decisions log

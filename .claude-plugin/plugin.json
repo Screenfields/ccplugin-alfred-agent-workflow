@@ -1,5 +1,5 @@
 {
   "name": "alfred-agent",
   "description": "Alfred Agent Workflow - messaging, coordination, ECR, and RSI for the Alfred platform",
-  "version": "2.5.0"
+  "version": "2.6.0"
 }
