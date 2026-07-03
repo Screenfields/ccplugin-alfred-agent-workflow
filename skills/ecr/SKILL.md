@@ -23,11 +23,11 @@ Query three external top-tier AI models via LiteLLM **plus** a Claude sub-agent 
 
 ### External Panel (3 models, 3 providers — via LiteLLM)
 
-| Model ID | Provider | Strength | Timeout |
-|----------|----------|----------|---------|
-| `gpt-5.4` | OpenAI | Strongest overall reasoning, thorough implementation details | 90s |
-| `gemini-3.1-pro` | Google | Practical, concise, good at catching operational risks | 90s |
-| `glm-5.1` | Fireworks (Zhipu) | Strong structured analysis, good at edge cases; thinking model | 180s |
+| Model ID | Provider | Strength | Timeout | max_tokens |
+|----------|----------|----------|---------|------------|
+| `gpt-5.4` | OpenAI | Strongest overall reasoning, thorough implementation details | 90s | 8000 |
+| `gemini-3.1-pro` | Google | Practical, concise, good at catching operational risks | 90s | 8000 |
+| `glm-5.1` | Fireworks (Zhipu) | Strong structured analysis, good at edge cases; thinking model | 180s | 12000 |
 
 ### Self-Review Sub-Agent (4th voice — via Agent tool)
 
@@ -37,19 +37,19 @@ Spawn a Claude sub-agent using the **highest available Claude model** with the s
 |---------|--------------|--------------------------|
 | Claude Code | Fable 5 | `claude-fable-5` |
 
-The sub-agent is given the ECR prompt and asked to return: verdict, top-3 insights, and specific conditions. It runs in parallel with the LiteLLM calls.
+The sub-agent is given the ECR prompt and asked to return: verdict, top-3 insights, and specific conditions. It runs **in parallel** with the LiteLLM calls — this is intentional: parallel execution prevents the self-voice from being anchored by the external panel before forming its own opinion.
 
 ### Alternative External Models
 
-| Model ID | Provider | Use when | Timeout |
-|----------|----------|----------|---------|
-| `kimi-k2` | Fireworks (Moonshot) | Alternative to GLM-5.1, strong on complex reasoning; thinking model | 180s |
-| `deepseek-v4-pro` | Fireworks (DeepSeek) | Budget option, good for code-heavy reviews; thinking model | 180s |
-| `o3` | OpenAI | Deep reasoning (same provider as GPT 5.4, avoid using both) | 90s |
+| Model ID | Provider | Use when | Timeout | max_tokens |
+|----------|----------|----------|---------|------------|
+| `kimi-k2` | Fireworks (Moonshot) | Alternative to GLM-5.1, strong on complex reasoning; thinking model | 180s | 12000 |
+| `deepseek-v4-pro` | Fireworks (DeepSeek) | Budget option, good for code-heavy reviews; thinking model | 180s | 12000 |
+| `o3` | OpenAI | Deep reasoning — **only if gpt-5.4 fails for a non-quota reason**; same provider means o3 also fails on quota errors | 90s | 8000 |
 
 ### Rules
 - External panel: always use models from **different providers** for diverse perspectives
-- Never use GPT 5.4 and o3 together (same underlying provider)
+- **Quota failures are provider-wide:** if gpt-5.4 returns RateLimitError, o3 will too — substitute a Fireworks model instead, not o3
 - Sub-agent always uses the highest available Claude model — not the currently-running model
 - Run all four queries **in parallel** for speed
 - For quick validations: 2 external models + sub-agent (3 voices total)
@@ -104,16 +104,20 @@ LITELLM_KEY=$(op read "op://sf-platform/litellm/virtual-key/ecr-reviews/password
 PROMPT=$(cat /tmp/ecr-prompt.txt)
 
 # Timeout: 90s for OpenAI/Google; 180s for Fireworks (glm-5.1, kimi-k2, deepseek-v4-pro)
-TIMEOUT=90  # override to 180 for Fireworks models
+# max_tokens: 8000 for OpenAI/Google; 12000 for Fireworks thinking models (they burn tokens on reasoning traces)
+TIMEOUT=90     # override to 180 for Fireworks models
+MAX_TOKENS=8000  # override to 12000 for Fireworks models
 RESULT=$(curl -s --max-time "$TIMEOUT" "$LITELLM_URL/v1/chat/completions" \
   -H "Authorization: Bearer $LITELLM_KEY" \
   -H "Content-Type: application/json" \
-  -d "$(jq -n --arg p "$PROMPT" '{model: "MODEL_ID", messages: [{role: "user", content: $p}], max_tokens: 5000, metadata: {tags: ["ecr"]}}')"); CURL_EXIT=$?
+  -d "$(jq -n --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" '{model: "MODEL_ID", messages: [{role: "user", content: $p}], max_tokens: $mt, metadata: {tags: ["ecr"]}}')"); CURL_EXIT=$?
 if   [ $CURL_EXIT -eq 28 ]; then echo "TIMEOUT (>${TIMEOUT}s)"
 elif [ -z "$RESULT" ];       then echo "ERROR (empty response)"
 else echo "$RESULT" | jq -r '.choices[0].message.content // "ERROR (unexpected response)"'
 fi
 ```
+
+**Truncation recovery — "completion round":** If a model's output ends mid-sentence or mid-verdict, send a follow-up request with the original prompt as the user turn, the truncated output as the assistant turn, and `"Finish only the conclusion section."` as a new user turn. This reliably recovers the verdict without re-running the full reasoning. Only needed for thinking models on long prompts.
 
 **Self-review sub-agent (Agent tool — run in parallel with the bash calls):**
 
