@@ -31,11 +31,11 @@ Query three external top-tier AI models via LiteLLM **plus** a Claude sub-agent 
 
 ### Self-Review Sub-Agent (4th voice — via Agent tool)
 
-Spawn a Claude sub-agent using the **highest available Claude model** with the same anonymized prompt. This gives a same-provider but highest-tier perspective running independently of the currently active session model.
+Spawn a Claude sub-agent using the **highest model available in the Max subscription** with the same anonymized prompt. This gives a same-provider but highest-tier perspective running independently of the currently active session model.
 
-| Runtime | Highest model | Agent tool `model` param |
-|---------|--------------|--------------------------|
-| Claude Code | Fable 5 | `claude-fable-5` |
+| Runtime | Max subscription highest model | Agent tool `model` param |
+|---------|-------------------------------|--------------------------|
+| Claude Code | Opus 4.8 | `claude-opus-4-8` |
 
 The sub-agent is given the ECR prompt and asked to return: verdict, top-3 insights, and specific conditions. It runs **in parallel** with the LiteLLM calls — this is intentional: parallel execution prevents the self-voice from being anchored by the external panel before forming its own opinion.
 
@@ -123,7 +123,7 @@ fi
 
 ```
 Agent(
-  model: "claude-fable-5",
+  model: "claude-opus-4-8",
   prompt: "You are acting as an independent peer reviewer in an Expert Consulting Review (ECR).
 Your task: review the following anonymized proposal and return exactly:
 1. Verdict: APPROVE | APPROVE WITH CONDITIONS | REQUEST CHANGES
@@ -138,7 +138,7 @@ Do not explain your role. Return the review directly.
 )
 ```
 
-The sub-agent runs at `claude-fable-5` regardless of which Claude model the lead session is using, ensuring a highest-tier independent perspective. Its output feeds directly into the synthesis step.
+The sub-agent runs at `claude-opus-4-8` (highest model in the Max subscription) regardless of which Claude model the lead session is using, ensuring a highest-tier independent perspective. Its output feeds directly into the synthesis step.
 
 ### Step 4: Synthesize Results
 
@@ -159,7 +159,7 @@ Format:
 | GPT 5.4 | OpenAI | ... | ... |
 | Gemini 3.1 Pro | Google | ... | ... |
 | GLM-5.1 | Fireworks | TIMEOUT (>180s) | — |
-| Claude Fable 5 | Anthropic (sub-agent) | ... | ... |
+| Claude Opus 4.8 | Anthropic (sub-agent) | ... | ... |
 
 ### Consensus
 [What responding voices agree on]
@@ -229,7 +229,7 @@ ECR virtual key: `op://sf-platform/litellm/virtual-key/ecr-reviews/password`
 1. User provides design document or decision
 2. Agent writes prompt with real names
 3. Agent anonymizes prompt (Step 2 — MANDATORY, verify with grep)
-4. Agent queries 3 external models via LiteLLM **and** spawns Claude Fable 5 sub-agent — all 4 in parallel
+4. Agent queries 3 external models via LiteLLM **and** spawns Claude Opus 4.8 sub-agent — all 4 in parallel
 5. Agent synthesizes 4-voice results into consensus + conditions
 6. Agent presents actionable summary to user
 7. If approved: update document with ECR decisions log
