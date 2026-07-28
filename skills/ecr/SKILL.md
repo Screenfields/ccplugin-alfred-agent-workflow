@@ -100,7 +100,29 @@ Fire all four queries simultaneously — three external via LiteLLM, one sub-age
 # LITELLM_URL: defaults to prod platform tier; set the env var to override
 # (e.g. for a non-default cluster). Defaulted via shell parameter expansion.
 LITELLM_URL="${LITELLM_URL:-https://litellm.screenfields.net}"
-LITELLM_KEY=$(op read "op://sf-platform/litellm/virtual-key/ecr-reviews/password" 2>/dev/null || echo "$LITELLM_MASTER_KEY")
+
+# Credential lookup: env var first, `op` CLI only as a fallback when present.
+# Spoke devboxes do NOT have `op` installed (by design — installing it would
+# give a devbox reach over the whole 1Password vault to solve a
+# one-credential problem); they get LITELLM_API_KEY delivered as a plain env
+# var via ExternalSecret instead (see alfred-platform-gitops, apps/*-devbox
+# overlays). Platform-ops and other hosts with `op` configured keep working
+# via the fallback. Fail loud, naming both routes, rather than silently
+# sending an empty/invalid Authorization header.
+if [ -n "$LITELLM_API_KEY" ]; then
+  LITELLM_KEY="$LITELLM_API_KEY"
+elif command -v op >/dev/null 2>&1; then
+  LITELLM_KEY=$(op read "op://sf-platform/litellm/virtual-key/ecr-reviews/password" 2>/dev/null)
+fi
+if [ -z "$LITELLM_KEY" ]; then
+  echo "ERROR: no LiteLLM credential available for the ECR skill." >&2
+  echo "  Route 1: set LITELLM_API_KEY in the environment (devboxes get this" >&2
+  echo "  via ExternalSecret from litellm/virtual-key/ecr-reviews)." >&2
+  echo "  Route 2: install the 1Password 'op' CLI and ensure" >&2
+  echo "  'op read op://sf-platform/litellm/virtual-key/ecr-reviews/password' works." >&2
+  echo "  Neither is available in this environment." >&2
+  exit 1
+fi
 PROMPT=$(cat /tmp/ecr-prompt.txt)
 
 # Timeout: 90s for OpenAI/Google; 180s for Fireworks (glm-5.1, kimi-k2, deepseek-v4-pro)
@@ -180,7 +202,7 @@ LiteLLM proxy is reachable via the `LITELLM_URL` env var. Default if unset: `htt
 
 **Requires platform-routing context.** The skill is only usable from machines where `litellm.screenfields.net` resolves through the internal-routing path (in-cluster pods via CoreDNS catalog, or platform machines with the equivalent local resolver override). On those hosts the public CF gate is bypassed and the request reaches LiteLLM directly over the tailnet. From environments without that override the request hits public CF and is rejected.
 
-**Auth:** LiteLLM virtual key via `Authorization: Bearer <key>` (use the ecr-reviews key from 1Password).
+**Auth:** LiteLLM virtual key via `Authorization: Bearer <key>` (the ecr-reviews key). Read `LITELLM_API_KEY` from the environment first; fall back to the `op` CLI only when it's installed and the env var is unset. Fail with an actionable message naming both routes if neither is available — never send an empty or missing key.
 
 Available top-tier models:
 ```
@@ -192,7 +214,7 @@ deepseek-v4-pro  Fireworks (DeepSeek)
 o3               OpenAI (reasoning)
 ```
 
-ECR virtual key: `op://sf-platform/litellm/virtual-key/ecr-reviews/password`
+ECR virtual key: `op://sf-platform/litellm/virtual-key/ecr-reviews/password` — read via `LITELLM_API_KEY` env var first, `op` CLI as fallback (see Step 3).
 
 ## ECR Types
 
