@@ -46,7 +46,10 @@ via read-only sub-agents so the owner is not kept waiting; the lead only merges.
 owner wait for the sweep:** if you already know two or three genuine owner items from the session or
 the last handover, show the agenda with those and present item 1 while the sweep runs, then fold the
 sweep's additions into the agenda at the next natural pause ("sweep landed; added X, dropped Y").
-The first live run stalled for minutes on a background sweep and the owner said so.
+The first live run stalled for minutes on a background sweep and the owner said so. Say plainly
+that the agenda may still change ("sweep still running; the list can grow"), and if the sweep lands a
+security or data-loss item, name it at the next pause and offer to jump to it — do not silently
+append it to the end.
 
 - **GitHub issues** carrying the project's owner-action label (alfred-platform uses
   `action:jochem`), plus open issues whose most recent comments contain an explicit owner ask
@@ -147,6 +150,7 @@ how long), whether it can be undone, and what you will verify afterwards. Ask fo
 | Decides / confirms / says "done" | Record it, act on it (Step 5), confirm in one line, move to the next item |
 | Asks a question | Answer it fully, in plain words, then re-present the choice or step and wait again |
 | Gives partial feedback on a multi-step action | Give only the next step(s) that this unlocks; wait again |
+| Answers part of a bundled item ("yes to 1–5, not 6–8") | Record and act on the answered parts; the rest stays the same item, re-presented with only the open parts; wait again |
 | "skip" / "next" / "later" | Note it as skipped (with the reason if given), move on |
 | "stop" / "enough" / "done for now" | Go to the closing summary |
 | Changes the question ("actually, what about...") | Follow the owner; the agenda is theirs to change |
