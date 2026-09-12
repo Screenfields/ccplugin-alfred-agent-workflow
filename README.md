@@ -88,7 +88,9 @@ Behaviour:
 
 - **Soft tier** (default 20%) — injects `CONTEXT BUDGET: n% used … Land at the next natural boundary`.
 - **Hard tier** (default 35%) — injects `… LAND NOW`, and the first `Stop` after crossing is blocked once with the light-landing checklist. Never two blocks in a row, never a block at soft tier.
-- **Rate limit** — one injection per tier per session per 10 minutes; escalating soft → hard resets the timer so the harder message is not swallowed.
+- **Rate limit** — one injection per tier per session per 10 minutes; escalating soft → hard resets the timer so the harder message is not swallowed. `PostToolUse` is capped harder: once per tier for the whole session, since a tool result is a worse place to interrupt than a prompt boundary.
+- **Sub-agents are skipped** — a worker's tool calls fire `PostToolUse` under the parent's `session_id`, so the hook ignores any event carrying `agent_id` (present only in sub-agent context) and any `Agent`/`Task` tool call. Workers are never told to land a session they do not own.
+- **Fails open** — `Stop` honours `stop_hook_active`, and refuses to block unless the once-per-crossing flag was definitely persisted. A broken state directory means no nagging, never an unendable turn.
 - **Silent by default** — no state file, or a reading older than 2 hours, means the hook does nothing. A host without the fleet status line simply never sees it.
 
 `/alfred-agent:land` (both modes) runs `hooks/context-budget.sh landed`, which clears
@@ -100,6 +102,8 @@ landing it reports `landed at n% — clear now` and the owner clears.
 | `ALFRED_CONTEXT_SOFT_PCT` | `20` | Soft threshold, in percent of the context window |
 | `ALFRED_CONTEXT_HARD_PCT` | `35` | Hard threshold — the tier that can block a `Stop` |
 | `ALFRED_STATE_DIR` | `$HOME/.cache/alfred` | Root of the state directory shared with the status line |
+
+A non-numeric threshold override falls back to the default silently. `check` also records the live session id in `<state dir>/context/current-session`, so `landed` marks the right session when the land skill calls it without an argument (resolution order: explicit argument, `CLAUDE_SESSION_ID`, that pointer, then the newest state file with a warning on stderr).
 
 Tests: `./tests/context-budget.sh` (plain bash, no framework).
 

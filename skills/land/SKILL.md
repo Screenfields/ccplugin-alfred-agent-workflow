@@ -46,7 +46,7 @@ Run these five steps in order.
 | a | **Offload every decision and state item of this session.** Each one goes as a comment on its GitHub issue. Knowledge and background go to Metis via `capture_note`. Large verbatim payloads (transcripts, logs, dumps) go through `scripts/hub/metis_capture_file.py` — never retyped through the model, which truncates and fabricates |
 | b | **Prune the handover memory to pointers only.** Every line whose content is now on an issue or in Metis is replaced by its issue URL or capture id. Keep `MEMORY.md` under its size limit — a light landing that grows memory has failed |
 | c | **Push every tree.** All working trees committed and pushed; worker worktrees removed |
-| d | **Mark the landing:** run `hooks/context-budget.sh landed` (plugin path: `${CLAUDE_PLUGIN_ROOT}/hooks/context-budget.sh landed`). This clears the Stop block for the current crossing |
+| d | **Mark the landing:** run `${CLAUDE_PLUGIN_ROOT}/hooks/context-budget.sh landed`. This clears the Stop block for the current crossing. The block reason printed by the hook names the absolute path — use that if you have it. Pass the session id as an argument if several sessions share the state directory |
 | e | **Tell the owner: "landed at n% — clear now."** The model cannot clear its own context; the owner does it. Say the number, then stop — do not open new work in the same turn |
 
 ### Notes
@@ -191,7 +191,7 @@ Future sessions read GitHub Issues to know what's next. They don't read memory f
 
 ### Step 5: Confirm to User
 
-Full mode also runs `hooks/context-budget.sh landed` here, after the report — same marker as light mode step d.
+Full mode also runs `${CLAUDE_PLUGIN_ROOT}/hooks/context-budget.sh landed` here, after the report — same marker as light mode step d.
 
 Report:
 - Health-check gate result (pass/fail per assertion)
