@@ -541,7 +541,7 @@ buzz_resolve_channels() {
 check_buzz_channel() {
   local cfg="$1" channel_id="$2" label="$3"
   local source="buzz-$label"
-  local state_file state prev_ts seeded args items max_ts others new_count names pk
+  local state_file state prev_ts seeded args raw items max_ts others new_count names pk
 
   state_file=$(buzz_channel_state_file "$channel_id")
   state=$(read_json_state "$state_file" '{"last_created_at":0,"seeded":false}')
@@ -555,11 +555,34 @@ check_buzz_channel() {
     return
   fi
 
-  items=$(mcp_items "$MCP_BODY")
-  if [ -z "$items" ]; then
+  # buzz_read must yield a JSON array. Unlike the shared mcp_items helper
+  # (fine with agent-messaging, where a bare object is a legitimate single
+  # result), an object or error payload here must NOT be coerced into a
+  # fake one-item list — that shape mismatch used to get diffed as if it
+  # were a real message and fire a WAKE on every single pass.
+  raw=$(printf '%s' "$MCP_BODY" | jq -c '
+    if (.result.structuredContent? | type) == "object" and (.result.structuredContent.result? != null)
+      then .result.structuredContent.result
+    elif (.result.structuredContent? | type) == "array" then .result.structuredContent
+    elif (.result.content? != null)
+      then [ .result.content[] | select(.type == "text") | .text | (fromjson? // empty) ]
+    else null end
+  ' 2>/dev/null)
+
+  if [ -z "$raw" ] || [ "$raw" = "null" ] || ! printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    diag "buzz $label: buzz_read returned a non-array payload — treating as nothing new"
     record_result "$source" false "unrecognised buzz_read response shape"
     return
   fi
+
+  # Keep only well-formed items: an object with a numeric created_at and a
+  # string pubkey or id. Anything else never enters the diff, so max_ts only
+  # ever advances on items that actually look like messages.
+  items=$(printf '%s' "$raw" | jq -c '[ .[] | select(
+    (type == "object") and
+    ((.created_at? | type) == "number") and
+    (((.pubkey? | type) == "string") or ((.id? | type) == "string"))
+  ) ]')
 
   # `since` is inclusive on the relay (created_at >= since), so the cursor
   # advances one second past the newest event seen — otherwise every pass
@@ -691,7 +714,12 @@ cmd_check() {
 
 cmd_run() {
   local interval="${1:-}"
-  if [ -z "$interval" ]; then interval="$DEFAULT_INTERVAL"; fi
+  if [ -z "$interval" ]; then
+    interval="$DEFAULT_INTERVAL"
+  elif ! [[ "$interval" =~ ^[1-9][0-9]*$ ]]; then
+    echo "alfred-wake: invalid interval '$interval' — must be a positive integer, using default ${DEFAULT_INTERVAL}s" >&2
+    interval="$DEFAULT_INTERVAL"
+  fi
   ensure_state_dir || exit 1
   trap 'log_line "stopped"; exit 0' TERM INT
   log_line "started (tick=${interval}s am_interval=${AM_INTERVAL}s state=$STATE_DIR)"
