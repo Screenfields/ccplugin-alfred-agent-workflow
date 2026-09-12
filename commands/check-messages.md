@@ -6,7 +6,43 @@ Check for new unread messages using the agent-messaging MCP service.
 
 ## Session-start mandate
 
-**Call `get_messages` unconditionally at every session start.** This is the only delivery mechanism — the automated inbox-watcher architecture was retired 2026-06-09 (see retirement memo in `alfred-platform/docs/baseline/`). There is no real-time wake; agents must explicitly check their own inbox.
+**Before anything else in a session, arm the wake bridge.** It is a deterministic
+bash watcher (no LLM anywhere in it) that wakes the session only when there is
+genuinely new news, replacing the 15-minute inbox loop and its ~96 empty model
+turns per day:
+
+```bash
+command -v alfred-wake >/dev/null 2>&1 || "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake" install
+```
+
+```
+Monitor(command: "alfred-wake run", persistent: true,
+        description: "inbox wake: agent-messaging + Buzz")
+```
+
+Then **call `get_messages` once** to pick up whatever arrived before the bridge
+came up (the bridge seeds its cursors on first run and deliberately never
+replays history).
+
+**Only if arming fails** — the `Monitor` tool errors, or
+`alfred-wake check` reports `WAKE-ERROR agent-messaging` — fall back to the old
+cadence: `/loop 15m /alfred-agent:check-messages`. Say so explicitly when you
+fall back; a silent fallback looks identical to a working bridge.
+
+## Wake-armed check (run this every time this command runs)
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake" status >/dev/null 2>&1 || \
+  echo "WARNING: no wake bridge armed — this inbox is poll-only. Arm it: Monitor(command: \"alfred-wake run\", persistent: true)"
+```
+
+`alfred-wake status` exits 0 only while a `run` loop has touched its marker file
+within the last 5 minutes. **Surface that warning line to the user verbatim** —
+an unarmed lead misses messages until someone manually checks, which is exactly
+the failure this bridge exists to remove.
+
+See the `alfred-wake` section of the plugin README for configuration, state
+layout, and how to verify with `alfred-wake check`.
 
 **First, check for project config:**
 

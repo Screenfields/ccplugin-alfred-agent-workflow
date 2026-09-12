@@ -1,0 +1,808 @@
+#!/usr/bin/env bash
+# alfred-wake — deterministic, no-LLM inbox wake bridge for Alfred lead agents.
+#
+# A lead's Claude Code session arms this as a persistent Monitor. It watches the
+# lead's agent-messaging inbox (and, when the pod has a Buzz identity, the
+# lead's Buzz channels) and prints ONE stdout line per source per pass, ONLY
+# when there is genuinely new news. The harness turns each printed line into a
+# wake-up for the session. Silence means nothing new — and silence costs no
+# tokens, which is the whole point: it replaces the 15-minute
+# `/loop 15m /alfred-agent:check-messages` cron (~96 empty model turns/day).
+#
+# Modes:
+#   alfred-wake check            one pass, DRY RUN (never writes cursors),
+#                                diagnostics on stderr, events on stdout
+#   alfred-wake run [interval]   loop forever (default tick 20s)
+#   alfred-wake install          symlink this script into ~/.local/bin
+#   alfred-wake status           show config + whether a run is currently armed
+#
+# Security invariants:
+#   - No token, header value, private key or message body is ever printed,
+#     logged, or placed in argv. curl auth goes through a `-K` config file in a
+#     private (umask 077) temp dir, removed on exit.
+#   - No `set -x` anywhere.
+#   - The Buzz private key is NEVER read by this script. Buzz is reached through
+#     the pod-local buzz-mcp sidecar, which is the only holder of the key and
+#     does NIP-42 AUTH against the relay on our behalf.
+#   - Read-only against both services: no mark-as-read, no sends, no posts.
+#
+# Deps: bash, curl, jq.
+
+set -uo pipefail
+umask 077
+
+VERSION="1.0.0"
+
+# ---------------------------------------------------------------------------
+# State directory
+#
+# Cursors MUST survive a pod restart, or a restarted lead replays its whole
+# history as "new". In a devbox pod only the workspace PVC is guaranteed
+# persistent ($HOME comes from the image on scaffolded-project devboxes), so
+# /workspace wins over $HOME whenever it is writable.
+# ---------------------------------------------------------------------------
+default_state_dir() {
+  if [ -d /workspace ] && [ -w /workspace ]; then
+    echo "/workspace/.alfred-wake"
+  else
+    echo "${XDG_STATE_HOME:-$HOME/.local/state}/alfred-wake"
+  fi
+}
+
+STATE_DIR="${ALFRED_WAKE_STATE_DIR:-$(default_state_dir)}"
+LOG_FILE="$STATE_DIR/alfred-wake.log"
+LOG_MAX_BYTES=1048576
+ARMED_MARKER="$STATE_DIR/armed"
+INIT_MARKER="$STATE_DIR/.initialized"
+AM_STATE_FILE="$STATE_DIR/am_state.json"
+FAILURES_FILE="$STATE_DIR/failures.json"
+BUZZ_IDENTITY_FILE="$STATE_DIR/buzz_identity.json"
+
+# ---------------------------------------------------------------------------
+# agent-messaging configuration
+# ---------------------------------------------------------------------------
+AM_URL="${AGENT_MESSAGING_URL:-https://agent-messaging.screenfields.net/mcp/}"
+AM_MCP_JSON="${ALFRED_WAKE_MCP_JSON:-}"
+AM_SERVER_NAME="${ALFRED_WAKE_AM_SERVER:-agent-messaging}"
+AM_PROTOCOL_VERSION="${ALFRED_WAKE_MCP_PROTOCOL:-2025-06-18}"
+AM_INTERVAL="${ALFRED_WAKE_AM_INTERVAL:-60}"
+AM_MAX_INTERVAL="${ALFRED_WAKE_AM_MAX_INTERVAL:-600}"
+
+# ---------------------------------------------------------------------------
+# Buzz configuration (OPTIONAL — no Buzz config means agent-messaging only)
+#
+# Buzz is reached over the pod-local buzz-mcp sidecar (Streamable HTTP MCP).
+# The devbox image ships no `buzz` CLI and never holds the Nostr key.
+# ---------------------------------------------------------------------------
+BUZZ_MODE="${ALFRED_WAKE_BUZZ:-auto}"                 # auto | on | off
+BUZZ_MCP_URL="${ALFRED_WAKE_BUZZ_MCP_URL:-http://127.0.0.1:8765/mcp}"
+BUZZ_CHANNELS_CFG="${ALFRED_WAKE_BUZZ_CHANNELS:-}"    # "<id>[:<label>],..." — empty = all visible
+BUZZ_NAMES_CFG="${ALFRED_WAKE_BUZZ_NAMES:-}"          # "<pubkey>:<name>,..." — optional prettifier
+BUZZ_CHANNEL_REFRESH_S="${ALFRED_WAKE_BUZZ_CHANNEL_REFRESH:-900}"
+
+# ---------------------------------------------------------------------------
+# Generic tuning
+# ---------------------------------------------------------------------------
+DEFAULT_INTERVAL="${ALFRED_WAKE_INTERVAL:-20}"
+HTTP_TIMEOUT="${ALFRED_WAKE_HTTP_TIMEOUT:-25}"
+FETCH_LIMIT=50
+FAIL_THRESHOLD=5
+ERROR_REPEAT_S=3600
+TZ_LOCAL="${ALFRED_WAKE_TZ:-Europe/Amsterdam}"
+
+# Runtime flags
+PERSIST=true          # `check` flips this to false — a dry run must not eat news
+BUZZ_ENABLED=false
+BUZZ_SKIP_LOGGED=false
+BUZZ_SELF_PUBKEY=""
+BUZZ_CHANNELS_RESOLVED=""   # newline-separated "<id><TAB><label>"
+BUZZ_CHANNELS_AT=0
+AM_NEXT_AT=0
+AM_BACKOFF="$AM_INTERVAL"
+MCP_HTTP_CODE=0
+MCP_BODY=""
+
+TAB=$'\t'
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+now_epoch() { date +%s; }
+now_local_hm() { TZ="$TZ_LOCAL" date '+%H:%M %Z'; }
+now_local_ts() { TZ="$TZ_LOCAL" date '+%Y-%m-%d %H:%M:%S %Z'; }
+
+# Diagnostics go to stderr and only in dry-run mode: stdout is the wake channel
+# and must carry nothing but WAKE lines.
+diag() {
+  if [ "$PERSIST" = "false" ]; then
+    printf 'alfred-wake: %s\n' "$1" >&2
+  fi
+  return 0
+}
+
+rotate_log_if_needed() {
+  [ -f "$LOG_FILE" ] || return 0
+  local size
+  size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+  if [ "$size" -ge "$LOG_MAX_BYTES" ]; then
+    mv -f "$LOG_FILE" "${LOG_FILE}.1" 2>/dev/null || true
+  fi
+}
+
+log_line() {
+  [ -d "$STATE_DIR" ] || return 0
+  rotate_log_if_needed
+  printf '%s %s\n' "$(now_local_ts)" "$1" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+read_json_state() {
+  local file="$1" default="$2"
+  if [ -f "$file" ]; then
+    jq -e '.' "$file" 2>/dev/null || echo "$default"
+  else
+    echo "$default"
+  fi
+}
+
+write_json_state() {
+  local file="$1" content="$2"
+  [ "$PERSIST" = "true" ] || return 0
+  local tmp
+  tmp=$(mktemp "${file}.XXXXXX") || return 0
+  printf '%s' "$content" > "$tmp"
+  mv -f "$tmp" "$file"
+}
+
+# Escape a value for use inside a curl -K `header = "..."` directive.
+curl_cfg_escape() {
+  local v="$1"
+  v="${v//\\/\\\\}"
+  v="${v//\"/\\\"}"
+  printf '%s' "$v"
+}
+
+# Expand ${VAR} and ${VAR:-default} placeholders from the environment. Needed
+# because the plugin's own .mcp.json carries placeholders, not literals.
+expand_placeholders() {
+  local rest="$1" out="" pre var def tail val
+  while [[ "$rest" =~ ^([^$]*)\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}(.*)$ ]]; do
+    pre="${BASH_REMATCH[1]}"
+    var="${BASH_REMATCH[2]}"
+    def="${BASH_REMATCH[4]}"
+    tail="${BASH_REMATCH[5]}"
+    val="${!var-}"
+    if [ -z "$val" ]; then val="$def"; fi
+    out+="$pre$val"
+    rest="$tail"
+  done
+  printf '%s' "$out$rest"
+}
+
+# ---------------------------------------------------------------------------
+# Failure / recovery signalling, per source
+# ---------------------------------------------------------------------------
+
+record_result() {
+  local source="$1" ok="$2" reason="${3:-}"
+  local state now consecutive reported last_ts elapsed
+  state=$(read_json_state "$FAILURES_FILE" '{}')
+  consecutive=$(printf '%s' "$state" | jq -r --arg s "$source" '.[$s].consecutive // 0')
+  reported=$(printf '%s' "$state" | jq -r --arg s "$source" '.[$s].reported // false')
+  last_ts=$(printf '%s' "$state" | jq -r --arg s "$source" '.[$s].last_error_ts // 0')
+  now=$(now_epoch)
+
+  if [ "$ok" = "true" ]; then
+    if [ "$reported" = "true" ]; then
+      echo "WAKE-RECOVERED $source"
+    fi
+    state=$(printf '%s' "$state" | jq --arg s "$source" \
+      '.[$s] = {"consecutive":0,"reported":false,"last_error_ts":0}')
+  else
+    diag "$source failed: $reason"
+    consecutive=$((consecutive + 1))
+    if [ "$consecutive" -ge "$FAIL_THRESHOLD" ]; then
+      elapsed=$((now - last_ts))
+      if [ "$reported" != "true" ] || [ "$elapsed" -ge "$ERROR_REPEAT_S" ]; then
+        echo "WAKE-ERROR $source: $reason"
+        state=$(printf '%s' "$state" | jq --arg s "$source" --argjson c "$consecutive" --argjson t "$now" \
+          '.[$s] = {"consecutive":$c,"reported":true,"last_error_ts":$t}')
+      else
+        state=$(printf '%s' "$state" | jq --arg s "$source" --argjson c "$consecutive" \
+          '.[$s].consecutive = $c')
+      fi
+    else
+      state=$(printf '%s' "$state" | jq --arg s "$source" --argjson c "$consecutive" \
+        '.[$s] = {"consecutive":$c,"reported":false,"last_error_ts":0}')
+    fi
+  fi
+  write_json_state "$FAILURES_FILE" "$state"
+}
+
+# ---------------------------------------------------------------------------
+# Minimal MCP (Streamable HTTP JSON-RPC) client
+# ---------------------------------------------------------------------------
+
+# mcp_post <url> <curl-config-file> <json-body> [header-dump-file]
+# Sets MCP_HTTP_CODE and MCP_BODY. Never echoes the config file.
+mcp_post() {
+  local url="$1" cfg="$2" body="$3" hdr_out="${4:-}"
+  local resp
+  if [ -n "$hdr_out" ]; then
+    resp=$(curl -K "$cfg" -D "$hdr_out" -w '\n%{http_code}' -X POST "$url" -d "$body" 2>/dev/null)
+  else
+    resp=$(curl -K "$cfg" -w '\n%{http_code}' -X POST "$url" -d "$body" 2>/dev/null)
+  fi
+  MCP_HTTP_CODE=$(printf '%s' "$resp" | tail -1)
+  MCP_BODY=$(printf '%s' "$resp" | sed '$d')
+  if [ -z "$MCP_HTTP_CODE" ]; then MCP_HTTP_CODE=0; fi
+}
+
+# Some servers answer JSON-RPC over SSE ("data: {...}"). Normalise to one object.
+mcp_json() {
+  local raw="$1"
+  if printf '%s' "$raw" | grep -q '^data: '; then
+    printf '%s' "$raw" | grep '^data: ' | sed 's/^data: //' | tail -1
+  else
+    printf '%s' "$raw"
+  fi
+}
+
+# Open an MCP session; appends Mcp-Session-Id to <cfg> when the server issues
+# one (agent-messaging currently does not, and works fine without).
+mcp_initialize() {
+  local url="$1" cfg="$2" workdir="$3" client="$4"
+  local body hdr session_id
+  body=$(jq -cn --arg pv "$AM_PROTOCOL_VERSION" --arg c "$client" --arg v "$VERSION" \
+    '{jsonrpc:"2.0",method:"initialize",id:1,
+      params:{protocolVersion:$pv,capabilities:{},clientInfo:{name:$c,version:$v}}}')
+  hdr="$workdir/init_headers.txt"
+  mcp_post "$url" "$cfg" "$body" "$hdr"
+  if [ "$MCP_HTTP_CODE" != "200" ]; then return 1; fi
+
+  session_id=$(grep -i '^mcp-session-id:' "$hdr" 2>/dev/null | head -1 | cut -d: -f2- | tr -d ' \r\n')
+  if [ -n "$session_id" ]; then
+    printf 'header = "Mcp-Session-Id: %s"\n' "$(curl_cfg_escape "$session_id")" >> "$cfg"
+  fi
+  mcp_post "$url" "$cfg" '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  return 0
+}
+
+# mcp_tool_call <url> <cfg> <tool-name> <arguments-json>
+# On success MCP_BODY holds the normalised JSON-RPC response object.
+mcp_tool_call() {
+  local url="$1" cfg="$2" tool="$3" args="$4"
+  local body
+  body=$(jq -cn --arg n "$tool" --argjson a "$args" \
+    '{jsonrpc:"2.0",method:"tools/call",id:2,params:{name:$n,arguments:$a}}')
+  mcp_post "$url" "$cfg" "$body"
+  if [ "$MCP_HTTP_CODE" != "200" ]; then return 1; fi
+  MCP_BODY=$(mcp_json "$MCP_BODY")
+  if printf '%s' "$MCP_BODY" | jq -e '.error' >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+# Normalise a tools/call result into a JSON array of items, covering every shape
+# a FastMCP server can emit: structuredContent.result (list return),
+# structuredContent (object return), or content[].text carrying JSON.
+mcp_items() {
+  printf '%s' "$1" | jq -c '
+    (if (.result.structuredContent? | type) == "object" and (.result.structuredContent.result? != null)
+       then .result.structuredContent.result
+     elif (.result.structuredContent? | type) == "array" then .result.structuredContent
+     elif (.result.structuredContent? | type) == "object" then .result.structuredContent
+     elif (.result.content? != null)
+       then [ .result.content[] | select(.type == "text") | .text | (fromjson? // empty) ]
+     else [] end)
+    | (if type == "array" then . else [.] end)
+    | [ .[] | if type == "array" then .[] else . end ]
+  ' 2>/dev/null
+}
+
+# Build a private curl config dir + file. Echoes the workdir path.
+new_curl_workdir() {
+  local workdir
+  workdir=$(umask 077 && mktemp -d) || return 1
+  {
+    echo 'header = "Content-Type: application/json"'
+    echo 'header = "Accept: application/json, text/event-stream"'
+    echo 'silent'
+    echo 'show-error'
+    printf 'max-time = %s\n' "$HTTP_TIMEOUT"
+  } > "$workdir/curl.cfg"
+  printf '%s' "$workdir"
+}
+
+# ---------------------------------------------------------------------------
+# agent-messaging
+# ---------------------------------------------------------------------------
+
+am_auth_mode() {
+  if [ -n "$AM_MCP_JSON" ] && [ -f "$AM_MCP_JSON" ]; then
+    echo "$AM_MCP_JSON"
+  elif [ -n "${AGENT_MESSAGING_TOKEN:-}" ]; then
+    echo "env AGENT_MESSAGING_TOKEN"
+  else
+    echo "NONE"
+  fi
+}
+
+# Append the agent-messaging auth headers to <cfg>. Returns non-zero when no
+# usable credential is configured. Values go straight into the config file —
+# never echoed, never in argv.
+am_write_auth_headers() {
+  local cfg="$1"
+  local token="${AGENT_MESSAGING_TOKEN:-}" agent="${AGENT_ID:-}"
+  local cf_id="${CF_ACCESS_CLIENT_ID:-}" cf_secret="${CF_ACCESS_CLIENT_SECRET:-}"
+
+  # A .mcp.json (hub-style, or an explicit ALFRED_WAKE_MCP_JSON) wins when it
+  # yields at least one usable header. Its values may be ${VAR} placeholders.
+  if [ -n "$AM_MCP_JSON" ] && [ -f "$AM_MCP_JSON" ]; then
+    local url_raw entries key value found=false
+    url_raw=$(jq -r --arg s "$AM_SERVER_NAME" '.mcpServers[$s].url // empty' "$AM_MCP_JSON" 2>/dev/null)
+    if [ -n "$url_raw" ]; then AM_URL=$(expand_placeholders "$url_raw"); fi
+    entries=$(jq -r --arg s "$AM_SERVER_NAME" \
+      '.mcpServers[$s].headers // {} | to_entries[] | .key + "	" + .value' "$AM_MCP_JSON" 2>/dev/null)
+    while IFS="$TAB" read -r key value; do
+      if [ -z "$key" ]; then continue; fi
+      value=$(expand_placeholders "$value")
+      # Drop headers whose placeholder resolved to nothing.
+      case "$value" in ''|'Bearer'|'Bearer ') continue ;; esac
+      printf 'header = "%s: %s"\n' "$(curl_cfg_escape "$key")" "$(curl_cfg_escape "$value")" >> "$cfg"
+      found=true
+    done <<< "$entries"
+    if [ "$found" = "true" ]; then return 0; fi
+  fi
+
+  # Fallback: plain env vars, which is how every devbox pod is wired.
+  if [ -z "$token" ]; then return 1; fi
+  printf 'header = "Authorization: Bearer %s"\n' "$(curl_cfg_escape "$token")" >> "$cfg"
+  if [ -n "$agent" ]; then
+    printf 'header = "X-Agent-ID: %s"\n' "$(curl_cfg_escape "$agent")" >> "$cfg"
+  fi
+  if [ -n "$cf_id" ]; then
+    printf 'header = "CF-Access-Client-Id: %s"\n' "$(curl_cfg_escape "$cf_id")" >> "$cfg"
+  fi
+  if [ -n "$cf_secret" ]; then
+    printf 'header = "CF-Access-Client-Secret: %s"\n' "$(curl_cfg_escape "$cf_secret")" >> "$cfg"
+  fi
+  return 0
+}
+
+check_agent_messaging() {
+  local workdir cfg
+  workdir=$(new_curl_workdir) || { record_result "agent-messaging" false "cannot create temp dir"; return; }
+  cfg="$workdir/curl.cfg"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$workdir'" RETURN
+
+  if ! am_write_auth_headers "$cfg"; then
+    record_result "agent-messaging" false "no credential: set AGENT_MESSAGING_TOKEN (or ALFRED_WAKE_MCP_JSON)"
+    return
+  fi
+
+  if ! mcp_initialize "$AM_URL" "$cfg" "$workdir" "alfred-wake"; then
+    record_result "agent-messaging" false "initialize http $MCP_HTTP_CODE"
+    return
+  fi
+
+  if ! mcp_tool_call "$AM_URL" "$cfg" "get_messages" \
+      '{"unread_only":true,"limit":5,"preview_chars":0}'; then
+    record_result "agent-messaging" false "get_messages http $MCP_HTTP_CODE"
+    return
+  fi
+
+  local structured
+  structured=$(printf '%s' "$MCP_BODY" | jq -c '.result.structuredContent // empty' 2>/dev/null)
+  if [ -z "$structured" ] || [ "$structured" = "null" ]; then
+    structured=$(mcp_items "$MCP_BODY" | jq -c '.[0] // empty' 2>/dev/null)
+  fi
+  if [ -z "$structured" ] || ! printf '%s' "$structured" | jq -e '.messages? != null' >/dev/null 2>&1; then
+    record_result "agent-messaging" false "unrecognised get_messages response shape"
+    return
+  fi
+
+  local total_unread current_ids
+  total_unread=$(printf '%s' "$structured" | jq -r '.total_unread // (.messages | length)')
+  current_ids=$(printf '%s' "$structured" | jq -c '[.messages[]?.id] | sort')
+
+  if [ ! -f "$AM_STATE_FILE" ]; then
+    write_json_state "$AM_STATE_FILE" "{\"unread_ids\": $current_ids}"
+    diag "agent-messaging: seeded (unread=$total_unread)"
+    record_result "agent-messaging" true
+    return
+  fi
+
+  local prev_ids new_ids new_count from_list
+  prev_ids=$(jq -c '.unread_ids // []' "$AM_STATE_FILE" 2>/dev/null || echo '[]')
+  new_ids=$(jq -cn --argjson cur "$current_ids" --argjson prev "$prev_ids" '$cur - $prev')
+  new_count=$(printf '%s' "$new_ids" | jq 'length')
+
+  if [ "$new_count" -gt 0 ]; then
+    from_list=$(printf '%s' "$structured" | jq -r --argjson newids "$new_ids" \
+      '[.messages[] | select(.id as $i | $newids | index($i)) | .from_agent] | unique | join(",")')
+    echo "WAKE am unread=$total_unread from=$from_list"
+  else
+    diag "agent-messaging: nothing new (unread=$total_unread)"
+  fi
+
+  write_json_state "$AM_STATE_FILE" "{\"unread_ids\": $current_ids}"
+  record_result "agent-messaging" true
+}
+
+# ---------------------------------------------------------------------------
+# Buzz (optional, via the pod-local buzz-mcp sidecar)
+# ---------------------------------------------------------------------------
+
+buzz_channel_state_file() {
+  echo "$STATE_DIR/buzz_channel_$1.json"
+}
+
+# The sidecar exposes no display-name lookup, so a pubkey prefix is the default
+# label; ALFRED_WAKE_BUZZ_NAMES lets an operator make wake lines readable.
+buzz_pretty_name() {
+  local pubkey="$1" entry id name
+  if [ -n "$BUZZ_NAMES_CFG" ]; then
+    local IFS=','
+    for entry in $BUZZ_NAMES_CFG; do
+      id="${entry%%:*}"
+      name="${entry#*:}"
+      if [ "$id" = "$pubkey" ] && [ -n "$name" ] && [ "$name" != "$entry" ]; then
+        printf '%s' "$name"
+        return 0
+      fi
+    done
+  fi
+  printf '%s' "${pubkey:0:8}"
+}
+
+# One-shot probe: is a buzz-mcp sidecar answering, and does it have an identity?
+buzz_probe() {
+  if [ "$BUZZ_MODE" = "off" ]; then
+    diag "buzz: disabled (ALFRED_WAKE_BUZZ=off)"
+    return 1
+  fi
+
+  local workdir cfg
+  workdir=$(new_curl_workdir) || return 1
+  cfg="$workdir/curl.cfg"
+
+  if ! mcp_initialize "$BUZZ_MCP_URL" "$cfg" "$workdir" "alfred-wake"; then
+    rm -rf "$workdir"
+    if [ "$BUZZ_MODE" = "on" ]; then
+      record_result "buzz" false "sidecar unreachable at $BUZZ_MCP_URL (http $MCP_HTTP_CODE)"
+    elif [ "$BUZZ_SKIP_LOGGED" = "false" ]; then
+      # Buzz is OPTIONAL. A lead with no Buzz identity is the normal case:
+      # log once, never emit WAKE-ERROR for it.
+      log_line "buzz: no sidecar at $BUZZ_MCP_URL — watching agent-messaging only"
+      diag "buzz: no sidecar at $BUZZ_MCP_URL — agent-messaging only"
+      BUZZ_SKIP_LOGGED=true
+    fi
+    return 1
+  fi
+
+  if mcp_tool_call "$BUZZ_MCP_URL" "$cfg" "buzz_whoami" '{}'; then
+    BUZZ_SELF_PUBKEY=$(mcp_items "$MCP_BODY" | jq -r '.[0].pubkey // empty')
+  fi
+  rm -rf "$workdir"
+
+  if [ -z "$BUZZ_SELF_PUBKEY" ]; then
+    if [ "$BUZZ_SKIP_LOGGED" = "false" ]; then
+      log_line "buzz: sidecar reachable but no identity — watching agent-messaging only"
+      diag "buzz: sidecar reachable but buzz_whoami returned no pubkey"
+      BUZZ_SKIP_LOGGED=true
+    fi
+    return 1
+  fi
+
+  write_json_state "$BUZZ_IDENTITY_FILE" "$(jq -n --arg p "$BUZZ_SELF_PUBKEY" '{pubkey:$p}')"
+  log_line "buzz: identity ${BUZZ_SELF_PUBKEY:0:8} via $BUZZ_MCP_URL"
+  diag "buzz: identity ${BUZZ_SELF_PUBKEY:0:8} via $BUZZ_MCP_URL"
+  return 0
+}
+
+# Resolve the channel list: explicit config wins; otherwise every channel the
+# identity can see (refreshed periodically so newly-joined channels appear).
+buzz_resolve_channels() {
+  local cfg="$1"
+  local now entry id label listing
+  now=$(now_epoch)
+
+  if [ -n "$BUZZ_CHANNELS_CFG" ]; then
+    if [ -n "$BUZZ_CHANNELS_RESOLVED" ]; then return 0; fi
+    local IFS=','
+    for entry in $BUZZ_CHANNELS_CFG; do
+      if [ -z "$entry" ]; then continue; fi
+      id="${entry%%:*}"
+      if [ "$entry" != "$id" ]; then label="${entry#*:}"; else label="${id:0:8}"; fi
+      BUZZ_CHANNELS_RESOLVED="${BUZZ_CHANNELS_RESOLVED}${id}${TAB}${label}"$'\n'
+    done
+    return 0
+  fi
+
+  if [ -n "$BUZZ_CHANNELS_RESOLVED" ] \
+     && [ $((now - BUZZ_CHANNELS_AT)) -lt "$BUZZ_CHANNEL_REFRESH_S" ]; then
+    return 0
+  fi
+
+  if ! mcp_tool_call "$BUZZ_MCP_URL" "$cfg" "buzz_channels" '{}'; then
+    return 1
+  fi
+  listing=$(mcp_items "$MCP_BODY" | jq -r '.[] | select(.channel_id != null)
+    | .channel_id + "	" + ((.name // (.channel_id[0:8])) | tostring)')
+  if [ -z "$listing" ]; then return 1; fi
+  BUZZ_CHANNELS_RESOLVED="$listing"$'\n'
+  BUZZ_CHANNELS_AT="$now"
+  return 0
+}
+
+check_buzz_channel() {
+  local cfg="$1" channel_id="$2" label="$3"
+  local source="buzz-$label"
+  local state_file state prev_ts seeded args items max_ts others new_count names pk
+
+  state_file=$(buzz_channel_state_file "$channel_id")
+  state=$(read_json_state "$state_file" '{"last_created_at":0,"seeded":false}')
+  prev_ts=$(printf '%s' "$state" | jq -r '.last_created_at // 0')
+  seeded=$(printf '%s' "$state" | jq -r '.seeded // false')
+
+  args=$(jq -cn --arg c "$channel_id" --argjson l "$FETCH_LIMIT" --argjson s "$prev_ts" \
+    '{channel:$c,limit:$l,since:$s}')
+  if ! mcp_tool_call "$BUZZ_MCP_URL" "$cfg" "buzz_read" "$args"; then
+    record_result "$source" false "buzz_read http $MCP_HTTP_CODE"
+    return
+  fi
+
+  items=$(mcp_items "$MCP_BODY")
+  if [ -z "$items" ]; then
+    record_result "$source" false "unrecognised buzz_read response shape"
+    return
+  fi
+
+  # `since` is inclusive on the relay (created_at >= since), so the cursor
+  # advances one second past the newest event seen — otherwise every pass
+  # re-reports the last message forever.
+  max_ts=$(printf '%s' "$items" | jq '[.[].created_at // 0] + [0] | max')
+  if [ "$max_ts" -ge "$prev_ts" ] && [ "$max_ts" -gt 0 ]; then
+    max_ts=$((max_ts + 1))
+  else
+    max_ts="$prev_ts"
+  fi
+
+  if [ "$seeded" = "true" ]; then
+    others=$(printf '%s' "$items" | jq -c --arg me "$BUZZ_SELF_PUBKEY" '[.[] | select(.pubkey != $me)]')
+    new_count=$(printf '%s' "$others" | jq 'length')
+    if [ "$new_count" -gt 0 ]; then
+      names=""
+      while IFS= read -r pk; do
+        if [ -z "$pk" ]; then continue; fi
+        names="${names:+$names,}$(buzz_pretty_name "$pk")"
+      done < <(printf '%s' "$others" | jq -r '[.[].pubkey] | unique | .[]')
+      echo "WAKE buzz $label new=$new_count from=$names last=$(now_local_hm)"
+    else
+      diag "buzz $label: nothing new"
+    fi
+  else
+    diag "buzz $label: seeded at $max_ts"
+  fi
+
+  write_json_state "$state_file" "$(jq -n --argjson t "$max_ts" '{last_created_at:$t,seeded:true}')"
+  record_result "$source" true
+}
+
+check_buzz() {
+  if [ "$BUZZ_ENABLED" != "true" ]; then return 0; fi
+
+  local workdir cfg id label
+  workdir=$(new_curl_workdir) || { record_result "buzz" false "cannot create temp dir"; return; }
+  cfg="$workdir/curl.cfg"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$workdir'" RETURN
+
+  if ! mcp_initialize "$BUZZ_MCP_URL" "$cfg" "$workdir" "alfred-wake"; then
+    record_result "buzz" false "sidecar initialize http $MCP_HTTP_CODE"
+    return
+  fi
+
+  if ! buzz_resolve_channels "$cfg"; then
+    record_result "buzz" false "buzz_channels returned no channels"
+    return
+  fi
+  record_result "buzz" true
+
+  while IFS="$TAB" read -r id label; do
+    if [ -z "$id" ]; then continue; fi
+    check_buzz_channel "$cfg" "$id" "$label"
+  done <<< "$BUZZ_CHANNELS_RESOLVED"
+}
+
+# ---------------------------------------------------------------------------
+# Passes
+# ---------------------------------------------------------------------------
+
+ensure_state_dir() {
+  if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+    echo "alfred-wake: state dir $STATE_DIR is not writable" >&2
+    return 1
+  fi
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+  return 0
+}
+
+run_pass() {
+  local do_am="${1:-true}"
+  local first_run=false out n_events
+  if [ ! -f "$INIT_MARKER" ]; then first_run=true; fi
+
+  out=$(mktemp) || return 1
+  if [ "$PERSIST" = "true" ]; then
+    # Watch loop: stdout is the wake channel, stderr is noise — drop it.
+    {
+      if [ "$do_am" = "true" ]; then check_agent_messaging; fi
+      check_buzz
+    } > "$out" 2>/dev/null
+  else
+    # Dry run: keep stderr so `check` can explain what it saw.
+    {
+      if [ "$do_am" = "true" ]; then check_agent_messaging; fi
+      check_buzz
+    } > "$out"
+  fi
+
+  if [ "$first_run" = "true" ] && [ "$PERSIST" = "true" ]; then
+    # First ever run: cursors are seeded, history is never replayed into the
+    # session. One line so the lead knows the bridge came up.
+    echo "WAKE-INIT alfred-wake armed at $(now_local_hm) state=$STATE_DIR buzz=$BUZZ_ENABLED"
+    touch "$INIT_MARKER"
+  else
+    cat "$out"
+  fi
+
+  n_events=$(wc -l < "$out" | tr -d ' ')
+  log_line "pass: am=$do_am events=$n_events first_run=$first_run"
+  rm -f "$out"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+cmd_check() {
+  PERSIST=false
+  ensure_state_dir || true
+  diag "version $VERSION"
+  diag "state dir: $STATE_DIR (dry run — cursors NOT written)"
+  diag "agent-messaging url: $AM_URL"
+  diag "agent-messaging auth: $(am_auth_mode) (agent=${AGENT_ID:-unset})"
+  if buzz_probe; then
+    BUZZ_ENABLED=true
+    diag "buzz: enabled via $BUZZ_MCP_URL"
+  else
+    BUZZ_ENABLED=false
+    diag "buzz: not watched (agent-messaging only)"
+  fi
+  run_pass true
+  diag "dry run complete — any stdout line above is what would wake the session"
+  exit 0
+}
+
+cmd_run() {
+  local interval="${1:-}"
+  if [ -z "$interval" ]; then interval="$DEFAULT_INTERVAL"; fi
+  ensure_state_dir || exit 1
+  trap 'log_line "stopped"; exit 0' TERM INT
+  log_line "started (tick=${interval}s am_interval=${AM_INTERVAL}s state=$STATE_DIR)"
+
+  if buzz_probe; then BUZZ_ENABLED=true; else BUZZ_ENABLED=false; fi
+
+  AM_BACKOFF="$AM_INTERVAL"
+  AM_NEXT_AT=0
+  local buzz_reprobe_at=$(( $(now_epoch) + BUZZ_CHANNEL_REFRESH_S ))
+
+  local now do_am consecutive
+  while true; do
+    now=$(now_epoch)
+    do_am=false
+    if [ "$now" -ge "$AM_NEXT_AT" ]; then do_am=true; fi
+
+    # A sidecar can appear (or come back) after the bridge started — e.g. the
+    # pod restarted its buzz-mcp container. Without a re-probe Buzz would stay
+    # silently unwatched for the life of the session.
+    if [ "$BUZZ_ENABLED" != "true" ] && [ "$BUZZ_MODE" != "off" ] && [ "$now" -ge "$buzz_reprobe_at" ]; then
+      buzz_reprobe_at=$(( now + BUZZ_CHANNEL_REFRESH_S ))
+      BUZZ_SKIP_LOGGED=false
+      if buzz_probe; then BUZZ_ENABLED=true; fi
+    fi
+
+    touch "$ARMED_MARKER" 2>/dev/null || true
+    run_pass "$do_am"
+
+    if [ "$do_am" = "true" ]; then
+      # Backoff on failure only: agent-messaging offers no push, and a broken
+      # endpoint must not be hammered once a minute for hours.
+      consecutive=$(read_json_state "$FAILURES_FILE" '{}' | jq -r '.["agent-messaging"].consecutive // 0')
+      if [ "$consecutive" -gt 0 ]; then
+        AM_BACKOFF=$((AM_BACKOFF * 2))
+        if [ "$AM_BACKOFF" -gt "$AM_MAX_INTERVAL" ]; then AM_BACKOFF="$AM_MAX_INTERVAL"; fi
+      else
+        AM_BACKOFF="$AM_INTERVAL"
+      fi
+      AM_NEXT_AT=$(( $(now_epoch) + AM_BACKOFF ))
+    fi
+
+    sleep "$interval"
+  done
+}
+
+cmd_install() {
+  local target_dir="${ALFRED_WAKE_BIN_DIR:-$HOME/.local/bin}"
+  local self
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+  if ! mkdir -p "$target_dir"; then
+    echo "alfred-wake: cannot create $target_dir" >&2
+    exit 1
+  fi
+  ln -sf "$self" "$target_dir/alfred-wake"
+  echo "installed: $target_dir/alfred-wake -> $self"
+  case ":$PATH:" in
+    *":$target_dir:"*) ;;
+    *) echo "note: $target_dir is not on PATH — arm with the full path instead" >&2 ;;
+  esac
+  exit 0
+}
+
+cmd_status() {
+  local age
+  echo "alfred-wake $VERSION"
+  echo "state dir:  $STATE_DIR"
+  echo "am url:     $AM_URL"
+  echo "am auth:    $(am_auth_mode)"
+  echo "buzz mode:  $BUZZ_MODE (url $BUZZ_MCP_URL)"
+  if [ -f "$ARMED_MARKER" ]; then
+    age=$(( $(now_epoch) - $(stat -c %Y "$ARMED_MARKER" 2>/dev/null || echo 0) ))
+    if [ "$age" -le 300 ]; then
+      echo "armed:      yes (last pass ${age}s ago)"
+      exit 0
+    fi
+    echo "armed:      STALE (last pass ${age}s ago)"
+    exit 1
+  fi
+  echo "armed:      no"
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+alfred-wake — deterministic inbox wake bridge for Alfred lead agents
+
+Usage:
+  alfred-wake check              one dry-run pass (no cursor writes); diagnostics on stderr
+  alfred-wake run [interval]     watch loop (default tick 20s) — arm this as a Monitor
+  alfred-wake install            symlink into ~/.local/bin
+  alfred-wake status             show config + whether a run is currently armed
+
+Arm it from a lead session, before anything else:
+  Monitor(command: "alfred-wake run", persistent: true,
+          description: "inbox wake: agent-messaging + Buzz")
+EOF
+}
+
+main() {
+  if ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+    echo "alfred-wake: requires curl and jq" >&2
+    exit 1
+  fi
+  case "${1:-}" in
+    check)   cmd_check ;;
+    run)     cmd_run "${2:-}" ;;
+    install) cmd_install ;;
+    status)  cmd_status ;;
+    -h|--help|help|'') usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"
