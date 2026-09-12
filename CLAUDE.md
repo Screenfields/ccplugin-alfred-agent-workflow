@@ -16,6 +16,8 @@ ccplugin-alfred-agent-workflow/
 │   ├── check-messages.md    # /alfred-agent:check-messages
 │   ├── show-inbox.md        # /alfred-agent:show-inbox
 │   └── show-threads.md      # /alfred-agent:show-threads
+├── bin/
+│   └── alfred-wake          # Deterministic inbox wake bridge (Monitor-armed)
 ├── skills/
 │   └── messaging/
 │       └── SKILL.md         # General messaging context
@@ -55,11 +57,53 @@ This plugin is published via the alfred-cc-tools marketplace:
 
 ## Session startup checklist
 
-At the start of every session using this plugin, agents MUST:
+At the start of every session using this plugin, agents MUST, in this order:
 
-1. **Run `/alfred-agent:check-messages` unconditionally.** This is the ONLY delivery mechanism — the automated inbox-watcher architecture was retired 2026-06-09. See `commands/check-messages.md` for full session-start mandate.
+1. **Arm the wake bridge before anything else.**
 
-2. **For active multi-turn conversations**, if you need to wait synchronously on a peer reply, use the bounded ad-hoc poll pattern documented in `commands/check-messages.md` (Ad-hoc poll loop section). Never spin an unbounded background poller.
+   ```bash
+   command -v alfred-wake >/dev/null 2>&1 || "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake" install
+   ```
+
+   ```
+   Monitor(command: "alfred-wake run", persistent: true,
+           description: "inbox wake: agent-messaging + Buzz")
+   ```
+
+   `bin/alfred-wake` is deterministic bash — no LLM call anywhere in it. It
+   prints a `WAKE …` line only when something genuinely new arrives, and the
+   harness turns that line into a wake-up. Silence burns no tokens.
+
+   **Fall back to `/loop 15m /alfred-agent:check-messages` only if arming
+   fails**, and say out loud that you fell back.
+
+2. **Run `/alfred-agent:check-messages` once** to pick up anything that arrived
+   before the bridge came up. The bridge seeds its cursors on first run and
+   never replays history, so this one-shot is what closes that gap.
+
+3. **For active multi-turn conversations**, if you need to wait synchronously on a peer reply, use the bounded ad-hoc poll pattern documented in `commands/check-messages.md` (Ad-hoc poll loop section). Never spin an unbounded background poller.
+
+## bin/alfred-wake
+
+The wake bridge ships with the plugin at `bin/alfred-wake` (executable, bash +
+curl + jq only). It watches agent-messaging always, and Buzz when — and only
+when — the pod has a buzz-mcp sidecar; a lead with no Buzz identity runs
+agent-messaging-only with no error.
+
+Invariants to preserve when editing it:
+
+- **No secret in argv, stdout, stderr or the log.** curl auth goes through a
+  `-K` config file in a `umask 077` temp dir. Never add `set -x`.
+- **The Buzz private key is never read by the script.** Buzz goes through the
+  pod-local sidecar, which is the sole key holder and does NIP-42 AUTH.
+- **Read-only.** No mark-as-read, no sends, no posts — the session decides what
+  to do after being woken.
+- **stdout is the wake channel.** Only `WAKE …`, `WAKE-INIT`, `WAKE-ERROR` and
+  `WAKE-RECOVERED` lines may be printed there; diagnostics go to stderr and
+  only in `check` mode.
+- **Cursors live on the workspace volume** (`/workspace/.alfred-wake` when
+  writable) so a pod restart never replays history.
+- **shellcheck-clean** — CI enforces this (`.github/workflows/shellcheck.yml`).
 
 ## Development
 
