@@ -68,10 +68,42 @@ Should reach the messaging service and report your inbox state. If the MCP isn't
 | `/alfred-agent:develop` | Feature-dev workflow: pick up issue → code with tests → PR → merge |
 | `/alfred-agent:ecr` | Expert Consulting Review — multi-model architectural feedback |
 | `/alfred-agent:retro` | Session retrospective for capturing learnings |
-| `/alfred-agent:land` | Session close-out: retro + git push + reconcile work to issues |
+| `/alfred-agent:land` | Session close-out: retro + git push + reconcile work to issues. `--mode=light` = the short between-boundaries landing driven by the context budget |
 | `/alfred-agent:git-commit` | Authoritative commit procedure (always invoke before `git commit`) |
 | `/alfred-agent:documentation` | Apply baseline-vs-delta + ADR discipline when writing docs |
 | `/alfred-agent:messaging` | Inter-agent messaging skill (MCP tool reference) |
+
+## Context budget
+
+The lead lands and clears at ~20% context usage. The plugin ships a hook that measures
+that and acts on it, so the rule does not depend on anyone remembering it.
+
+| Piece | Where |
+|---|---|
+| Sensor | The **fleet status line** from [alfred-devbox](https://github.com/Screenfields/alfred-devbox) (`share/alfred/statusline-command.sh`) writes `${ALFRED_STATE_DIR:-$HOME/.cache/alfred}/context/<session_id>.json` — `{"pct","used","size","ts"}` — on every assistant message. No hook event carries context usage; the status line is the only surface that does |
+| Actuator | `hooks/hooks.json` + `hooks/context-budget.sh check` on `UserPromptSubmit`, `PostToolUse` (all tools) and `Stop` |
+| Procedure | `/alfred-agent:land --mode=light` — offload to issues/Metis, prune memory to pointers, push, mark landed |
+
+Behaviour:
+
+- **Soft tier** (default 20%) — injects `CONTEXT BUDGET: n% used … Land at the next natural boundary`.
+- **Hard tier** (default 35%) — injects `… LAND NOW`, and the first `Stop` after crossing is blocked once with the light-landing checklist. Never two blocks in a row, never a block at soft tier.
+- **Rate limit** — one injection per tier per session per 10 minutes; escalating soft → hard resets the timer so the harder message is not swallowed.
+- **Silent by default** — no state file, or a reading older than 2 hours, means the hook does nothing. A host without the fleet status line simply never sees it.
+
+`/alfred-agent:land` (both modes) runs `hooks/context-budget.sh landed`, which clears
+the block for the current crossing. The model cannot clear its own context — after a
+landing it reports `landed at n% — clear now` and the owner clears.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `ALFRED_CONTEXT_SOFT_PCT` | `20` | Soft threshold, in percent of the context window |
+| `ALFRED_CONTEXT_HARD_PCT` | `35` | Hard threshold — the tier that can block a `Stop` |
+| `ALFRED_STATE_DIR` | `$HOME/.cache/alfred` | Root of the state directory shared with the status line |
+
+Tests: `./tests/context-budget.sh` (plain bash, no framework).
+
+Design and rationale: [Screenfields/alfred-platform#847](https://github.com/Screenfields/alfred-platform/issues/847).
 
 ## MCP tools (provided by the bundled `agent-messaging` server)
 

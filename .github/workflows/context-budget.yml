@@ -1,0 +1,62 @@
+name: context-budget
+
+# The plugin ships an executable hook (hooks/context-budget.sh) that runs on every
+# UserPromptSubmit, PostToolUse and Stop in every lead's session, and can block a
+# turn. A regression there is silent in the worst direction — either the budget
+# stops being enforced, or a lead cannot end a turn — so it is gated here rather
+# than trusted to review.
+#
+# GitHub-hosted runners only: this repo is public, and public repos are blocked
+# from the org's self-hosted runner pool.
+
+on:
+  pull_request:
+    paths:
+      - 'hooks/**'
+      - 'tests/**'
+      - '.github/workflows/context-budget.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'hooks/**'
+      - 'tests/**'
+      - '.github/workflows/context-budget.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  context-budget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: shellcheck hooks/*.sh tests/*.sh
+
+      - name: Syntax check
+        run: |
+          for f in hooks/*.sh tests/*.sh; do
+            bash -n "$f"
+          done
+
+      - name: Scripts must be executable and free of `set -x`
+        run: |
+          status=0
+          for f in hooks/*.sh tests/*.sh; do
+            if [ ! -x "$f" ]; then
+              echo "::error file=$f::not executable — the plugin ships it as a hook command"
+              status=1
+            fi
+            if grep -qE '^\s*set\s+-[a-z]*x' "$f"; then
+              echo "::error file=$f::contains 'set -x' — it would trace secrets into the session log"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: hooks.json is valid JSON
+        run: jq -e . hooks/hooks.json > /dev/null
+
+      - name: Unit tests
+        run: ./tests/context-budget.sh
