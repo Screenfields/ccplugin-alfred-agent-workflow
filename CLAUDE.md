@@ -18,6 +18,11 @@ ccplugin-alfred-agent-workflow/
 │   └── show-threads.md      # /alfred-agent:show-threads
 ├── bin/
 │   └── alfred-wake          # Deterministic inbox wake bridge (Monitor-armed)
+├── hooks/
+│   ├── hooks.json           # Hook registrations
+│   └── context-budget.sh    # Context-budget actuator + self-clear
+├── tests/
+│   └── context-budget.sh    # Plain-bash test suite for the hook
 ├── skills/
 │   └── messaging/
 │       └── SKILL.md         # General messaging context
@@ -104,6 +109,49 @@ Invariants to preserve when editing it:
 - **Cursors live on the workspace volume** (`/workspace/.alfred-wake` when
   writable) so a pod restart never replays history.
 - **shellcheck-clean** — CI enforces this (`.github/workflows/shellcheck.yml`).
+
+## hooks/context-budget.sh
+
+The context-budget actuator. It reads the context usage the fleet status line writes
+to `${ALFRED_STATE_DIR:-$HOME/.cache/alfred}/context/<session_id>.json`, turns it into
+in-session pressure, and — once the session has landed with `--clear` — clears the
+session itself by typing into its own tmux pane.
+
+**Thresholds are in tokens** (`ALFRED_CONTEXT_SOFT_TOKENS`, default 80000;
+`ALFRED_CONTEXT_HARD_TOKENS`, default 120000), decided from the `used` field.
+Degradation and cost scale with absolute tokens, so a percentage moves the goalposts
+whenever the window size changes. `ALFRED_CONTEXT_SOFT_PCT` / `_HARD_PCT` remain as a
+fallback for a status line that writes no `used` field — do not promote them back.
+
+The self-clear flow, end to end:
+
+```
+land --mode=light
+  → context-budget.sh landed --clear --summary "<one line>"    (clear_mode=clear)
+  → Stop hook, after it decides not to block: spawns the detached sender
+  → sender: idle input box on two polls 2 s apart → /clear, sleep 1, Enter
+  → SessionStart (source=clear): one handover line injected, marker consumed
+```
+
+Invariants to preserve when editing it:
+
+- **stdout carries hook JSON and nothing else**, and the only non-zero exit is the
+  intentional `Stop` block (exit 2). Every other failure is silent.
+- **Never an unendable turn.** `Stop` honours `stop_hook_active` and refuses to block
+  unless the once-per-crossing flag was definitely persisted.
+- **The sender is fully detached** (`setsid nohup … >/dev/null 2>&1 </dev/null &`).
+  The hook must return immediately and the child must outlive it.
+- **Never type into a pane the owner is using.** Idle means `cursor_x` 2 and no
+  `esc to interrupt` in the last pane lines, twice in a row. A `last_prompt_ts` newer
+  than `landed_ts` aborts the send: the context is no longer landed.
+- **Bounded**: two attempts of 90 s. After that the hook says so and the owner clears.
+  No tmux pane means the same message, not a silent no-op.
+- **`PreCompact` is recorded, never blocked.** An automatic compaction is the failure
+  signal for this rule, and the next prompt is told the handover may be incomplete.
+- **A session must run inside tmux** for the self-clear to work at all — fleet-wide
+  this is already the case.
+- Tests: `bash tests/context-budget.sh`. Every behaviour above has a case; keep it
+  that way. shellcheck-clean, like `bin/alfred-wake`.
 
 ## Development
 
