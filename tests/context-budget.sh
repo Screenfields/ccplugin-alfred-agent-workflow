@@ -14,11 +14,16 @@ SCRIPT="${HERE}/../hooks/context-budget.sh"
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
 
+# The harness itself runs inside a Claude Code session, which exports both of
+# these. Left set, they would outrank every pointer the resolution cases test.
+unset CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID TMUX_PANE
+
 export ALFRED_STATE_DIR="$TMPROOT/state"
 export ALFRED_CONTEXT_SOFT_PCT=20
 export ALFRED_CONTEXT_HARD_PCT=35
 # The fixture writes used = pct * 2000, so these token thresholds sit exactly on
 # the 20% / 35% marks of its 200k window: every pre-token case keeps its tier.
+export ALFRED_CONTEXT_CONFIRM_SECONDS=3
 export ALFRED_CONTEXT_SOFT_TOKENS=40000
 export ALFRED_CONTEXT_HARD_TOKENS=70000
 CTX_DIR="$ALFRED_STATE_DIR/context"
@@ -380,15 +385,25 @@ export ALFRED_CONTEXT_SOFT_TOKENS=40000 ALFRED_CONTEXT_HARD_TOKENS=70000
 # Self-clear
 # ===========================================================================
 
-# A tmux stub that records its argv and reports an idle, quiet pane.
+# A tmux stub that records its argv and answers the two questions pane_idle asks.
+#   TMUX_STUB_CURSOR   what display-message reports as cursor_x (default 2 = idle)
+#   TMUX_STUB_CAPTURE  what capture-pane prints (default empty = not mid-turn)
+#   TMUX_STUB_CONSUME  a file to copy-then-delete when Enter is sent, standing in
+#                      for the new session's SessionStart hook consuming the marker
 STUBBIN="$TMPROOT/stubbin"
 mkdir -p "$STUBBIN"
 cat >"$STUBBIN/tmux" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$TMUX_STUB_LOG"
 case "${1:-}" in
-display-message) echo 2 ;;
-capture-pane) : ;;
+display-message) echo "${TMUX_STUB_CURSOR:-2}" ;;
+capture-pane) printf '%s\n' "${TMUX_STUB_CAPTURE:-}" ;;
+send-keys)
+    if [ -n "${TMUX_STUB_CONSUME:-}" ] && [ "${*: -1}" = "C-m" ]; then
+        cp "$TMUX_STUB_CONSUME" "${TMUX_STUB_CONSUME}.seen" 2>/dev/null
+        rm -f "$TMUX_STUB_CONSUME"
+    fi
+    ;;
 esac
 exit 0
 STUB
@@ -403,6 +418,28 @@ wait_for() {
         i=$((i + 1))
     done
     return 1
+}
+
+# wait_outcome <budget file> <seconds> — the sender records exactly one outcome
+# timestamp, so that is the only reliable "it has finished" signal. clear_sending
+# is no good: a landing writes it empty before the sender ever runs.
+wait_outcome() {
+    local i=0
+    while [ "$i" -lt "$2" ]; do
+        grep -qE '^(cleared_ts|clear_unconfirmed_ts)=[0-9]' "$1" 2>/dev/null && return 0
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# stop_with_stub <session_id> — fire a Stop hook with the tmux stub on PATH.
+stop_with_stub() {
+    printf '{"session_id":"%s","hook_event_name":"Stop","cwd":"/tmp"}' "$1" |
+        env PATH="$STUBBIN:$PATH" TMUX_PANE='%9' "$SCRIPT" check >"$TMPROOT/out" 2>"$TMPROOT/err"
+    RC=$?
+    OUT_TXT="$(cat "$TMPROOT/out")"
+    return 0
 }
 
 # --- landed --clear records the self-clear intent ---------------------------
@@ -437,23 +474,20 @@ else
     bad "--compact and --no-clear set their modes" "compact/no-clear budgets wrong"
 fi
 
-# --- Stop spawns the sender, which types /clear into the pane ---------------
+# --- Stop spawns the sender, which types /clear and is confirmed ------------
 export TMUX_STUB_LOG="$TMPROOT/tmux-clear.log"
+export TMUX_STUB_CONSUME="${CTX_DIR}/last-clear.json"
 : >"$TMUX_STUB_LOG"
-printf '{"session_id":"s-clear","hook_event_name":"Stop","cwd":"/tmp"}' |
-    env PATH="$STUBBIN:$PATH" TMUX_PANE='%9' "$SCRIPT" check >"$TMPROOT/out" 2>"$TMPROOT/err"
-spawn_rc=$?
-if [ "$spawn_rc" -eq 0 ] && [ ! -s "$TMPROOT/out" ] &&
-    grep -q '^clear_attempts=1$' "$CB"; then
+stop_with_stub s-clear
+if [ "$RC" -eq 0 ] && [ -z "$OUT_TXT" ] && grep -q '^clear_attempts=1$' "$CB"; then
     ok "Stop with clear_mode=clear spawns the sender silently and counts the attempt"
 else
     bad "Stop with clear_mode=clear spawns the sender silently and counts the attempt" \
-        "rc=$spawn_rc out='$(cat "$TMPROOT/out")' attempts='$(grep '^clear_attempts=' "$CB")'"
+        "rc=$RC out='$OUT_TXT' attempts='$(grep '^clear_attempts=' "$CB")'"
 fi
 
-# wait for the Enter, which is the last of the two send-keys
 if wait_for "$TMUX_STUB_LOG" 'send-keys .* C-m' 10; then
-    keys_line="$(grep -n 'send-keys' "$TMUX_STUB_LOG" | head -n 2)"
+    keys_line="$(grep 'send-keys' "$TMUX_STUB_LOG" | head -n 2)"
     first="$(printf '%s\n' "$keys_line" | sed -n 1p)"
     second="$(printf '%s\n' "$keys_line" | sed -n 2p)"
     case "$first:$second" in
@@ -462,22 +496,102 @@ if wait_for "$TMUX_STUB_LOG" 'send-keys .* C-m' 10; then
     esac
 else
     bad "the sender types /clear, then Enter as a separate send-keys" \
-        "no send-keys within 10s: $(cat "$TMUX_STUB_LOG")"
+        "no Enter within 10s: $(cat "$TMUX_STUB_LOG")"
 fi
 
-if [ -f "${CTX_DIR}/last-clear.json" ] &&
-    [ "$(jq -r '.prev_session_id' "${CTX_DIR}/last-clear.json")" = "s-clear" ] &&
-    [ "$(jq -r '.mode' "${CTX_DIR}/last-clear.json")" = "clear" ]; then
-    ok "the sender writes last-clear.json for the next session"
+SEEN="${CTX_DIR}/last-clear.json.seen"
+if [ -f "$SEEN" ] &&
+    [ "$(jq -r '.prev_session_id' "$SEEN")" = "s-clear" ] &&
+    [ "$(jq -r '.mode' "$SEEN")" = "clear" ] &&
+    [ "$(jq -r '.summary' "$SEEN")" = "PR #93 merged; next session starts at issue #847" ]; then
+    ok "the sender writes last-clear.json before the keystrokes"
 else
-    bad "the sender writes last-clear.json for the next session" \
-        "$(cat "${CTX_DIR}/last-clear.json" 2>/dev/null)"
+    bad "the sender writes last-clear.json before the keystrokes" "$(cat "$SEEN" 2>/dev/null)"
 fi
-if wait_for "$CB" '^clear_mode=none$' 5; then
-    ok "the sender resets clear_mode after sending"
+rm -f "$SEEN"
+
+if wait_outcome "$CB" 15 && grep -q '^cleared_ts=[0-9][0-9]*$' "$CB" &&
+    grep -q '^clear_mode=none$' "$CB"; then
+    ok "a consumed marker confirms the clear: cleared_ts written, clear_mode=none"
 else
-    bad "the sender resets clear_mode after sending" "$(grep '^clear_mode=' "$CB")"
+    bad "a consumed marker confirms the clear: cleared_ts written, clear_mode=none" \
+        "$(cat "$CB")"
 fi
+
+# --- an unconsumed marker is never reported as a clear ----------------------
+unset TMUX_STUB_CONSUME
+fixture s-unconf 40
+"$SCRIPT" landed --clear --summary "unconfirmed run" s-unconf >/dev/null 2>&1
+UB="${CTX_DIR}/s-unconf.budget"
+export TMUX_STUB_LOG="$TMPROOT/tmux-unconf.log"
+: >"$TMUX_STUB_LOG"
+stop_with_stub s-unconf
+if wait_outcome "$UB" 25; then
+    if grep -q '^clear_unconfirmed_ts=[0-9][0-9]*$' "$UB" &&
+        grep -q '^clear_mode=clear$' "$UB" &&
+        ! grep -q '^cleared_ts=' "$UB" &&
+        [ ! -f "${CTX_DIR}/last-clear.json" ]; then
+        ok "an unconsumed marker is unconfirmed: no cleared_ts, clear_mode kept, marker removed"
+    else
+        bad "an unconsumed marker is unconfirmed: no cleared_ts, clear_mode kept, marker removed" \
+            "budget='$(cat "$UB")' marker=$([ -f "${CTX_DIR}/last-clear.json" ] && echo present || echo gone)"
+    fi
+else
+    bad "an unconsumed marker is unconfirmed: no cleared_ts, clear_mode kept, marker removed" \
+        "sender recorded no outcome: $(cat "$UB")"
+fi
+
+# --- the owner is typing: cursor_x is not 2 --------------------------------
+fixture s-typing 40
+"$SCRIPT" landed --clear --summary "owner is typing" s-typing >/dev/null 2>&1
+export TMUX_STUB_LOG="$TMPROOT/tmux-typing.log"
+: >"$TMUX_STUB_LOG"
+printf '{"session_id":"s-typing","hook_event_name":"Stop","cwd":"/tmp"}' |
+    env PATH="$STUBBIN:$PATH" TMUX_PANE='%9' TMUX_STUB_CURSOR=7 "$SCRIPT" check >/dev/null 2>&1
+sleep 6
+if ! grep -q 'send-keys' "$TMUX_STUB_LOG"; then
+    ok "text in the input box (cursor_x 7) means nothing is ever typed"
+else
+    bad "text in the input box (cursor_x 7) means nothing is ever typed" \
+        "$(cat "$TMUX_STUB_LOG")"
+fi
+
+# --- the session is mid-turn: esc to interrupt is on screen ----------------
+fixture s-busy 40
+"$SCRIPT" landed --clear --summary "still working" s-busy >/dev/null 2>&1
+export TMUX_STUB_LOG="$TMPROOT/tmux-busy.log"
+: >"$TMUX_STUB_LOG"
+printf '{"session_id":"s-busy","hook_event_name":"Stop","cwd":"/tmp"}' |
+    env PATH="$STUBBIN:$PATH" TMUX_PANE='%9' \
+    TMUX_STUB_CAPTURE='... (esc to interrupt)' "$SCRIPT" check >/dev/null 2>&1
+sleep 6
+if ! grep -q 'send-keys' "$TMUX_STUB_LOG"; then
+    ok "a mid-turn pane (esc to interrupt) means nothing is ever typed"
+else
+    bad "a mid-turn pane (esc to interrupt) means nothing is ever typed" \
+        "$(cat "$TMUX_STUB_LOG")"
+fi
+
+# --- compact mode carries the summary --------------------------------------
+fixture s-comp 40
+"$SCRIPT" landed --compact --summary "decisions on #847, PR #93 open" s-comp >/dev/null 2>&1
+export TMUX_STUB_LOG="$TMPROOT/tmux-comp.log"
+export TMUX_STUB_CONSUME="${CTX_DIR}/last-clear.json"
+: >"$TMUX_STUB_LOG"
+stop_with_stub s-comp
+if wait_for "$TMUX_STUB_LOG" 'send-keys .* C-m' 10; then
+    if grep -q 'send-keys -t %9 /compact Preserve: decisions on #847, PR #93 open' "$TMUX_STUB_LOG"; then
+        ok "compact mode types /compact with the handover summary on one line"
+    else
+        bad "compact mode types /compact with the handover summary on one line" \
+            "$(cat "$TMUX_STUB_LOG")"
+    fi
+else
+    bad "compact mode types /compact with the handover summary on one line" \
+        "no Enter within 10s: $(cat "$TMUX_STUB_LOG")"
+fi
+rm -f "${CTX_DIR}/last-clear.json.seen"
+unset TMUX_STUB_CONSUME
 
 # --- race guard: a prompt after the landing aborts the clear ----------------
 fixture s-race 40
@@ -487,8 +601,7 @@ RB="${CTX_DIR}/s-race.budget"
 printf 'last_prompt_ts=%s\n' "$(($(date +%s) + 10))" >>"$RB"
 export TMUX_STUB_LOG="$TMPROOT/tmux-race.log"
 : >"$TMUX_STUB_LOG"
-printf '{"session_id":"s-race","hook_event_name":"Stop","cwd":"/tmp"}' |
-    env PATH="$STUBBIN:$PATH" TMUX_PANE='%9' "$SCRIPT" check >/dev/null 2>&1
+stop_with_stub s-race
 if wait_for "$RB" '^clear_aborted=new-prompt$' 10; then
     if ! grep -q 'send-keys' "$TMUX_STUB_LOG" && grep -q '^clear_mode=none$' "$RB"; then
         ok "a prompt after the landing aborts the sender before any keystroke"
@@ -499,6 +612,21 @@ if wait_for "$RB" '^clear_aborted=new-prompt$' 10; then
 else
     bad "a prompt after the landing aborts the sender before any keystroke" \
         "clear_aborted never written: $(cat "$RB")"
+fi
+
+# --- concurrency: a second sender finds the claim taken --------------------
+fixture s-claim 40
+"$SCRIPT" landed --clear --summary "claimed" s-claim >/dev/null 2>&1
+printf 'clear_mode=none\n' >>"${CTX_DIR}/s-claim.budget"
+export TMUX_STUB_LOG="$TMPROOT/tmux-claim.log"
+: >"$TMUX_STUB_LOG"
+env PATH="$STUBBIN:$PATH" "$SCRIPT" sender s-claim '%9' clear >/dev/null 2>&1
+if ! grep -q 'send-keys' "$TMUX_STUB_LOG" &&
+    grep -q "abort: clear_mode is 'none'" "${CTX_DIR}/s-claim.sender.log"; then
+    ok "a sender whose clear_mode was taken over aborts without typing"
+else
+    bad "a sender whose clear_mode was taken over aborts without typing" \
+        "log='$(cat "$TMUX_STUB_LOG")' sender='$(cat "${CTX_DIR}/s-claim.sender.log" 2>/dev/null)'"
 fi
 
 # --- UserPromptSubmit records last_prompt_ts --------------------------------
@@ -535,8 +663,7 @@ AB="${CTX_DIR}/s-attempts.budget"
 printf 'clear_attempts=2\n' >>"$AB"
 export TMUX_STUB_LOG="$TMPROOT/tmux-attempts.log"
 : >"$TMUX_STUB_LOG"
-printf '{"session_id":"s-attempts","hook_event_name":"Stop","cwd":"/tmp"}' |
-    env PATH="$STUBBIN:$PATH" TMUX_PANE='%9' "$SCRIPT" check >"$TMPROOT/out" 2>/dev/null
+stop_with_stub s-attempts
 att_ctx="$(jq -r '.hookSpecificOutput.additionalContext' <"$TMPROOT/out" 2>/dev/null)"
 if case "$att_ctx" in *"gave up after 2 attempts"*) true ;; *) false ;; esac &&
     grep -q '^clear_mode=none$' "$AB"; then
@@ -544,6 +671,82 @@ if case "$att_ctx" in *"gave up after 2 attempts"*) true ;; *) false ;; esac &&
 else
     bad "a third Stop after two timed-out attempts gives up and says so" \
         "out='$(cat "$TMPROOT/out")'"
+fi
+
+# ===========================================================================
+# Session id resolution for a landing that arms a clear
+# ===========================================================================
+
+RESOLVE="$TMPROOT/resolve"
+mkdir -p "$RESOLVE/context"
+printf '{"pct":40,"used":80000,"size":200000,"ts":%s}\n' "$(date +%s)" >"$RESOLVE/context/r-code.json"
+printf '{"pct":40,"used":80000,"size":200000,"ts":%s}\n' "$(date +%s)" >"$RESOLVE/context/r-pane.json"
+
+# check writes a pane-keyed pointer next to the unkeyed one
+printf '{"session_id":"r-pane","hook_event_name":"UserPromptSubmit","cwd":"/tmp"}' |
+    env ALFRED_STATE_DIR="$RESOLVE" TMUX_PANE='%12' "$SCRIPT" check >/dev/null 2>&1
+if [ "$(cat "$RESOLVE/context/current-session.12" 2>/dev/null)" = "r-pane" ] &&
+    [ "$(cat "$RESOLVE/context/current-session" 2>/dev/null)" = "r-pane" ]; then
+    ok "check writes both the pane-keyed and the unkeyed session pointer"
+else
+    ok_files="$(ls "$RESOLVE/context" | tr '\n' ' ')"
+    bad "check writes both the pane-keyed and the unkeyed session pointer" "files: $ok_files"
+fi
+
+# CLAUDE_CODE_SESSION_ID is what the Bash tool exports, and it outranks the pointer
+env ALFRED_STATE_DIR="$RESOLVE" CLAUDE_CODE_SESSION_ID=r-code TMUX_PANE='%12' \
+    "$SCRIPT" landed --clear --summary "from the env" >"$TMPROOT/out" 2>/dev/null
+if grep -q "session r-code, via CLAUDE_CODE_SESSION_ID" "$TMPROOT/out" &&
+    grep -q '^clear_mode=clear$' "$RESOLVE/context/r-code.budget"; then
+    ok "CLAUDE_CODE_SESSION_ID outranks the pointers and arms the clear"
+else
+    bad "CLAUDE_CODE_SESSION_ID outranks the pointers and arms the clear" \
+        "out='$(cat "$TMPROOT/out")'"
+fi
+
+# with no env at all, the pane-keyed pointer wins over the unkeyed one
+printf 'r-stale\n' >"$RESOLVE/context/current-session"
+env ALFRED_STATE_DIR="$RESOLVE" TMUX_PANE='%12' "$SCRIPT" landed --clear --summary "from the pane" \
+    >"$TMPROOT/out" 2>/dev/null
+if grep -q "session r-pane, via current-session (pane %12)" "$TMPROOT/out" &&
+    grep -q '^clear_mode=clear$' "$RESOLVE/context/r-pane.budget"; then
+    ok "the pane-keyed pointer outranks the unkeyed one"
+else
+    bad "the pane-keyed pointer outranks the unkeyed one" "out='$(cat "$TMPROOT/out")'"
+fi
+
+# a guessed session id must never arm a clear
+GUESS="$TMPROOT/guess"
+mkdir -p "$GUESS/context"
+printf '{"pct":40,"used":80000,"size":200000,"ts":%s}\n' "$(date +%s)" >"$GUESS/context/g-one.json"
+env ALFRED_STATE_DIR="$GUESS" "$SCRIPT" landed --clear --summary "guessed" \
+    >"$TMPROOT/out" 2>"$TMPROOT/err"
+if grep -q '^landed_ts=[0-9][0-9]*$' "$GUESS/context/g-one.budget" &&
+    grep -q '^clear_mode=none$' "$GUESS/context/g-one.budget" &&
+    grep -q "refusing --clear" "$TMPROOT/err"; then
+    ok "--clear is refused when the session id was guessed from the newest state file"
+else
+    bad "--clear is refused when the session id was guessed from the newest state file" \
+        "budget='$(cat "$GUESS/context/g-one.budget")' err='$(cat "$TMPROOT/err")'"
+fi
+
+# ===========================================================================
+# Numeric hygiene
+# ===========================================================================
+
+fixture s-junk 40
+printf 'crossing_ts=soon\nstop_blocked=maybe\nlanded_ts=yesterday\nlast_nag_ts=never\nclear_attempts=lots\nlast_prompt_ts=-\n' \
+    >"${CTX_DIR}/s-junk.budget"
+run_check s-junk Stop
+junk_stop_rc=$RC
+junk_stop_err="$ERR_TXT"
+run_check s-junk UserPromptSubmit
+if [ "$junk_stop_rc" -eq 2 ] && [ "$RC" -eq 0 ] &&
+    ! printf '%s' "$junk_stop_err" | grep -qi "integer expression\|syntax error"; then
+    ok "a budget file full of non-numeric values never produces an arithmetic error"
+else
+    bad "a budget file full of non-numeric values never produces an arithmetic error" \
+        "stop_rc=$junk_stop_rc ups_rc=$RC err='$junk_stop_err'"
 fi
 
 # --- session-start injection -------------------------------------------------
