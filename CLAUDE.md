@@ -143,7 +143,19 @@ Invariants to preserve when editing it:
   The hook must return immediately and the child must outlive it.
 - **Never type into a pane the owner is using.** Idle means `cursor_x` 2 and no
   `esc to interrupt` in the last pane lines, twice in a row. A `last_prompt_ts` newer
-  than `landed_ts` aborts the send: the context is no longer landed.
+  than `landed_ts` aborts the send: the context is no longer landed. It is re-read
+  before the command and again before the Enter; if it moves in between, `C-u` wipes
+  the typed command so the owner is not left with half a slash command.
+- **A send is not a clear.** The sender checks both `send-keys` exit statuses and waits
+  for `SessionStart` to consume `last-clear.json` before recording `cleared_ts`. No
+  consumption means `unconfirmed` and the second attempt, never a success claim.
+- **One sender at a time.** `clear_mode` is re-read before the first keystroke; the
+  sender then claims the send with `clear_mode=none` + `clear_sending=<pid>` and
+  re-checks the claim before the Enter.
+- **Never guess which session to clear.** Resolution is argument →
+  `CLAUDE_CODE_SESSION_ID` → `CLAUDE_SESSION_ID` → the pane-keyed pointer → the unkeyed
+  pointer → the newest state file, and a landing resolved from that last one refuses to
+  arm a clear at all. `CLAUDE_CODE_SESSION_ID` is the spelling the Bash tool exports.
 - **Bounded**: two attempts of 90 s. After that the hook says so and the owner clears.
   No tmux pane means the same message, not a silent no-op.
 - **`PreCompact` is recorded, never blocked.** An automatic compaction is the failure

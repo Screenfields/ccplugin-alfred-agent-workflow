@@ -47,7 +47,7 @@ Run these five steps in order.
 | a | **Offload every decision and state item of this session.** Each one goes as a comment on its GitHub issue. Knowledge and background go to Metis via `capture_note`. Large verbatim payloads (transcripts, logs, dumps) go through `scripts/hub/metis_capture_file.py` — never retyped through the model, which truncates and fabricates |
 | b | **Prune the handover memory to pointers only.** Every line whose content is now on an issue or in Metis is replaced by its issue URL or capture id. Keep `MEMORY.md` under its size limit — a light landing that grows memory has failed |
 | c | **Push every tree.** All working trees committed and pushed; worker worktrees removed |
-| d | **Mark the landing and arm the clear:** run `${CLAUDE_PLUGIN_ROOT}/hooks/context-budget.sh landed --clear --summary "<one line: what was landed and where the next session starts>"`. This clears the Stop block for the current crossing and records that the session should clear itself. The block reason printed by the hook names the absolute path — use that if you have it. Pass the session id as a trailing argument if several sessions share the state directory. Use `--no-clear` instead when the user asked for no clear |
+| d | **Mark the landing and arm the clear:** run `${CLAUDE_PLUGIN_ROOT}/hooks/context-budget.sh landed --clear --summary "<one line: what was landed and where the next session starts>" "$CLAUDE_CODE_SESSION_ID"`. Always pass the session id as that last argument — it is what the Bash tool exports, and it is the only fully unambiguous way to say which session is being landed. This clears the Stop block for the current crossing and records that the session should clear itself. The block reason printed by the hook names the absolute path — use that if you have it. Use `--no-clear` instead when the user asked for no clear |
 | e | **End the turn with exactly one short line:** `landed at <used> tokens — clearing now`. Open no new work in the same turn. The Stop hook then types `/clear` into this pane as soon as the input box is idle; a prompt sent before that happens cancels the clear, because the context is no longer landed |
 
 ### Notes
@@ -58,8 +58,12 @@ Run these five steps in order.
   `SessionStart`. Write it as one line that names what landed and which issue or
   memory pointer the next session opens first.
 - The clear is best-effort and bounded: two attempts, 90 s each, and it never fires
-  while the owner has text in the input box. If it cannot run at all (no tmux pane),
-  the hook says so and asks the owner to clear.
+  while the owner has text in the input box or while the session is mid-turn. If it
+  cannot run at all (no tmux pane), the hook says so and asks the owner to clear.
+- If `$CLAUDE_CODE_SESSION_ID` is not set and the hook has to guess the session from
+  the newest state file, it refuses to arm the clear and says so on stderr — a guessed
+  id could name another session, whose pane would then get the keystrokes. The landing
+  itself is still recorded; pass the id explicitly and re-run to arm the clear.
 - If step a finds nothing to offload, say so explicitly rather than skipping the step —
   "nothing to offload" is a claim about the session, and it is usually wrong.
 - A light landing is not a session end — it is a context boundary. The work continues
@@ -199,7 +203,7 @@ Future sessions read GitHub Issues to know what's next. They don't read memory f
 
 ### Step 5: Confirm to User
 
-Full mode also runs `${CLAUDE_PLUGIN_ROOT}/hooks/context-budget.sh landed --clear --summary "<one line: what was landed and where the next session starts>"` here, after the report — same marker as light mode step d. If the user invoked `/alfred-agent:land --no-clear`, pass `--no-clear` instead of `--clear --summary …` and leave the clear to the owner.
+Full mode also runs `${CLAUDE_PLUGIN_ROOT}/hooks/context-budget.sh landed --clear --summary "<one line: what was landed and where the next session starts>" "$CLAUDE_CODE_SESSION_ID"` here, after the report — same marker as light mode step d. If the user invoked `/alfred-agent:land --no-clear`, pass `--no-clear` instead of `--clear --summary …` and leave the clear to the owner.
 
 Report:
 - Health-check gate result (pass/fail per assertion)
