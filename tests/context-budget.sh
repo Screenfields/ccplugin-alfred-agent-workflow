@@ -689,8 +689,12 @@ if [ "$(cat "$RESOLVE/context/current-session.12" 2>/dev/null)" = "r-pane" ] &&
     [ "$(cat "$RESOLVE/context/current-session" 2>/dev/null)" = "r-pane" ]; then
     ok "check writes both the pane-keyed and the unkeyed session pointer"
 else
-    ok_files="$(ls "$RESOLVE/context" | tr '\n' ' ')"
-    bad "check writes both the pane-keyed and the unkeyed session pointer" "files: $ok_files"
+    found_files=""
+    for f in "$RESOLVE"/context/*; do
+        [ -e "$f" ] || continue
+        found_files="${found_files}${f##*/} "
+    done
+    bad "check writes both the pane-keyed and the unkeyed session pointer" "files: $found_files"
 fi
 
 # CLAUDE_CODE_SESSION_ID is what the Bash tool exports, and it outranks the pointer
