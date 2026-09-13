@@ -75,35 +75,69 @@ Should reach the messaging service and report your inbox state. If the MCP isn't
 
 ## Context budget
 
-The lead lands and clears at ~20% context usage. The plugin ships a hook that measures
-that and acts on it, so the rule does not depend on anyone remembering it.
+The lead lands and clears once the session has burned its token budget. The plugin
+ships a hook that measures that, acts on it, and — after a landing — clears the
+session itself, so the rule does not depend on anyone remembering it.
+
+**Thresholds are in tokens, not percent.** Degradation and cost scale with the
+absolute number of tokens in the window, so a percentage silently moves the goalposts
+whenever the window changes (20% of 1M is 200k). The percentage thresholds survive
+only as a fallback for a status line whose state file carries no `used` field.
+
+**Requirement: the session runs inside tmux.** Typing into the session's own pane is
+the only way a session can clear itself, and `$TMUX_PANE` is where the hook aims.
+Fleet sessions already run in tmux; a session outside it lands normally and is told
+to ask the owner for the clear.
 
 | Piece | Where |
 |---|---|
 | Sensor | The **fleet status line** from [alfred-devbox](https://github.com/Screenfields/alfred-devbox) (`share/alfred/statusline-command.sh`) writes `${ALFRED_STATE_DIR:-$HOME/.cache/alfred}/context/<session_id>.json` — `{"pct","used","size","ts"}` — on every assistant message. No hook event carries context usage; the status line is the only surface that does |
-| Actuator | `hooks/hooks.json` + `hooks/context-budget.sh check` on `UserPromptSubmit`, `PostToolUse` (all tools) and `Stop` |
-| Procedure | `/alfred-agent:land --mode=light` — offload to issues/Metis, prune memory to pointers, push, mark landed |
+| Actuator | `hooks/hooks.json` + `hooks/context-budget.sh` on `UserPromptSubmit`, `PostToolUse` (all tools), `Stop`, `SessionStart` (`clear|compact`) and `PreCompact` (`auto`) |
+| Procedure | `/alfred-agent:land --mode=light` — offload to issues/Metis, prune memory to pointers, push, mark landed with `--clear` |
 
 Behaviour:
 
-- **Soft tier** (default 20%) — injects `CONTEXT BUDGET: n% used … Land at the next natural boundary`.
-- **Hard tier** (default 35%) — injects `… LAND NOW`, and the first `Stop` after crossing is blocked once with the light-landing checklist. Never two blocks in a row, never a block at soft tier.
+- **Soft tier** (default 80000 tokens) — injects `CONTEXT BUDGET: n tokens (p%) used … Land at the next natural boundary`.
+- **Hard tier** (default 120000 tokens) — injects `… LAND NOW`, and the first `Stop` after crossing is blocked once with the light-landing checklist. Never two blocks in a row, never a block at soft tier.
 - **Rate limit** — one injection per tier per session per 10 minutes; escalating soft → hard resets the timer so the harder message is not swallowed. `PostToolUse` is capped harder: once per tier for the whole session, since a tool result is a worse place to interrupt than a prompt boundary.
 - **Sub-agents are skipped** — a worker's tool calls fire `PostToolUse` under the parent's `session_id`, so the hook ignores any event carrying `agent_id` (present only in sub-agent context) and any `Agent`/`Task` tool call. Workers are never told to land a session they do not own.
 - **Fails open** — `Stop` honours `stop_hook_active`, and refuses to block unless the once-per-crossing flag was definitely persisted. A broken state directory means no nagging, never an unendable turn.
 - **Silent by default** — no state file, or a reading older than 2 hours, means the hook does nothing. A host without the fleet status line simply never sees it.
 
-`/alfred-agent:land` (both modes) runs `hooks/context-budget.sh landed`, which clears
-the block for the current crossing. The model cannot clear its own context — after a
-landing it reports `landed at n% — clear now` and the owner clears.
+### Self-clear after a landing
+
+```
+/alfred-agent:land --mode=light
+  └─ context-budget.sh landed --clear --summary "<one line>"   # clear_mode=clear
+       └─ Stop hook (the turn that ends the landing)
+            └─ detached sender:  idle input box?  →  type /clear  →  Enter
+                 └─ SessionStart (source=clear)  →  one handover line injected
+```
+
+- **`landed [--clear|--compact|--no-clear] [--summary "<line>"] [session_id]`** records the intent. No flag means `clear_mode=none`, so callers written before this existed behave exactly as they did.
+- **Which session is being landed** resolves in this order: explicit argument, `CLAUDE_CODE_SESSION_ID` (what the Bash tool exports), `CLAUDE_SESSION_ID`, the pane-keyed pointer `check` writes at `<state dir>/context/current-session.<pane>`, the unkeyed pointer, then the newest state file. The pane-keyed pointer exists because a pane hosts exactly one session, so it stays unambiguous where the unkeyed one does not. **A session id resolved from the newest state file cannot arm a clear**: the hook refuses `--clear`/`--compact`, says why on stderr, and still records the landing — a guess could name another session, whose pane would get the keystrokes. `/alfred-agent:land` therefore passes `"$CLAUDE_CODE_SESSION_ID"` explicitly.
+- **The `Stop` hook spawns the sender** — a fully detached child of this same script — *after* it has decided not to block. The hook returns immediately; the child outlives it.
+- **The sender waits for an idle input box**: `cursor_x` is 2 and `esc to interrupt` is absent from the last pane lines, on two consecutive polls 2 s apart. It types the command, waits a second for the slash autocomplete to settle, then sends Enter separately.
+- **Race guard** — the sender re-reads the budget file before every poll. A `last_prompt_ts` newer than `landed_ts` means the owner (or a wake) submitted a prompt after the landing, the context is no longer landed, and the sender aborts without typing anything (`clear_aborted=new-prompt`).
+- **Confirmed, not assumed** — the sender checks both `tmux send-keys` exit statuses, then waits up to 15 s for `last-clear.json` to be consumed by the new session's `SessionStart` hook. Only then does it record `cleared_ts`. If the marker is still there it removes it, logs `unconfirmed`, and leaves `clear_mode` set for the second attempt. A session running an older plugin build has no `SessionStart` hook to consume the marker, so its clears always read as `unconfirmed` and the second attempt is spent on an already-cleared session — harmless, but it is why an old build looks noisier in the sender log.
+- **Concurrency** — `clear_mode` is re-read immediately before the first keystroke and the sender aborts if another actor changed it. It then claims the send by writing `clear_mode=none` plus `clear_sending=<pid>`, so a second sender aborts instead of typing a second `/clear`; the claim is re-checked before the Enter. `last_prompt_ts` is re-read before the command *and* again before the Enter — if a prompt arrives in between, the sender sends `C-u` to wipe the typed command before exiting, so the owner is not left with half a slash command in their input box.
+- **Two attempts, 90 s each.** A sender that hits its deadline, or comes back unconfirmed, leaves `clear_mode` set so the next `Stop` retries once. After the second, the hook gives up and injects a line asking the owner to clear.
+- **No tmux pane** (or no `tmux` on `PATH`) — the hook resets `clear_mode` and injects `CONTEXT BUDGET: self-clear is not possible in this session (no tmux pane). Ask the owner to run /clear now; the landing is complete.`
+- **`SessionStart` (`clear`/`compact`)** — within 15 minutes of a self-clear, injects one line naming the previous session id, the mode, the local time and the handover summary, and telling the fresh session to continue from the handover memory and GitHub issues rather than from recollection. The marker is consumed on read.
+- **`PreCompact` (`auto`)** is the failure signal: the harness compacted before a landing ran. It is never blocked, only recorded, and the next `UserPromptSubmit` injects once — `the harness auto-compacted this session at n tokens before a landing ran. The handover may be incomplete — reconcile decisions from the transcript before continuing.`
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `ALFRED_CONTEXT_SOFT_PCT` | `20` | Soft threshold, in percent of the context window |
-| `ALFRED_CONTEXT_HARD_PCT` | `35` | Hard threshold — the tier that can block a `Stop` |
+| `ALFRED_CONTEXT_SOFT_TOKENS` | `80000` | Soft threshold, in tokens used (input + output) |
+| `ALFRED_CONTEXT_HARD_TOKENS` | `120000` | Hard threshold — the tier that can block a `Stop` |
+| `ALFRED_CONTEXT_SOFT_PCT` | `20` | Fallback soft threshold, used only when the state file reports no `used` |
+| `ALFRED_CONTEXT_HARD_PCT` | `35` | Fallback hard threshold, same condition |
+| `ALFRED_CONTEXT_CONFIRM_SECONDS` | `15` | How long the sender waits for `SessionStart` to consume the handover marker before calling the clear unconfirmed |
 | `ALFRED_STATE_DIR` | `$HOME/.cache/alfred` | Root of the state directory shared with the status line |
 
-A non-numeric threshold override falls back to the default silently. `check` also records the live session id in `<state dir>/context/current-session`, so `landed` marks the right session when the land skill calls it without an argument (resolution order: explicit argument, `CLAUDE_SESSION_ID`, that pointer, then the newest state file with a warning on stderr).
+A non-numeric threshold override falls back to the default silently, and every number read back from a budget file is validated the same way — a hand-edited or half-written state file never turns into an arithmetic error on a hook path.
+
+State written per session under `<state dir>/context/`: `<session_id>.budget` (key=value: tiers, crossing, `landed_ts`, `clear_mode`, `clear_summary`, `clear_attempts`, `clear_sending`, `clear_aborted`, `cleared_ts`, `clear_unconfirmed_ts`, `last_prompt_ts`, `autocompact_ts`), `<session_id>.sender.log` (one timestamped line per sender decision), `current-session` plus `current-session.<pane>` (session pointers), and `last-clear.json` (the handover marker, consumed by the next `SessionStart`).
 
 Tests: `./tests/context-budget.sh` (plain bash, no framework).
 
