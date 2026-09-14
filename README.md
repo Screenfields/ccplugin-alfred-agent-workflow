@@ -68,7 +68,8 @@ Should reach the messaging service and report your inbox state. If the MCP isn't
 | `/alfred-agent:develop` | Feature-dev workflow: pick up issue → code with tests → PR → merge |
 | `/alfred-agent:ecr` | Expert Consulting Review — multi-model architectural feedback |
 | `/alfred-agent:retro` | Session retrospective for capturing learnings |
-| `/alfred-agent:land` | Session close-out: retro + git push + reconcile work to issues. `--mode=light` = the short between-boundaries landing driven by the context budget |
+| `/alfred-agent:land` | Session close-out: retro + git push + reconcile work to issues. `--mode=light` = the short between-boundaries landing driven by the context budget. `--restart`/`--compact` land into a restart/compact instead of a clear; `--force` skips the git/running-agent completeness checks (never the handover check) |
+| `/alfred-agent:recover` | Run first in any new session: reads the SessionStart classification (graceful/unplanned/fresh) and either confirms-and-continues, runs the full unplanned-restart recovery checklist, or does nothing |
 | `/alfred-agent:git-commit` | Authoritative commit procedure (always invoke before `git commit`) |
 | `/alfred-agent:documentation` | Apply baseline-vs-delta + ADR discipline when writing docs |
 | `/alfred-agent:messaging` | Inter-agent messaging skill (MCP tool reference) |
@@ -92,8 +93,9 @@ to ask the owner for the clear.
 | Piece | Where |
 |---|---|
 | Sensor | The **fleet status line** from [alfred-devbox](https://github.com/Screenfields/alfred-devbox) (`share/alfred/statusline-command.sh`) writes `${ALFRED_STATE_DIR:-$HOME/.cache/alfred}/context/<session_id>.json` — `{"pct","used","size","ts"}` — on every assistant message. No hook event carries context usage; the status line is the only surface that does |
-| Actuator | `hooks/hooks.json` + `hooks/context-budget.sh` on `UserPromptSubmit`, `PostToolUse` (all tools), `Stop`, `SessionStart` (`clear|compact`) and `PreCompact` (`auto`) |
-| Procedure | `/alfred-agent:land --mode=light` — offload to issues/Metis, prune memory to pointers, push, mark landed with `--clear` |
+| Actuator | `hooks/hooks.json` + `hooks/context-budget.sh` on `UserPromptSubmit`, `PostToolUse` (all tools), `Stop`, `SessionStart` (`startup\|resume\|clear\|compact`) and `PreCompact` (`auto`) |
+| Procedure | `/alfred-agent:land --mode=light` — offload to issues/Metis (`capture_note`), write the handover file, push, mark landed with `--clear`/`--compact`/`--restart` once the completeness gate passes |
+| Recovery | `/alfred-agent:recover` — run first at every session start; reads the classification the hook injected and either confirms-and-continues, runs the unplanned-restart checklist, or does nothing |
 
 Behaviour:
 
@@ -104,17 +106,23 @@ Behaviour:
 - **Fails open** — `Stop` honours `stop_hook_active`, and refuses to block unless the once-per-crossing flag was definitely persisted. A broken state directory means no nagging, never an unendable turn.
 - **Silent by default** — no state file, or a reading older than 2 hours, means the hook does nothing. A host without the fleet status line simply never sees it.
 
-### Self-clear after a landing
+### Self-clear (and self-compact, and self-restart) after a landing
 
 ```
 /alfred-agent:land --mode=light
-  └─ context-budget.sh landed --clear --summary "<one line>"   # clear_mode=clear
+  └─ context-budget.sh landed --clear --summary "<one line>"   # completeness gate, then clear_mode=clear
        └─ Stop hook (the turn that ends the landing)
             └─ detached sender:  idle input box?  →  type /clear  →  Enter
-                 └─ SessionStart (source=clear)  →  one handover line injected
+                 └─ SessionStart (source=clear)  →  classified "graceful clear" + handover injected
 ```
 
-- **`landed [--clear|--compact|--no-clear] [--summary "<line>"] [session_id]`** records the intent. No flag means `clear_mode=none`, so callers written before this existed behave exactly as they did.
+`--restart` runs the same way except the sender runs a restart command
+(`ALFRED_SESSION_RESTART_CMD`, default `hub-restart`) instead of typing `/clear`; the
+new session comes up via `claude -c`, which reports `source=resume` at `SessionStart`
+— matched the same as the other three sources.
+
+- **The completeness gate** (`landed --clear`/`--compact`/`--restart`, any mode but `--no-clear`) refuses to arm — recording nothing at all — unless: (1) `${ALFRED_STATE_DIR:-$HOME/.cache/alfred}/context/handover.md` exists, is ≤4096 bytes, ≤30 min old, and contains a Metis capture id (`cap-[0-9a-f]{8}`); (2) the project git tree and every worktree `git worktree list --porcelain` knows about is clean and pushed (a still-registered worker worktree counts as not cleaned up on its own); (3) no background sub-agent looks like it is still running (best-effort: a task transcript under `/tmp/claude-<uid>/<project-slug>/<session-id>/tasks/*.output` touched in the last 60s — not authoritative, since Claude Code slugs that directory by the session's original launch cwd, not a worktree's, and a long-running tool call leaves no recent write while very much still running; the land skill's own Drain step is the authoritative check). `--force` skips (2) and (3) only, never (1), and is recorded as `forced=true`/`false` in the budget file. `--no-handover` skips (1) alone, for the rare landing that truly has nothing to hand over.
+- **`landed [--clear|--compact|--restart|--no-clear] [--force] [--no-handover] [--summary "<line>"] [session_id]`** records the intent. No flag means `clear_mode=none`, so callers written before this existed behave exactly as they did, and `--no-clear` is the only mode the completeness gate does not apply to.
 - **Which session is being landed** resolves in this order: explicit argument, `CLAUDE_CODE_SESSION_ID` (what the Bash tool exports), `CLAUDE_SESSION_ID`, the pane-keyed pointer `check` writes at `<state dir>/context/current-session.<pane>`, the unkeyed pointer, then the newest state file. The pane-keyed pointer exists because a pane hosts exactly one session, so it stays unambiguous where the unkeyed one does not. **A session id resolved from the newest state file cannot arm a clear**: the hook refuses `--clear`/`--compact`, says why on stderr, and still records the landing — a guess could name another session, whose pane would get the keystrokes. `/alfred-agent:land` therefore passes `"$CLAUDE_CODE_SESSION_ID"` explicitly.
 - **The `Stop` hook spawns the sender** — a fully detached child of this same script — *after* it has decided not to block. The hook returns immediately; the child outlives it.
 - **The sender waits for an idle input box**: `cursor_x` is 2 and `esc to interrupt` is absent from the last pane lines, on two consecutive polls 2 s apart. It types the command, waits a second for the slash autocomplete to settle, then sends Enter separately.
@@ -123,8 +131,12 @@ Behaviour:
 - **Concurrency** — `clear_mode` is re-read immediately before the first keystroke and the sender aborts if another actor changed it. It then claims the send by writing `clear_mode=none` plus `clear_sending=<pid>`, so a second sender aborts instead of typing a second `/clear`; the claim is re-checked before the Enter. `last_prompt_ts` is re-read before the command *and* again before the Enter — if a prompt arrives in between, the sender sends `C-u` to wipe the typed command before exiting, so the owner is not left with half a slash command in their input box.
 - **Two attempts, 90 s each.** A sender that hits its deadline, or comes back unconfirmed, leaves `clear_mode` set so the next `Stop` retries once. After the second, the hook gives up and injects a line asking the owner to clear.
 - **No tmux pane** (or no `tmux` on `PATH`) — the hook resets `clear_mode` and injects `CONTEXT BUDGET: self-clear is not possible in this session (no tmux pane). Ask the owner to run /clear now; the landing is complete.`
-- **`SessionStart` (`clear`/`compact`)** — within 15 minutes of a self-clear, injects one line naming the previous session id, the mode, the local time and the handover summary, and telling the fresh session to continue from the handover memory and GitHub issues rather than from recollection. The marker is consumed on read.
-- **`PreCompact` (`auto`)** is the failure signal: the harness compacted before a landing ran. It is never blocked, only recorded, and the next `UserPromptSubmit` injects once — `the harness auto-compacted this session at n tokens before a landing ran. The handover may be incomplete — reconcile decisions from the transcript before continuing.`
+- **`SessionStart` (all four sources: `startup`/`resume`/`clear`/`compact`) classifies every start:**
+  - **graceful** — a fresh (≤15 min) last-clear marker is present: injects `CONTEXT BUDGET: graceful <mode> after landing — previous session <id> …`, naming the previous session, the mode, the local time and the summary, and telling the fresh session to continue from the handover file and GitHub issues rather than from recollection. The marker is consumed on read.
+  - **unplanned** — no marker, but either a `boot-recovery.json` (written by the host's boot supervisor before recreating a session that died without landing — crash, OOM-kill, power loss; fields `ts`/`boot_ts`/`reason`/`host`, consumed on read) or the most recent OTHER session's budget file shows activity (`last_prompt_ts`) after its last landing (`landed_ts`), or no landing at all: injects `CONTEXT BUDGET: unplanned restart detected — recovery required.` plus a `RECOVERY:` line (previous session, last activity, last landing or "never", boot time if known) and `Run /alfred-agent:recover now, before any other work.`
+  - **fresh** — neither of the above: nothing is injected.
+  - **The handover file** (`context/handover.md`) is injected under its own `HANDOVER (written …, consumed now):` header and deleted, independent of the classification above — a stale handover after an unplanned restart is still better than none.
+- **`PreCompact` (`auto` only — manual compaction is not hooked, and neither can block: verified against the [Claude Code hooks docs](https://docs.claude.com/en/docs/claude-code/hooks), exit code 2 and any JSON decision are ignored for this event on both triggers)** records the auto-compaction for one thing: the next `UserPromptSubmit` injects once — `the harness auto-compacted this session at n tokens before a landing ran. The handover may be incomplete — reconcile decisions from the transcript before continuing.` An un-landed compaction (manual or auto) or `/clear` is caught the same generic way as any other unplanned ending — via the `last_prompt_ts`/`landed_ts` comparison above, not via anything `PreCompact` itself records.
 
 | Env var | Default | Purpose |
 |---|---|---|
@@ -137,7 +149,7 @@ Behaviour:
 
 A non-numeric threshold override falls back to the default silently, and every number read back from a budget file is validated the same way — a hand-edited or half-written state file never turns into an arithmetic error on a hook path.
 
-State written per session under `<state dir>/context/`: `<session_id>.budget` (key=value: tiers, crossing, `landed_ts`, `clear_mode`, `clear_summary`, `clear_attempts`, `clear_sending`, `clear_aborted`, `cleared_ts`, `clear_unconfirmed_ts`, `last_prompt_ts`, `autocompact_ts`), `<session_id>.sender.log` (one timestamped line per sender decision), `current-session` plus `current-session.<pane>` (session pointers), and `last-clear.json` (the handover marker, consumed by the next `SessionStart`).
+State written under `<state dir>/context/`: `<session_id>.budget` (key=value: tiers, crossing, `landed_ts`, `clear_mode`, `clear_summary`, `clear_attempts`, `clear_sending`, `clear_aborted`, `cleared_ts`, `clear_unconfirmed_ts`, `last_prompt_ts`, `autocompact_ts`, `forced`), `<session_id>.sender.log` (one timestamped line per sender decision), `current-session` plus `current-session.<pane>` (session pointers), `last-clear.json` (the self-clear/compact/restart marker, consumed by the next `SessionStart`), `handover.md` (the land skill's handover content, consumed the same way, independent of the marker), and `boot-recovery.json` (written externally by the host's boot supervisor, consumed by the next `SessionStart`'s unplanned-restart classification).
 
 Tests: `./tests/context-budget.sh` (plain bash, no framework).
 
