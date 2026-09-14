@@ -232,12 +232,18 @@ command -v alfred-wake >/dev/null 2>&1 || "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake
 ```
 
 ```
-Monitor(command: "alfred-wake run", persistent: true,
+Monitor(command: "alfred-wake run", timeout_ms: 1800000,
         description: "inbox wake: agent-messaging + Buzz")
 ```
 
 If `~/.local/bin` is not on `PATH`, arm the full path instead:
-`Monitor(command: "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake run", persistent: true, …)`.
+`Monitor(command: "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake run", timeout_ms: 1800000, …)`.
+
+There is no `persistent` parameter on the `Monitor` tool — the schema only
+accepts `command`, `ws`, `description`, and `timeout_ms` (capped at
+1800000 ms / 30 minutes). The Monitor always expires after 30 minutes and
+must be re-armed on each expiry notification; nothing re-arms it
+automatically, so an unnoticed expiry is a silent wake-coverage gap.
 
 Fall back to `/loop 15m /alfred-agent:check-messages` **only** when arming
 fails, and say so — a silent fallback is indistinguishable from a working

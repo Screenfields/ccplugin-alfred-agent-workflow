@@ -16,9 +16,15 @@ command -v alfred-wake >/dev/null 2>&1 || "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake
 ```
 
 ```
-Monitor(command: "alfred-wake run", persistent: true,
+Monitor(command: "alfred-wake run", timeout_ms: 1800000,
         description: "inbox wake: agent-messaging + Buzz")
 ```
+
+There is no `persistent` parameter on the `Monitor` tool — the schema only
+accepts `command`, `ws`, `description`, and `timeout_ms` (capped at
+1800000 ms / 30 minutes). The Monitor always expires after 30 minutes and
+must be re-armed on each expiry notification; nothing re-arms it
+automatically, so an unnoticed expiry is a silent wake-coverage gap.
 
 Then **call `get_messages` once** to pick up whatever arrived before the bridge
 came up (the bridge seeds its cursors on first run and deliberately never
@@ -33,7 +39,7 @@ fall back; a silent fallback looks identical to a working bridge.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake" status >/dev/null 2>&1 || \
-  echo "WARNING: no wake bridge armed — this inbox is poll-only. Arm it: Monitor(command: \"alfred-wake run\", persistent: true)"
+  echo "WARNING: no wake bridge armed — this inbox is poll-only. Arm it: Monitor(command: \"alfred-wake run\", timeout_ms: 1800000)"
 ```
 
 `alfred-wake status` exits 0 only while a `run` loop has touched its marker file

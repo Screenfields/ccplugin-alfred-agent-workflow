@@ -34,14 +34,19 @@ appear with neither, after `--no-clear`) — it is independent of the classifica
 
 1. **Re-arm the wake bridge.** Prefer the host bridge if this host has one:
    `command -v hub-wake-bridge` — if found, arm it exactly as the platform docs
-   specify: `Monitor(command: "~/.local/bin/hub-wake-bridge run", persistent: true, description: "hub inbox wake: agent-messaging + Buzz")`. If `hub-wake-bridge` is not
+   specify: `Monitor(command: "~/.local/bin/hub-wake-bridge run", timeout_ms: 1800000, description: "hub inbox wake: agent-messaging + Buzz")`. If `hub-wake-bridge` is not
    on `PATH`, fall back to this plugin's own bridge, the same way `alfred-wake` is
    armed at any session start (README § "Arming it"):
    ```
    command -v alfred-wake >/dev/null 2>&1 || "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake" install
-   Monitor(command: "alfred-wake run", persistent: true, description: "inbox wake: agent-messaging + Buzz")
+   Monitor(command: "alfred-wake run", timeout_ms: 1800000, description: "inbox wake: agent-messaging + Buzz")
    ```
    If neither exists, say so — a silent skip is indistinguishable from a working bridge.
+   There is no `persistent` parameter on the `Monitor` tool — the schema only accepts
+   `command`, `ws`, `description`, and `timeout_ms` (capped at 1800000 ms / 30
+   minutes). Either Monitor always expires after 30 minutes and must be re-armed on
+   each expiry notification; nothing re-arms it automatically, so an unnoticed expiry
+   is a wake-coverage gap.
 2. **Confirm the handover was consumed.** `test -f "${ALFRED_STATE_DIR:-$HOME/.cache/alfred}/context/handover.md"` should now be false — `session-start` deletes it the moment it injects it. If it is still there, something read the classification without going through the hook (rare); say so and read it directly instead of guessing.
 3. **Continue from the handover's "first thing" item** — already in context from the injected `HANDOVER` block. No further investigation needed; the previous session already did the Drain + completeness gate before landing.
 
