@@ -85,6 +85,23 @@ absolute number of tokens in the window, so a percentage silently moves the goal
 whenever the window changes (20% of 1M is 200k). The percentage thresholds survive
 only as a fallback for a status line whose state file carries no `used` field.
 
+**Thresholds are measured above the session baseline.** A fresh session is not at
+zero: system prompt, `CLAUDE.md`, memory index, tool and MCP schemas and the
+`SessionStart` injections are in the window before the conversation has said anything
+(~86000 tokens on the hub). `SessionStart` arms a baseline, the first reading after it
+records `used` as this session's floor, and every tier is decided on `used - baseline`
+— so the budget measures what *this conversation* burns. A session with no armed
+baseline (one that started before this build, or whose `SessionStart` hook never ran)
+falls back to measuring `used` itself, exactly as before.
+
+**A live conversation is nagged, not cut off.** The hard tier blocks the turn and arms
+the self-clear only when the box has been quiet: while a human prompt is younger than
+`ALFRED_CONTEXT_INTERACTIVE_SECONDS` (default 10 min) the `Stop` hook says the same
+thing and lets the turn end. Wake-bridge wakes arrive as `Monitor` output, not as user
+prompts, so an unattended session is unaffected. Above
+`ALFRED_CONTEXT_CEILING_TOKENS` (default 200000 above the baseline) even a live
+conversation lands.
+
 **Requirement: the session runs inside tmux.** Typing into the session's own pane is
 the only way a session can clear itself, and `$TMUX_PANE` is where the hook aims.
 Fleet sessions already run in tmux; a session outside it lands normally and is told
@@ -101,6 +118,8 @@ Behaviour:
 
 - **Soft tier** (default 80000 tokens) — injects `CONTEXT BUDGET: n tokens (p%) used … Land at the next natural boundary`.
 - **Hard tier** (default 120000 tokens) — injects `… LAND NOW`, and the first `Stop` after crossing is blocked once with the light-landing checklist. Never two blocks in a row, never a block at soft tier.
+- **Interactive deferral** — at the hard tier, with a `UserPromptSubmit` in the last `ALFRED_CONTEXT_INTERACTIVE_SECONDS` (default 600) and usage below `ALFRED_CONTEXT_CEILING_TOKENS` (default 200000, measured above the baseline too), the `Stop` hook injects the hard nag and exits 0: no block, no sender. The once-per-crossing block flag is left unset, so the block still fires on the first `Stop` after the conversation goes quiet, or as soon as the ceiling is crossed. Token mode only — the percentage fallback has no ceiling to compare against and keeps blocking as before.
+- **Session baseline** — `SessionStart` writes `baseline_pending=1`; the first `check` with a fresh reading records `baseline=<used>` and every token tier is then decided on `used - baseline`. A reading *below* the baseline (the window was compacted) lowers the baseline to that new floor rather than going negative. All four `SessionStart` sources arm it, `resume` included, so a session that comes back via `claude -c` measures from where it resumed. The injected line names both numbers: `44000 tokens this session (130000 total, 13%) used`.
 - **Rate limit** — one injection per tier per session per 10 minutes; escalating soft → hard resets the timer so the harder message is not swallowed. `PostToolUse` is capped harder: once per tier for the whole session, since a tool result is a worse place to interrupt than a prompt boundary.
 - **Sub-agents are skipped** — a worker's tool calls fire `PostToolUse` under the parent's `session_id`, so the hook ignores any event carrying `agent_id` (present only in sub-agent context) and any `Agent`/`Task` tool call. Workers are never told to land a session they do not own.
 - **Fails open** — `Stop` honours `stop_hook_active`, and refuses to block unless the once-per-crossing flag was definitely persisted. A broken state directory means no nagging, never an unendable turn.
@@ -142,6 +161,8 @@ new session comes up via `claude -c`, which reports `source=resume` at `SessionS
 |---|---|---|
 | `ALFRED_CONTEXT_SOFT_TOKENS` | `80000` | Soft threshold, in tokens used (input + output) |
 | `ALFRED_CONTEXT_HARD_TOKENS` | `120000` | Hard threshold — the tier that can block a `Stop` |
+| `ALFRED_CONTEXT_INTERACTIVE_SECONDS` | `600` | How recent a `UserPromptSubmit` must be for the hard tier to nag instead of blocking. `0` turns the deferral off |
+| `ALFRED_CONTEXT_CEILING_TOKENS` | `200000` | Above this (measured above the baseline), the block fires however live the conversation is |
 | `ALFRED_CONTEXT_SOFT_PCT` | `20` | Fallback soft threshold, used only when the state file reports no `used` |
 | `ALFRED_CONTEXT_HARD_PCT` | `35` | Fallback hard threshold, same condition |
 | `ALFRED_CONTEXT_CONFIRM_SECONDS` | `15` | How long the sender waits for `SessionStart` to consume the handover marker before calling the clear unconfirmed |
@@ -149,11 +170,11 @@ new session comes up via `claude -c`, which reports `source=resume` at `SessionS
 
 A non-numeric threshold override falls back to the default silently, and every number read back from a budget file is validated the same way — a hand-edited or half-written state file never turns into an arithmetic error on a hook path.
 
-State written under `<state dir>/context/`: `<session_id>.budget` (key=value: tiers, crossing, `landed_ts`, `clear_mode`, `clear_summary`, `clear_attempts`, `clear_sending`, `clear_aborted`, `cleared_ts`, `clear_unconfirmed_ts`, `last_prompt_ts`, `autocompact_ts`, `forced`), `<session_id>.sender.log` (one timestamped line per sender decision), `current-session` plus `current-session.<pane>` (session pointers), `last-clear.json` (the self-clear/compact/restart marker, consumed by the next `SessionStart`), `handover.md` (the land skill's handover content, consumed the same way, independent of the marker), and `boot-recovery.json` (written externally by the host's boot supervisor, consumed by the next `SessionStart`'s unplanned-restart classification).
+State written under `<state dir>/context/`: `<session_id>.budget` (key=value: tiers, crossing, `landed_ts`, `clear_mode`, `clear_summary`, `clear_attempts`, `clear_sending`, `clear_aborted`, `cleared_ts`, `clear_unconfirmed_ts`, `last_prompt_ts`, `defer_nag_ts`, `baseline_pending`, `baseline`, `autocompact_ts`, `forced`), `<session_id>.sender.log` (one timestamped line per sender decision), `current-session` plus `current-session.<pane>` (session pointers), `last-clear.json` (the self-clear/compact/restart marker, consumed by the next `SessionStart`), `handover.md` (the land skill's handover content, consumed the same way, independent of the marker), and `boot-recovery.json` (written externally by the host's boot supervisor, consumed by the next `SessionStart`'s unplanned-restart classification).
 
 Tests: `./tests/context-budget.sh` (plain bash, no framework).
 
-Design and rationale: [Screenfields/alfred-platform#847](https://github.com/Screenfields/alfred-platform/issues/847).
+Design and rationale: [Screenfields/alfred-platform#847](https://github.com/Screenfields/alfred-platform/issues/847); baseline delta and interactive deferral: [Screenfields/alfred-platform#874](https://github.com/Screenfields/alfred-platform/issues/874).
 
 ## MCP tools (provided by the bundled `agent-messaging` server)
 
