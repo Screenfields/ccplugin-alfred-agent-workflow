@@ -50,7 +50,9 @@ SOFT_PCT="${ALFRED_CONTEXT_SOFT_PCT:-20}"
 HARD_PCT="${ALFRED_CONTEXT_HARD_PCT:-35}"
 STALE_SECONDS=7200  # 2 h — an older reading says nothing about the current turn
 NAG_INTERVAL=600    # 10 min — one injection per tier per session
-SENDER_DEADLINE=90  # s the sender waits for an idle input box before giving up
+# An override exists so the test suite does not have to sit out the real
+# window (mirrors CONFIRM_SECONDS below).
+SENDER_DEADLINE="${ALFRED_CONTEXT_SENDER_DEADLINE:-90}"  # s the sender waits for an idle input box before giving up
 SENDER_POLL=2       # s between idle polls; idle must hold for two in a row
 CLEAR_MAX_ATTEMPTS=2
 LANDED_GRACE=120    # s — a landing this recent counts for a crossing observed after it
@@ -58,6 +60,12 @@ HANDOVER_WINDOW=900 # 15 min — an older marker says nothing about this start
 # How long the sender waits for SessionStart to consume the handover marker. An
 # override exists so the test suite does not have to sit out the real window.
 CONFIRM_SECONDS="${ALFRED_CONTEXT_CONFIRM_SECONDS:-15}"
+# How long a single tmux client call may run before being killed. A pane left
+# in a tmux mode (copy-mode/view-mode) can swallow a client's request without
+# ever answering it — see pane_idle below — so every tmux call in the sender
+# path is bounded by this instead of trusting tmux to always respond. An
+# override exists so the test suite does not have to sit out the real window.
+TMUX_CALL_TIMEOUT="${ALFRED_CONTEXT_TMUX_TIMEOUT:-10}"
 SENDER_LOG="/dev/null"
 
 # A malformed override must not make the arithmetic below fail (and, with an
@@ -67,6 +75,8 @@ case "$HARD_TOKENS" in '' | *[!0-9]*) HARD_TOKENS=120000 ;; esac
 case "$SOFT_PCT" in '' | *[!0-9]*) SOFT_PCT=20 ;; esac
 case "$HARD_PCT" in '' | *[!0-9]*) HARD_PCT=35 ;; esac
 case "$CONFIRM_SECONDS" in '' | *[!0-9]*) CONFIRM_SECONDS=15 ;; esac
+case "$SENDER_DEADLINE" in '' | *[!0-9]*) SENDER_DEADLINE=90 ;; esac
+case "$TMUX_CALL_TIMEOUT" in '' | *[!0-9]*) TMUX_CALL_TIMEOUT=10 ;; esac
 
 STATE_DIR="${ALFRED_STATE_DIR:-$HOME/.cache/alfred}/context"
 SESSION_POINTER="${STATE_DIR}/current-session"
@@ -793,13 +803,54 @@ sender_log() {
     printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >>"$SENDER_LOG" 2>/dev/null
 }
 
+tmux_call() {
+    # tmux_call <tmux-args...> — every tmux client call in the sender path goes
+    # through this instead of calling tmux directly. A pane left in a tmux mode
+    # (copy-mode: the owner scrolled back) can read a client's keys as mode
+    # navigation instead of answering it, and tmux can then open a
+    # command-prompt on behalf of that client — which, being a non-interactive
+    # command client, has no terminal to answer the prompt and hangs forever
+    # (2026-09-14: a `send-keys /exit` into a scrolled-back pane triggered
+    # exactly this and blocked the sender for over an hour). `timeout` bounds
+    # every call so a hung tmux client can never block the sender past its own
+    # deadline; fall back to a plain call only when `timeout` is not on PATH.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$TMUX_CALL_TIMEOUT" tmux "$@"
+    else
+        tmux "$@"
+    fi
+}
+
 pane_idle() {
-    # pane_idle <pane> — the input box is empty (cursor at column 2) and the
-    # session is not mid-turn ("esc to interrupt" absent from the last lines).
-    local pane="$1" cx busy
-    cx=$(tmux display-message -p -t "$pane" '#{cursor_x}' 2>/dev/null) || return 1
+    # pane_idle <pane> — the input box is empty (cursor at column 2), the pane
+    # is not in a tmux mode (copy-mode/view-mode — see tmux_call above for why
+    # that matters), and the session is not mid-turn ("esc to interrupt" absent
+    # from the last lines). A pane in a mode is never idle, even with an empty
+    # cursor column: sending keys into it does not reach the session.
+    #
+    # Sets LAST_PANE_IN_MODE (a caller-scoped local via bash's dynamic scoping)
+    # as a side effect, so do_sender's own deadline message can say whether a
+    # tmux mode was the last known reason nothing ever went idle.
+    local pane="$1" out rc cx capture busy
+    out=$(tmux_call display-message -p -t "$pane" '#{cursor_x} #{pane_in_mode}' 2>/dev/null)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ "$rc" -eq 124 ] && sender_log "display-message timed out after ${TMUX_CALL_TIMEOUT}s"
+        LAST_PANE_IN_MODE=""
+        return 1
+    fi
+    cx="${out%% *}"
+    LAST_PANE_IN_MODE="${out#* }"
     [ "$cx" = "2" ] || return 1
-    busy=$(tmux capture-pane -p -t "$pane" 2>/dev/null | tail -4 | grep -c 'esc to interrupt') || busy=0
+    [ "$LAST_PANE_IN_MODE" = "0" ] || return 1
+
+    capture=$(tmux_call capture-pane -p -t "$pane" 2>/dev/null)
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+        sender_log "capture-pane timed out after ${TMUX_CALL_TIMEOUT}s"
+        return 1
+    fi
+    busy=$(printf '%s\n' "$capture" | tail -4 | grep -c 'esc to interrupt') || busy=0
     [ "$busy" = "0" ]
 }
 
@@ -815,6 +866,7 @@ do_sender() {
     sender_log "start pane=${pane} mode=${mode} deadline=${SENDER_DEADLINE}s"
 
     local deadline idle=0 lp landed now keys summary mode_now owner rc waited
+    local LAST_PANE_IN_MODE=""
     deadline=$(($(now_epoch) + SENDER_DEADLINE))
 
     while :; do
@@ -844,7 +896,11 @@ do_sender() {
 
     if [ "$idle" -lt 2 ]; then
         # Leave clear_mode as it is: the next Stop gets the second and last attempt.
-        sender_log "timeout after ${SENDER_DEADLINE}s — the input box never went idle"
+        if [ "$LAST_PANE_IN_MODE" = "1" ]; then
+            sender_log "timeout after ${SENDER_DEADLINE}s — the input box never went idle — the pane was in a tmux mode (owner scrolled back?)"
+        else
+            sender_log "timeout after ${SENDER_DEADLINE}s — the input box never went idle"
+        fi
         exit 0
     fi
 
@@ -936,10 +992,14 @@ do_sender() {
         # Two send-keys a second apart: typing the command opens the slash
         # autocomplete, and an Enter in the same burst can land on the menu
         # before it has settled.
-        tmux send-keys -t "$pane" "$keys" 2>/dev/null
+        tmux_call send-keys -t "$pane" "$keys" 2>/dev/null
         rc=$?
         if [ "$rc" -ne 0 ]; then
-            sender_log "send-keys (command) failed rc=${rc} — nothing was typed"
+            if [ "$rc" -eq 124 ]; then
+                sender_log "send-keys (command) timed out after ${TMUX_CALL_TIMEOUT}s — nothing was typed"
+            else
+                sender_log "send-keys (command) failed rc=${rc} — nothing was typed"
+            fi
             rm -f "$LAST_CLEAR" 2>/dev/null
             write_budget "$budget_file" clear_mode "$mode" clear_sending ""
             exit 0
@@ -957,18 +1017,22 @@ do_sender() {
         if [ "$lp" -gt "$landed" ]; then
             # The command is sitting in the owner's input box; wipe the line so
             # their next keystroke is not prefixed by half a slash command.
-            tmux send-keys -t "$pane" C-u 2>/dev/null
+            tmux_call send-keys -t "$pane" C-u 2>/dev/null
             sender_log "abort: prompt at ${lp} arrived between the command and the Enter — line wiped"
             rm -f "$LAST_CLEAR" 2>/dev/null
             write_budget "$budget_file" clear_aborted "new-prompt" clear_mode none clear_sending ""
             exit 0
         fi
 
-        tmux send-keys -t "$pane" C-m 2>/dev/null
+        tmux_call send-keys -t "$pane" C-m 2>/dev/null
         rc=$?
         if [ "$rc" -ne 0 ]; then
-            tmux send-keys -t "$pane" C-u 2>/dev/null
-            sender_log "send-keys (Enter) failed rc=${rc} — line wiped"
+            tmux_call send-keys -t "$pane" C-u 2>/dev/null
+            if [ "$rc" -eq 124 ]; then
+                sender_log "send-keys (Enter) timed out after ${TMUX_CALL_TIMEOUT}s — line wiped"
+            else
+                sender_log "send-keys (Enter) failed rc=${rc} — line wiped"
+            fi
             rm -f "$LAST_CLEAR" 2>/dev/null
             write_budget "$budget_file" clear_mode "$mode" clear_sending ""
             exit 0
