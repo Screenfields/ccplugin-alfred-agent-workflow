@@ -57,6 +57,14 @@
 # second sender finds an idle box and types /clear into a fresh session — but it is
 # why an old plugin looks noisier in the sender log than a current one.
 #
+# Restart's confirmation window is much longer than clear/compact's (see
+# RESTART_CONFIRM_SECONDS): it acts through an external helper (hub-restart)
+# that respawns the pane asynchronously, not synchronously in this process.
+# Restart also never leaves clear_mode re-armed on an unconfirmed timeout —
+# unlike clear/compact's "spend a second attempt" — because a left-armed
+# restart makes the very next Stop hook, possibly in the session that already
+# restarted, run the restart command again and kill a live session.
+#
 # Contract: nothing but the hook JSON ever reaches stdout, and the only non-zero
 # exit is the intentional Stop block (exit 2). Any other problem is silent.
 
@@ -86,6 +94,22 @@ HANDOVER_WINDOW=900 # 15 min — an older marker says nothing about this start
 # How long the sender waits for SessionStart to consume the handover marker. An
 # override exists so the test suite does not have to sit out the real window.
 CONFIRM_SECONDS="${ALFRED_CONTEXT_CONFIRM_SECONDS:-15}"
+# Restart's confirmation window is a separate, much longer budget: hub-restart
+# (the restart command) runs asynchronously and needs up to its own idle-wait,
+# exit, and start deadlines before the NEW process's SessionStart can consume
+# the marker — 15s (CONFIRM_SECONDS above, right for clear/compact, which act
+# synchronously in this process) is nowhere near enough. Named after
+# hub-restart's own deadlines rather than one bare number, plus a margin for
+# polling granularity and marker-write latency, so the intent stays legible.
+# Observed live 2026-09-14 (alfred-platform#850): a restart that succeeded at
+# ~66s was declared unconfirmed at 15s and re-armed a second, unwanted
+# restart — this window (and the clear_mode=none-on-timeout fix below it)
+# closes that gap. An override exists for the same reason as CONFIRM_SECONDS.
+RESTART_IDLE_DEADLINE=180  # hub-restart's own budget to find the pane idle
+RESTART_EXIT_DEADLINE=60   # hub-restart's budget for /exit to land and the pane to close
+RESTART_START_DEADLINE=60  # hub-restart's budget for the new process to come up and run SessionStart
+RESTART_CONFIRM_MARGIN=60  # slack for polling granularity and marker-write latency
+RESTART_CONFIRM_SECONDS="${ALFRED_CONTEXT_RESTART_CONFIRM_SECONDS:-$((RESTART_IDLE_DEADLINE + RESTART_EXIT_DEADLINE + RESTART_START_DEADLINE + RESTART_CONFIRM_MARGIN))}"
 # How long a single tmux client call may run before being killed. A pane left
 # in a tmux mode (copy-mode/view-mode) can swallow a client's request without
 # ever answering it — see pane_idle below — so every tmux call in the sender
@@ -103,6 +127,7 @@ case "$HARD_PCT" in '' | *[!0-9]*) HARD_PCT=35 ;; esac
 case "$INTERACTIVE_SECONDS" in '' | *[!0-9]*) INTERACTIVE_SECONDS=600 ;; esac
 case "$CEILING_TOKENS" in '' | *[!0-9]*) CEILING_TOKENS=200000 ;; esac
 case "$CONFIRM_SECONDS" in '' | *[!0-9]*) CONFIRM_SECONDS=15 ;; esac
+case "$RESTART_CONFIRM_SECONDS" in '' | *[!0-9]*) RESTART_CONFIRM_SECONDS=$((RESTART_IDLE_DEADLINE + RESTART_EXIT_DEADLINE + RESTART_START_DEADLINE + RESTART_CONFIRM_MARGIN)) ;; esac
 case "$SENDER_DEADLINE" in '' | *[!0-9]*) SENDER_DEADLINE=90 ;; esac
 case "$TMUX_CALL_TIMEOUT" in '' | *[!0-9]*) TMUX_CALL_TIMEOUT=10 ;; esac
 
@@ -1133,23 +1158,44 @@ do_sender() {
     # --- confirmation ------------------------------------------------------
     # A send is not a clear. The new session's SessionStart hook consumes the
     # handover marker, so the marker disappearing is the only evidence this
-    # script has that the session actually restarted.
+    # script has that the session actually restarted. Restart gets its own,
+    # much longer window (RESTART_CONFIRM_SECONDS): hub-restart runs the
+    # respawn asynchronously and can legitimately still be mid-flight well
+    # past CONFIRM_SECONDS's 15s, which is sized for clear/compact acting
+    # synchronously in this process.
+    local confirm_seconds="$CONFIRM_SECONDS"
+    [ "$mode" = "restart" ] && confirm_seconds="$RESTART_CONFIRM_SECONDS"
+
     waited=0
-    while [ "$waited" -lt "$CONFIRM_SECONDS" ]; do
+    while [ "$waited" -lt "$confirm_seconds" ]; do
         [ -f "$LAST_CLEAR" ] || break
         sleep 1
         waited=$((waited + 1))
     done
 
     if [ -f "$LAST_CLEAR" ]; then
-        # Unconfirmed: either the session did not clear, or it is running a build
-        # with no SessionStart hook to consume the marker. Drop the marker rather
-        # than let it greet an unrelated later clear, and leave clear_mode set so
-        # the next Stop spends the second attempt.
+        # Unconfirmed: either the session did not clear/restart, or it is running
+        # a build with no SessionStart hook to consume the marker. Drop the
+        # marker rather than let it greet an unrelated later clear.
         rm -f "$LAST_CLEAR" 2>/dev/null
-        write_budget "$budget_file" clear_mode "$mode" clear_sending "" \
-            clear_unconfirmed_ts "$(now_epoch)"
-        sender_log "unconfirmed after ${CONFIRM_SECONDS}s — marker never consumed; clear_mode=${mode} left for the next attempt"
+        if [ "$mode" = "restart" ]; then
+            # Never leave clear_mode=restart armed on an unconfirmed timeout: the
+            # helper may have genuinely succeeded just after our window closed
+            # (observed live 2026-09-14, alfred-platform#850 — a restart that
+            # succeeded at ~66s was declared unconfirmed and left armed), and a
+            # left-armed restart makes the NEXT Stop hook — in the session that
+            # already restarted — run hub-restart again. An unwanted restart
+            # kills a live session; a missed confirmation only costs a log line.
+            write_budget "$budget_file" clear_mode none clear_sending "" \
+                clear_unconfirmed_ts "$(now_epoch)"
+            sender_log "unconfirmed after ${confirm_seconds}s — marker never consumed; clear_mode=none (never re-arm a restart on timeout)"
+        else
+            # clear/compact: leave clear_mode set so the next Stop spends the
+            # second (and last) attempt. Unchanged behaviour.
+            write_budget "$budget_file" clear_mode "$mode" clear_sending "" \
+                clear_unconfirmed_ts "$(now_epoch)"
+            sender_log "unconfirmed after ${confirm_seconds}s — marker never consumed; clear_mode=${mode} left for the next attempt"
+        fi
         exit 0
     fi
 
