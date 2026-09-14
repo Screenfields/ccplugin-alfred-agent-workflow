@@ -13,6 +13,24 @@
 # percentage thresholds (ALFRED_CONTEXT_SOFT_PCT / _HARD_PCT) survive only as a
 # fallback for status lines that write no `used` field, or write `used: 0`.
 #
+# Thresholds are measured ABOVE THE SESSION BASELINE. A fresh session is not at
+# zero: system prompt, CLAUDE.md, memory index, tool and MCP schemas and the
+# SessionStart injections are all in the window before the conversation has said
+# anything (~86k tokens on the hub, 2026-09-14). `session-start` arms a baseline;
+# the first `check` with a usable reading records `used` as this session's floor,
+# and every tier is decided on `used - baseline`. Where no baseline was armed —
+# a session that started before this build, or one whose SessionStart hook never
+# ran — the baseline stays 0 and the thresholds apply to `used` exactly as they
+# did before.
+#
+# The hard tier does not block a turn the owner is standing in front of. Every
+# UserPromptSubmit stamps `last_prompt_ts`; while that is younger than
+# ALFRED_CONTEXT_INTERACTIVE_SECONDS the Stop hook nags and lets the turn end,
+# instead of blocking and arming the self-clear. Wake-bridge wakes arrive as
+# Monitor output, not as user prompts, so an autonomous session keeps the strict
+# behaviour. Above ALFRED_CONTEXT_CEILING_TOKENS (also measured above the
+# baseline) even a live conversation lands.
+#
 #   check         read a hook payload on stdin: inject a reminder
 #                 (UserPromptSubmit / PostToolUse), block the turn once (Stop), or
 #                 spawn the detached self-clear/self-restart sender (Stop, after a
@@ -48,6 +66,14 @@ SOFT_TOKENS="${ALFRED_CONTEXT_SOFT_TOKENS:-80000}"
 HARD_TOKENS="${ALFRED_CONTEXT_HARD_TOKENS:-120000}"
 SOFT_PCT="${ALFRED_CONTEXT_SOFT_PCT:-20}"
 HARD_PCT="${ALFRED_CONTEXT_HARD_PCT:-35}"
+# Above the hard tier but with a human prompt this recent, the Stop hook nags
+# instead of blocking: the owner is mid-conversation and a self-clear would cut
+# them off. Only real UserPromptSubmit events count — a wake-bridge wake is
+# Monitor output, so an unattended session never looks interactive.
+INTERACTIVE_SECONDS="${ALFRED_CONTEXT_INTERACTIVE_SECONDS:-600}"
+# ... but not forever. Above this (measured above the session baseline, like
+# every other token threshold) the block fires however live the conversation is.
+CEILING_TOKENS="${ALFRED_CONTEXT_CEILING_TOKENS:-200000}"
 STALE_SECONDS=7200  # 2 h — an older reading says nothing about the current turn
 NAG_INTERVAL=600    # 10 min — one injection per tier per session
 # An override exists so the test suite does not have to sit out the real
@@ -74,6 +100,8 @@ case "$SOFT_TOKENS" in '' | *[!0-9]*) SOFT_TOKENS=80000 ;; esac
 case "$HARD_TOKENS" in '' | *[!0-9]*) HARD_TOKENS=120000 ;; esac
 case "$SOFT_PCT" in '' | *[!0-9]*) SOFT_PCT=20 ;; esac
 case "$HARD_PCT" in '' | *[!0-9]*) HARD_PCT=35 ;; esac
+case "$INTERACTIVE_SECONDS" in '' | *[!0-9]*) INTERACTIVE_SECONDS=600 ;; esac
+case "$CEILING_TOKENS" in '' | *[!0-9]*) CEILING_TOKENS=200000 ;; esac
 case "$CONFIRM_SECONDS" in '' | *[!0-9]*) CONFIRM_SECONDS=15 ;; esac
 case "$SENDER_DEADLINE" in '' | *[!0-9]*) SENDER_DEADLINE=90 ;; esac
 case "$TMUX_CALL_TIMEOUT" in '' | *[!0-9]*) TMUX_CALL_TIMEOUT=10 ;; esac
@@ -188,10 +216,18 @@ pane_key() {
 }
 
 usage_phrase() {
-    # usage_phrase <used> <pct_int> — report the budget in the unit the tier was
-    # actually decided in, so the number shown is the number that was compared.
+    # usage_phrase <used> <pct_int> [baseline] — report the budget in the unit the
+    # tier was actually decided in, so the number shown is the number that was
+    # compared. With a session baseline recorded, that number is the delta above
+    # it; the raw total is kept alongside because it is what the status line shows.
+    local baseline
+    baseline=$(num_or "${3:-0}" 0)
     if [ "$1" -gt 0 ]; then
-        printf '%s tokens (%s%%)' "$1" "$2"
+        if [ "$baseline" -gt 0 ] && [ "$1" -ge "$baseline" ]; then
+            printf '%s tokens this session (%s total, %s%%)' "$(($1 - baseline))" "$1" "$2"
+        else
+            printf '%s tokens (%s%%)' "$1" "$2"
+        fi
     else
         printf '%s%%' "$2"
     fi
@@ -307,15 +343,16 @@ do_check() {
     local now
     now=$(now_epoch)
 
-    # The prompt timestamp is the self-clear race guard: a prompt submitted after
-    # the landing means the context is no longer landed, so a queued clear must
-    # abort. Recorded only where a budget file already exists — on a host without
-    # the fleet status line this script still creates nothing.
-    if [ "$event" = "UserPromptSubmit" ] && [ -f "$budget_file" ]; then
+    # The prompt timestamp does two jobs. It is the self-clear race guard — a
+    # prompt submitted after the landing means the context is no longer landed,
+    # so a queued clear must abort — and it is the interactive signal the Stop
+    # handler defers on. Recorded only where the session already has state — on a
+    # host without the fleet status line this script still creates nothing.
+    if [ "$event" = "UserPromptSubmit" ] && { [ -f "$budget_file" ] || [ -f "$state_file" ]; }; then
         write_budget "$budget_file" last_prompt_ts "$now"
     fi
 
-    local have_state=0 pct_int=0 used=0 tier="" pct ts
+    local have_state=0 pct_int=0 used=0 baseline=0 budget_used=0 tier="" pct ts
     if [ -f "$state_file" ]; then
         # Persist the session id the hooks are actually firing for, so `landed`
         # can mark the right session when the land skill invokes it without an
@@ -340,10 +377,37 @@ do_check() {
             have_state=1
             # Round to a whole percent; compare and display the same number.
             pct_int=$(awk -v p="$pct" 'BEGIN { printf "%d", int(p + 0.5) }')
+
+            # The session baseline: what the window already cost before this
+            # conversation said anything. `session-start` arms baseline_pending;
+            # the first reading after that becomes the floor every token
+            # threshold is measured from. Only a fresh reading may set it — a
+            # stale one says nothing about this session.
+            #
+            # Fallback, deliberately: with nothing armed (a session that
+            # predates this build, or one whose SessionStart hook never ran) the
+            # baseline stays 0 and the tiers are decided on `used` exactly as
+            # they were before.
+            baseline=$(num_or "$(read_budget "$budget_file" baseline)" 0)
             if [ "$used" -gt 0 ]; then
-                if [ "$used" -ge "$HARD_TOKENS" ]; then
+                if [ "$baseline" = "0" ] &&
+                    [ "$(read_budget "$budget_file" baseline_pending)" = "1" ]; then
+                    baseline="$used"
+                    write_budget "$budget_file" baseline "$baseline" baseline_pending 0
+                elif [ "$baseline" -gt "$used" ]; then
+                    # Usage below the baseline means the window shrank — a
+                    # compaction, in practice. The post-compaction reading is
+                    # this session's new floor, exactly as a session start is.
+                    baseline="$used"
+                    write_budget "$budget_file" baseline "$baseline"
+                fi
+                budget_used=$((used - baseline))
+            fi
+
+            if [ "$used" -gt 0 ]; then
+                if [ "$budget_used" -ge "$HARD_TOKENS" ]; then
                     tier="hard"
-                elif [ "$used" -ge "$SOFT_TOKENS" ]; then
+                elif [ "$budget_used" -ge "$SOFT_TOKENS" ]; then
                     tier="soft"
                 fi
             else
@@ -402,13 +466,33 @@ do_check() {
         if [ "$have_state" = "1" ] && [ "$tier" = "hard" ] &&
             [ "${stop_active:-false}" != "true" ] &&
             [ "$stop_blocked" != "1" ] && [ "$landed" -lt "$crossing" ]; then
+            # Interactive deferral. Blocking a turn and typing /clear into the
+            # pane is right for an unattended session and wrong for a
+            # conversation: the owner loses the thread mid-sentence. While a
+            # human prompt is younger than INTERACTIVE_SECONDS, and the session
+            # is still under the ceiling, say the same thing and let the turn
+            # end — no exit 2, no sender. The per-crossing block flag stays
+            # unset, so the block still fires on the first Stop after the
+            # conversation goes quiet. Token mode only: the percentage fallback
+            # has no ceiling to compare against, so it keeps blocking as before.
+            local last_prompt defer_nag
+            last_prompt=$(num_or "$(read_budget "$budget_file" last_prompt_ts)" 0)
+            if [ "$used" -gt 0 ] && [ "$budget_used" -lt "$CEILING_TOKENS" ] &&
+                [ "$last_prompt" -gt 0 ] && [ $((now - last_prompt)) -lt "$INTERACTIVE_SECONDS" ]; then
+                defer_nag=$(num_or "$(read_budget "$budget_file" defer_nag_ts)" 0)
+                if [ $((now - defer_nag)) -ge "$NAG_INTERVAL" ]; then
+                    write_budget "$budget_file" defer_nag_ts "$now"
+                    emit_context Stop "CONTEXT BUDGET: $(usage_phrase "$used" "$pct_int" "$baseline") used — above the hard threshold of $(threshold_phrase "$used" hard). Not blocking this turn: the owner prompted less than $((INTERACTIVE_SECONDS / 60)) min ago. Land at the next natural boundary (/alfred-agent:land --mode=light); the turn is blocked once the conversation goes quiet, or above ${CEILING_TOKENS} tokens."
+                fi
+                exit 0
+            fi
             # Fail open. If the "I have blocked once" flag cannot be persisted,
             # the block would repeat on every Stop and the session could never
             # end — a worse failure than not nagging. Write it, read it back, and
             # only block when it is definitely recorded.
             if write_budget "$budget_file" stop_blocked 1 &&
                 [ "$(read_budget "$budget_file" stop_blocked)" = "1" ]; then
-                stop_reason "$(usage_phrase "$used" "$pct_int")" "$(threshold_phrase "$used" hard)" >&2
+                stop_reason "$(usage_phrase "$used" "$pct_int" "$baseline")" "$(threshold_phrase "$used" hard)" >&2
                 exit 2
             fi
         fi
@@ -471,7 +555,7 @@ do_check() {
     fi
 
     local text usage threshold
-    usage=$(usage_phrase "$used" "$pct_int")
+    usage=$(usage_phrase "$used" "$pct_int" "$baseline")
     threshold=$(threshold_phrase "$used" "$tier")
     if [ "$tier" = "hard" ]; then
         text="CONTEXT BUDGET: ${usage} used — hard threshold ${threshold}. LAND NOW: run /alfred-agent:land --mode=light before anything else."
@@ -1207,6 +1291,25 @@ do_session_start() {
         cat "$HANDOVER_FILE" 2>/dev/null
         printf '\n'
         rm -f "$HANDOVER_FILE" 2>/dev/null
+    fi
+
+    # --- arm this session's baseline ----------------------------------------
+    # The reading itself is not available yet — the status line writes it on the
+    # first assistant message — so only the intent is recorded; the first `check`
+    # with a fresh reading turns it into `baseline`. Last, so nothing above it
+    # (the "most recent OTHER session" scan in particular) ever sees a budget
+    # file this start created. Gated on the state directory already existing: on
+    # a host without the fleet status line this script still creates nothing.
+    #
+    # All four sources arm it, resume included: a resumed session (the --restart
+    # path's `claude -c`) gets a fresh session id and therefore a fresh budget
+    # file, and its baseline is whatever the window costs at the moment it comes
+    # back — which for a restart after a landing is exactly right.
+    if [ -d "$STATE_DIR" ] && [ -n "$session_id" ]; then
+        case "$session_id" in
+        */* | *..*) ;;
+        *) write_budget "${STATE_DIR}/${session_id}.budget" baseline_pending 1 ;;
+        esac
     fi
 
     exit 0

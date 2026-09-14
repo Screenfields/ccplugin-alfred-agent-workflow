@@ -70,7 +70,8 @@ and fix each one (or pass `--force` for 2/3, never for 1), then run `landed` aga
 ## Light Mode (`--mode=light`)
 
 The landing you do **between** natural boundaries, when the context-budget hook says
-you are at or above the soft threshold (default 80000 tokens) — a merged PR, a resolved
+you are at or above the soft threshold (default 80000 tokens above the session's start
+reading) — a merged PR, a resolved
 walkthrough item, a reviewed worker result. It is deliberately cheap: no retro, no
 health-check gate, no full issue reconciliation. Those belong to a real session end
 (default mode). The point of a light landing is to get *content* out of context and

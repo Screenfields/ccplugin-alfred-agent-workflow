@@ -26,6 +26,11 @@ export ALFRED_CONTEXT_HARD_PCT=35
 export ALFRED_CONTEXT_CONFIRM_SECONDS=3
 export ALFRED_CONTEXT_SOFT_TOKENS=40000
 export ALFRED_CONTEXT_HARD_TOKENS=70000
+# Interactive deferral off by default: every case below this line asserts the
+# unattended behaviour (block the turn, arm the sender), which is what the hook
+# does whenever no human prompt is recent. The deferral cases set the window
+# themselves. 0 is the off switch — `now - last_prompt_ts < 0` is never true.
+export ALFRED_CONTEXT_INTERACTIVE_SECONDS=0
 # landed's completeness gate (Change 5a) looks at background-task transcripts
 # under this base dir. Point it at a throwaway path so the suite never touches
 # the real host's /tmp/claude-<uid> tree.
@@ -1371,6 +1376,154 @@ if [ ! -f "${CTX_DIR}/s-ac2.budget" ] && [ ! -s "$TMPROOT/out" ]; then
 else
     bad "pre-compact ignores a manual compaction" "budget exists or stdout not empty"
 fi
+
+# ===========================================================================
+# baseline delta + interactive deferral (Screenfields/alfred-platform#874)
+# ===========================================================================
+# Own state dir: these cases arm baselines and consume the handover file, and
+# the shared CTX_DIR is by now full of sessions from every case above.
+BASE_DIR="$TMPROOT/baseline"
+mkdir -p "$BASE_DIR/context"
+SAVED_STATE_DIR="$ALFRED_STATE_DIR"
+SAVED_CTX_DIR="$CTX_DIR"
+export ALFRED_STATE_DIR="$BASE_DIR"
+CTX_DIR="$BASE_DIR/context"
+
+# arm_baseline <session_id> — one SessionStart, the way the hook fires it.
+arm_baseline() {
+    printf '{"session_id":"%s","source":"startup","cwd":"/tmp"}' "$1" |
+        "$SCRIPT" session-start >/dev/null 2>&1
+}
+
+# --- baseline delta ---------------------------------------------------------
+# The real numbers: a hub session reports ~86000 used on a 1M window the moment
+# it starts (system prompt, CLAUDE.md, memory index, tool and MCP schemas,
+# SessionStart injections). Measured from zero that is already over the soft
+# threshold; measured above the baseline it is zero.
+arm_baseline s-base
+if grep -q '^baseline_pending=1$' "${CTX_DIR}/s-base.budget"; then
+    ok "session-start arms the baseline"
+else
+    bad "session-start arms the baseline" "budget='$(cat "${CTX_DIR}/s-base.budget" 2>/dev/null)'"
+fi
+
+fixture_tokens s-base 86000 1000000 9
+assert_silent "a fresh session at its start reading (86000) does not nag" s-base UserPromptSubmit
+if grep -q '^baseline=86000$' "${CTX_DIR}/s-base.budget"; then
+    ok "the first reading becomes the session baseline"
+else
+    bad "the first reading becomes the session baseline" "budget='$(cat "${CTX_DIR}/s-base.budget")'"
+fi
+
+fixture_tokens s-base 120000 1000000 12
+assert_silent "34000 tokens above the baseline is still below the soft tier" s-base UserPromptSubmit
+
+fixture_tokens s-base 130000 1000000 13
+assert_context "the soft tier is reached at baseline + soft threshold" s-base UserPromptSubmit \
+    "CONTEXT BUDGET: 44000 tokens this session (130000 total, 13%) used — soft threshold 40000 tokens."
+
+fixture_tokens s-base 160000 1000000 16
+assert_context "the hard tier is reached at baseline + hard threshold" s-base UserPromptSubmit \
+    "CONTEXT BUDGET: 74000 tokens this session (160000 total, 16%) used — hard threshold 70000 tokens."
+run_check s-base Stop
+if [ "$RC" -eq 2 ] && printf '%s' "$ERR_TXT" | grep -q "74000 tokens this session (160000 total"; then
+    ok "the Stop block reports the delta it compared"
+else
+    bad "the Stop block reports the delta it compared" "rc=$RC stderr='$ERR_TXT'"
+fi
+
+# No armed baseline (a session that started before this build, or whose
+# SessionStart hook never ran): thresholds apply to `used`, exactly as before.
+fixture_tokens s-nobase 86000 1000000 9
+assert_context "without an armed baseline the thresholds apply to used as before" s-nobase UserPromptSubmit \
+    "CONTEXT BUDGET: 86000 tokens (9%) used — hard threshold 70000 tokens."
+
+# A reading below the baseline means the window shrank — a compaction. The
+# post-compaction reading is the new floor.
+arm_baseline s-recomp
+fixture_tokens s-recomp 86000 1000000 9
+run_check s-recomp UserPromptSubmit
+fixture_tokens s-recomp 60000 1000000 6
+assert_silent "a reading below the baseline re-baselines instead of going negative" s-recomp UserPromptSubmit
+if grep -q '^baseline=60000$' "${CTX_DIR}/s-recomp.budget"; then
+    ok "a compacted window lowers the baseline to the new floor"
+else
+    bad "a compacted window lowers the baseline to the new floor" "budget='$(cat "${CTX_DIR}/s-recomp.budget")'"
+fi
+
+# --- interactive deferral ---------------------------------------------------
+export ALFRED_CONTEXT_INTERACTIVE_SECONDS=600
+
+fixture_tokens s-defer 80000 1000000 8
+run_check s-defer UserPromptSubmit # stamps last_prompt_ts, nags at the hard tier
+run_check s-defer Stop
+defer_budget="${CTX_DIR}/s-defer.budget"
+if [ "$RC" -eq 0 ] &&
+    case "$(printf '%s' "$OUT_TXT" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null)" in
+    *"Not blocking this turn: the owner prompted less than 10 min ago"*) true ;;
+    *) false ;;
+    esac; then
+    ok "hard tier with a prompt in the window nags on Stop and does not block"
+else
+    bad "hard tier with a prompt in the window nags on Stop and does not block" \
+        "rc=$RC stdout='$OUT_TXT'"
+fi
+if ! grep -q '^stop_blocked=1$' "$defer_budget" && ! grep -q '^sender_ts=' "$defer_budget"; then
+    ok "the deferral spawns no sender and leaves the block armed"
+else
+    bad "the deferral spawns no sender and leaves the block armed" "budget='$(cat "$defer_budget")'"
+fi
+
+assert_silent "the deferred nag is rate-limited like every other injection" s-defer Stop
+
+# ... and once the conversation goes quiet, the block fires exactly as before.
+printf 'last_prompt_ts=%s\n' "$(($(date +%s) - 601))" >>"$defer_budget"
+run_check s-defer Stop
+if [ "$RC" -eq 2 ] && [ -z "$OUT_TXT" ] && printf '%s' "$ERR_TXT" | grep -q "land --mode=light"; then
+    ok "a prompt older than the interactive window blocks the turn as today"
+else
+    bad "a prompt older than the interactive window blocks the turn as today" \
+        "rc=$RC stdout='$OUT_TXT' stderr='$ERR_TXT'"
+fi
+
+# --- ceiling ----------------------------------------------------------------
+# A conversation this long lands however live it is.
+export ALFRED_CONTEXT_CEILING_TOKENS=200000
+fixture_tokens s-ceil 250000 1000000 25
+run_check s-ceil UserPromptSubmit
+run_check s-ceil Stop
+if [ "$RC" -eq 2 ]; then
+    ok "above the ceiling a recent prompt no longer defers the block"
+else
+    bad "above the ceiling a recent prompt no longer defers the block" "rc=$RC stdout='$OUT_TXT'"
+fi
+
+# The ceiling is measured above the baseline, like every other token threshold:
+# 250000 used with an 86000 baseline is 164000 this session — still deferred.
+arm_baseline s-ceil-base
+fixture_tokens s-ceil-base 86000 1000000 9
+run_check s-ceil-base UserPromptSubmit
+fixture_tokens s-ceil-base 250000 1000000 25
+run_check s-ceil-base UserPromptSubmit
+run_check s-ceil-base Stop
+if [ "$RC" -eq 0 ]; then
+    ok "the ceiling is measured above the baseline, not on the raw total"
+else
+    bad "the ceiling is measured above the baseline, not on the raw total" "rc=$RC"
+fi
+fixture_tokens s-ceil-base 300000 1000000 30
+run_check s-ceil-base UserPromptSubmit
+run_check s-ceil-base Stop
+if [ "$RC" -eq 2 ]; then
+    ok "214000 tokens above the baseline crosses the ceiling and blocks"
+else
+    bad "214000 tokens above the baseline crosses the ceiling and blocks" "rc=$RC"
+fi
+
+export ALFRED_CONTEXT_INTERACTIVE_SECONDS=0
+unset ALFRED_CONTEXT_CEILING_TOKENS
+export ALFRED_STATE_DIR="$SAVED_STATE_DIR"
+CTX_DIR="$SAVED_CTX_DIR"
 
 echo
 echo "----"

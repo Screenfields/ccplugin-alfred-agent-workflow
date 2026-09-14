@@ -123,6 +123,21 @@ Degradation and cost scale with absolute tokens, so a percentage moves the goalp
 whenever the window size changes. `ALFRED_CONTEXT_SOFT_PCT` / `_HARD_PCT` remain as a
 fallback for a status line that writes no `used` field — do not promote them back.
 
+**They are measured above the session baseline.** `session-start` arms
+`baseline_pending`; the first `check` with a fresh reading records `baseline=<used>`,
+and every token tier compares `used - baseline`. The fixed cost of starting (system
+prompt, `CLAUDE.md`, memory index, tool and MCP schemas, SessionStart injections) is
+~86000 tokens on the hub — measured from zero it is already past the soft threshold,
+which is why the nag used to fire at turn zero. With no baseline armed the hook falls
+back to `used` itself.
+
+**The hard tier defers while the owner is present.** A `UserPromptSubmit` younger than
+`ALFRED_CONTEXT_INTERACTIVE_SECONDS` (default 600) turns the `Stop` block into a nag:
+exit 0, no sender, and the once-per-crossing flag left unset so the block still fires
+once the box goes quiet. `ALFRED_CONTEXT_CEILING_TOKENS` (default 200000 above the
+baseline) is the backstop. Only real user prompts count — a wake-bridge wake is
+`Monitor` output, so autonomous sessions keep the strict behaviour.
+
 The self-clear flow, end to end:
 
 ```
