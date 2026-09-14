@@ -907,6 +907,71 @@ else
         "budget='$(cat "$RR")' sender='$(cat "${CTX_DIR}/s-restart-race.sender.log" 2>/dev/null)'"
 fi
 
+# --- restart's confirmation window is its own, and an unconfirmed restart-mode
+# timeout never leaves clear_mode=restart armed for a "next attempt"
+# (alfred-platform#850: a real restart confirmed at ~66s under the old
+# 15s/CONFIRM_SECONDS window, got dropped as unconfirmed, and left clear_mode=
+# restart armed — a live, already-restarted session would have been restarted
+# again by its own next Stop hook). ALFRED_CONTEXT_RESTART_CONFIRM_SECONDS=6
+# here stands in for the real ~360s window so the case does not sit out the
+# real one; ALFRED_CONTEXT_CONFIRM_SECONDS stays at the suite-wide 3s the
+# whole time, so a "6s" outcome can only have come from the restart-specific
+# variable, not the clear/compact one.
+fixture s-restart-unconf 40
+env PATH="$STUBBIN:$PATH" ALFRED_SESSION_RESTART_CMD=restart-ok \
+    "$SCRIPT" landed --restart --summary "restart, never confirmed" s-restart-unconf >/dev/null 2>&1
+RUB="${CTX_DIR}/s-restart-unconf.budget"
+export TMUX_STUB_LOG="$TMPROOT/tmux-restart-unconf.log"
+: >"$TMUX_STUB_LOG"
+printf '{"session_id":"s-restart-unconf","hook_event_name":"Stop","cwd":"/tmp"}' |
+    env PATH="$STUBBIN:$PATH" ALFRED_SESSION_RESTART_CMD=restart-ok TMUX_PANE='%9' \
+        ALFRED_CONTEXT_RESTART_CONFIRM_SECONDS=6 "$SCRIPT" check >/dev/null 2>&1
+if wait_outcome "$RUB" 20; then
+    if grep -q '^clear_unconfirmed_ts=[0-9][0-9]*$' "$RUB" &&
+        grep -q '^clear_mode=none$' "$RUB" &&
+        ! grep -q '^cleared_ts=' "$RUB" &&
+        [ ! -f "${CTX_DIR}/last-clear.json" ] &&
+        grep -q 'unconfirmed after 6s' "${CTX_DIR}/s-restart-unconf.sender.log" &&
+        grep -q 'never re-arm a restart on timeout' "${CTX_DIR}/s-restart-unconf.sender.log"; then
+        ok "an unconfirmed restart times out on its own (longer) window and sets clear_mode=none, not restart"
+    else
+        bad "an unconfirmed restart times out on its own (longer) window and sets clear_mode=none, not restart" \
+            "budget='$(cat "$RUB")' sender='$(cat "${CTX_DIR}/s-restart-unconf.sender.log" 2>/dev/null)'"
+    fi
+else
+    bad "an unconfirmed restart times out on its own (longer) window and sets clear_mode=none, not restart" \
+        "sender recorded no outcome: $(cat "$RUB")"
+fi
+
+# --- regression guard: clear/compact's own short window and "keep clear_mode
+# for the next attempt" behaviour are unchanged, even with
+# ALFRED_CONTEXT_RESTART_CONFIRM_SECONDS set to something far larger — the two
+# variables must never bleed into each other's mode.
+fixture s-clear-unconf-guard 40
+"$SCRIPT" landed --clear --summary "regression guard" s-clear-unconf-guard >/dev/null 2>&1
+GB="${CTX_DIR}/s-clear-unconf-guard.budget"
+export TMUX_STUB_LOG="$TMPROOT/tmux-clear-unconf-guard.log"
+: >"$TMUX_STUB_LOG"
+printf '{"session_id":"s-clear-unconf-guard","hook_event_name":"Stop","cwd":"/tmp"}' |
+    env PATH="$STUBBIN:$PATH" TMUX_PANE='%9' ALFRED_CONTEXT_RESTART_CONFIRM_SECONDS=60 \
+        "$SCRIPT" check >/dev/null 2>&1
+if wait_outcome "$GB" 15; then
+    if grep -q '^clear_unconfirmed_ts=[0-9][0-9]*$' "$GB" &&
+        grep -q '^clear_mode=clear$' "$GB" &&
+        ! grep -q '^cleared_ts=' "$GB" &&
+        [ ! -f "${CTX_DIR}/last-clear.json" ] &&
+        grep -q 'unconfirmed after 3s' "${CTX_DIR}/s-clear-unconf-guard.sender.log" &&
+        grep -q 'left for the next attempt' "${CTX_DIR}/s-clear-unconf-guard.sender.log"; then
+        ok "clear mode keeps its own short window and kept clear_mode, unaffected by RESTART_CONFIRM_SECONDS (regression guard)"
+    else
+        bad "clear mode keeps its own short window and kept clear_mode, unaffected by RESTART_CONFIRM_SECONDS (regression guard)" \
+            "budget='$(cat "$GB")' sender='$(cat "${CTX_DIR}/s-clear-unconf-guard.sender.log" 2>/dev/null)'"
+    fi
+else
+    bad "clear mode keeps its own short window and kept clear_mode, unaffected by RESTART_CONFIRM_SECONDS (regression guard)" \
+        "sender recorded no outcome: $(cat "$GB")"
+fi
+
 # ===========================================================================
 # Session id resolution for a landing that arms a clear
 # ===========================================================================
