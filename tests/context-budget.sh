@@ -428,9 +428,21 @@ export ALFRED_CONTEXT_SOFT_TOKENS=40000 ALFRED_CONTEXT_HARD_TOKENS=70000
 # Self-clear
 # ===========================================================================
 
-# A tmux stub that records its argv and answers the two questions pane_idle asks.
+# A tmux stub that records its argv and answers the questions pane_idle asks.
 #   TMUX_STUB_CURSOR   what display-message reports as cursor_x (default 2 = idle)
+#   TMUX_STUB_INMODE   what display-message reports as pane_in_mode (default 0 =
+#                      not in a tmux mode; 1 = copy-mode/view-mode, e.g. the
+#                      owner scrolled back)
+#   TMUX_STUB_INMODE_TOGGLE_AFTER / TMUX_STUB_INMODE_COUNT_FILE
+#                      when set, pane_in_mode is 1 for this many display-message
+#                      calls and 0 after — simulates the owner leaving the mode
+#                      partway through the sender's polling, counted in the file
 #   TMUX_STUB_CAPTURE  what capture-pane prints (default empty = not mid-turn)
+#   TMUX_STUB_HANG_ON_ENTER / TMUX_STUB_HANG_SECONDS
+#                      when set, the Enter (C-m) send-keys call sleeps this many
+#                      seconds (default 5) before returning — simulates a tmux
+#                      client that never gets an answer back (e.g. a
+#                      command-prompt blocked on a non-interactive client)
 #   TMUX_STUB_CONSUME  a file to copy-then-delete when Enter is sent, standing in
 #                      for the new session's SessionStart hook consuming the marker
 STUBBIN="$TMPROOT/stubbin"
@@ -439,9 +451,25 @@ cat >"$STUBBIN/tmux" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$TMUX_STUB_LOG"
 case "${1:-}" in
-display-message) echo "${TMUX_STUB_CURSOR:-2}" ;;
+display-message)
+    inmode="${TMUX_STUB_INMODE:-0}"
+    if [ -n "${TMUX_STUB_INMODE_TOGGLE_AFTER:-}" ]; then
+        n=$(cat "$TMUX_STUB_INMODE_COUNT_FILE" 2>/dev/null || echo 0)
+        n=$((n + 1))
+        printf '%s' "$n" >"$TMUX_STUB_INMODE_COUNT_FILE"
+        if [ "$n" -le "$TMUX_STUB_INMODE_TOGGLE_AFTER" ]; then
+            inmode=1
+        else
+            inmode=0
+        fi
+    fi
+    echo "${TMUX_STUB_CURSOR:-2} ${inmode}"
+    ;;
 capture-pane) printf '%s\n' "${TMUX_STUB_CAPTURE:-}" ;;
 send-keys)
+    if [ -n "${TMUX_STUB_HANG_ON_ENTER:-}" ] && [ "${*: -1}" = "C-m" ]; then
+        sleep "${TMUX_STUB_HANG_SECONDS:-5}"
+    fi
     if [ -n "${TMUX_STUB_CONSUME:-}" ] && [ "${*: -1}" = "C-m" ]; then
         cp "$TMUX_STUB_CONSUME" "${TMUX_STUB_CONSUME}.seen" 2>/dev/null
         rm -f "$TMUX_STUB_CONSUME"
@@ -613,6 +641,62 @@ if ! grep -q 'send-keys' "$TMUX_STUB_LOG"; then
 else
     bad "a mid-turn pane (esc to interrupt) means nothing is ever typed" \
         "$(cat "$TMUX_STUB_LOG")"
+fi
+
+# --- copy mode: a pane in a tmux mode is never idle, even at cursor_x=2 -----
+# The 2026-09-14 incident: a send-keys into a pane the owner had scrolled back
+# (copy-mode) was read as mode navigation, not session input, and tmux opened a
+# command-prompt on behalf of the sender that then blocked it for over an hour.
+fixture s-copymode 40
+"$SCRIPT" landed --clear --summary "owner scrolled back" s-copymode >/dev/null 2>&1
+export TMUX_STUB_LOG="$TMPROOT/tmux-copymode.log"
+: >"$TMUX_STUB_LOG"
+env PATH="$STUBBIN:$PATH" ALFRED_CONTEXT_SENDER_DEADLINE=4 TMUX_STUB_INMODE=1 \
+    "$SCRIPT" sender s-copymode '%9' clear >/dev/null 2>&1
+if ! grep -q 'send-keys' "$TMUX_STUB_LOG" &&
+    grep -q 'tmux mode' "${CTX_DIR}/s-copymode.sender.log"; then
+    ok "a pane in a tmux mode (copy-mode) is never idle: nothing is typed, and the timeout says why"
+else
+    bad "a pane in a tmux mode (copy-mode) is never idle: nothing is typed, and the timeout says why" \
+        "tmux_log='$(cat "$TMUX_STUB_LOG")' sender_log='$(cat "${CTX_DIR}/s-copymode.sender.log" 2>/dev/null)'"
+fi
+
+# --- copy mode: leaving the mode mid-poll lets the send proceed -------------
+fixture s-copymode2 40
+"$SCRIPT" landed --clear --summary "owner came back" s-copymode2 >/dev/null 2>&1
+export TMUX_STUB_LOG="$TMPROOT/tmux-copymode2.log"
+: >"$TMUX_STUB_LOG"
+env PATH="$STUBBIN:$PATH" TMUX_STUB_CONSUME="${CTX_DIR}/last-clear.json" \
+    TMUX_STUB_INMODE_TOGGLE_AFTER=1 TMUX_STUB_INMODE_COUNT_FILE="$TMPROOT/copymode2-count" \
+    "$SCRIPT" sender s-copymode2 '%9' clear >/dev/null 2>&1
+if grep -q 'send-keys .* C-m' "$TMUX_STUB_LOG"; then
+    ok "a pane that leaves the tmux mode mid-poll goes idle and the send proceeds"
+else
+    bad "a pane that leaves the tmux mode mid-poll goes idle and the send proceeds" \
+        "$(cat "$TMUX_STUB_LOG")"
+fi
+rm -f "${CTX_DIR}/last-clear.json.seen"
+
+# --- a hung tmux client cannot block the sender past its own timeout --------
+# The per-call `timeout` wrapper is the fix for the same incident: even without
+# the copy-mode guard above, a tmux client that never answers must not hang the
+# sender forever. Simulated here on the Enter (C-m) send-keys call.
+fixture s-hang 40
+"$SCRIPT" landed --clear --summary "should not hang" s-hang >/dev/null 2>&1
+HB="${CTX_DIR}/s-hang.budget"
+export TMUX_STUB_LOG="$TMPROOT/tmux-hang.log"
+: >"$TMUX_STUB_LOG"
+env PATH="$STUBBIN:$PATH" ALFRED_CONTEXT_TMUX_TIMEOUT=1 \
+    TMUX_STUB_HANG_ON_ENTER=1 TMUX_STUB_HANG_SECONDS=3 \
+    "$SCRIPT" sender s-hang '%9' clear >/dev/null 2>&1
+if grep -q 'send-keys.*C-u' "$TMUX_STUB_LOG" &&
+    grep -q 'timed out' "${CTX_DIR}/s-hang.sender.log" &&
+    grep -q '^clear_mode=clear$' "$HB" &&
+    ! grep -q '^cleared_ts=' "$HB"; then
+    ok "a hung tmux client is bounded by the per-call timeout: logged, line wiped, nothing left half-typed"
+else
+    bad "a hung tmux client is bounded by the per-call timeout: logged, line wiped, nothing left half-typed" \
+        "tmux_log='$(cat "$TMUX_STUB_LOG")' sender_log='$(cat "${CTX_DIR}/s-hang.sender.log" 2>/dev/null)' budget='$(cat "$HB")'"
 fi
 
 # --- compact mode carries the summary --------------------------------------
