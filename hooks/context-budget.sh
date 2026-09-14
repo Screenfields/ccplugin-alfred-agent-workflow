@@ -53,6 +53,7 @@ NAG_INTERVAL=600    # 10 min — one injection per tier per session
 SENDER_DEADLINE=90  # s the sender waits for an idle input box before giving up
 SENDER_POLL=2       # s between idle polls; idle must hold for two in a row
 CLEAR_MAX_ATTEMPTS=2
+LANDED_GRACE=120    # s — a landing this recent counts for a crossing observed after it
 HANDOVER_WINDOW=900 # 15 min — an older marker says nothing about this start
 # How long the sender waits for SessionStart to consume the handover marker. An
 # override exists so the test suite does not have to sit out the real window.
@@ -366,6 +367,15 @@ do_check() {
             if [ "$crossing" = "0" ]; then
                 crossing="$now"
                 stop_blocked=0
+                # A landing recorded moments before the crossing is first
+                # observed belongs to this crossing: the landing turn's own
+                # tool calls pushed usage over the line, and the sensor
+                # reported it only at the Stop that follows `landed`. Without
+                # this, landed_ts < crossing_ts by a second and the Stop blocks
+                # a session that has just landed instead of letting it clear.
+                if [ "$landed" -gt 0 ] && [ $((now - landed)) -le "$LANDED_GRACE" ]; then
+                    crossing="$landed"
+                fi
                 write_budget "$budget_file" crossing_ts "$crossing" stop_blocked "$stop_blocked"
             fi
         elif [ "$crossing" != "0" ]; then
