@@ -1214,7 +1214,7 @@ else
     bad "a background-agent transcript stale beyond the window is not flagged" \
         "rc=$gate_rc err='$(cat "$TMPROOT/err")'"
 fi
-rm -rf "${ALFRED_CLAUDE_TMP_DIR}/${AGENT_SLUG}"
+rm -rf "${ALFRED_CLAUDE_TMP_DIR:?}/${AGENT_SLUG:?}"
 
 # --- --force skips git + running-agent checks, never the handover check ----
 echo dirty >>"$GITROOT/seed.txt"
@@ -1232,7 +1232,7 @@ else
     bad "--force skips the git and running-agent checks and records forced=true" \
         "rc=$gate_rc budget='$(cat "$FB" 2>/dev/null)' err='$(cat "$TMPROOT/err")'"
 fi
-rm -rf "${ALFRED_CLAUDE_TMP_DIR}/${AGENT_SLUG}"
+rm -rf "${ALFRED_CLAUDE_TMP_DIR:?}/${AGENT_SLUG:?}"
 (cd "$GITROOT" && git checkout -q -- seed.txt)
 
 # --force never skips the handover check
