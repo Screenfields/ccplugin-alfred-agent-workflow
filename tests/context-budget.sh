@@ -26,8 +26,51 @@ export ALFRED_CONTEXT_HARD_PCT=35
 export ALFRED_CONTEXT_CONFIRM_SECONDS=3
 export ALFRED_CONTEXT_SOFT_TOKENS=40000
 export ALFRED_CONTEXT_HARD_TOKENS=70000
+# landed's completeness gate (Change 5a) looks at background-task transcripts
+# under this base dir. Point it at a throwaway path so the suite never touches
+# the real host's /tmp/claude-<uid> tree.
+export ALFRED_CLAUDE_TMP_DIR="$TMPROOT/claudetmp"
 CTX_DIR="$ALFRED_STATE_DIR/context"
 mkdir -p "$CTX_DIR"
+
+# write_handover <context_dir> [bytes] — a valid (or, given bytes, deliberately
+# oversized) handover.md, including a Metis capture id so the completeness
+# gate's capture-id check passes by default. `landed --clear/--compact/
+# --restart` refuses to arm without one, so every pre-existing test that arms
+# a mode needs one present; tests of the gate itself remove, age, oversize, or
+# strip the capture id around their own assertions.
+write_handover() {
+    local dir="$1" bytes="${2:-0}"
+    if [ "$bytes" -gt 0 ] 2>/dev/null; then
+        head -c "$bytes" /dev/zero | tr '\0' 'x' >"${dir}/handover.md"
+    else
+        printf 'landed: PR #93 merged (cap-1a2b3c4d).\nfirst thing: pick up issue #847.\n' >"${dir}/handover.md"
+    fi
+}
+
+# The default context dir gets one up front so every existing --clear/--compact
+# test below (which predates the handover gate) keeps working unmodified.
+write_handover "$CTX_DIR"
+
+# --- a real, disposable git repo to serve as $PWD for the completeness gate's
+# git-completeness check (Change 5a #2). Clean and pushed by default; the
+# dedicated git-check tests dirty/unpush/branch it and restore this baseline
+# afterward so later tests in the suite are unaffected.
+GITROOT="$TMPROOT/gitroot"
+GITREMOTE="$TMPROOT/gitremote.git"
+git init -q "$GITROOT"
+git init -q --bare "$GITREMOTE"
+(
+    cd "$GITROOT" || exit 1
+    git config user.email "test@example.com"
+    git config user.name "test"
+    echo "seed" >seed.txt
+    git add seed.txt
+    git commit -q -m seed
+    git remote add origin "$GITREMOTE"
+    git push -q -u origin HEAD:main
+)
+cd "$GITROOT" || exit 1
 
 PASS=0
 FAIL=0
@@ -674,6 +717,108 @@ else
 fi
 
 # ===========================================================================
+# Restart mode (Change 1): landed --restart + the sender running the command
+# ===========================================================================
+
+# restart-ok stands in for hub-restart: it arms and returns immediately in
+# real life, with the actual /exit + respawn happening out-of-band once the
+# new session's own SessionStart hook consumes the marker. The stub does that
+# consumption itself (like TMUX_STUB_CONSUME does for the tmux send-keys
+# path) so the sender's confirmation wait has something to observe.
+cat >"$STUBBIN/restart-ok" <<'STUB'
+#!/usr/bin/env bash
+printf 'called\n' >>"${RESTART_STUB_LOG:-/dev/null}"
+if [ -n "${RESTART_STUB_CONSUME:-}" ]; then
+    cp "$RESTART_STUB_CONSUME" "${RESTART_STUB_CONSUME}.seen" 2>/dev/null
+    rm -f "$RESTART_STUB_CONSUME"
+fi
+exit 0
+STUB
+chmod +x "$STUBBIN/restart-ok"
+
+cat >"$STUBBIN/restart-fail" <<'STUB'
+#!/usr/bin/env bash
+printf 'called\n' >>"${RESTART_STUB_LOG:-/dev/null}"
+exit 7
+STUB
+chmod +x "$STUBBIN/restart-fail"
+
+fixture s-restart 40
+env PATH="$STUBBIN:$PATH" ALFRED_SESSION_RESTART_CMD=restart-ok \
+    "$SCRIPT" landed --restart --summary "restart me" s-restart >"$TMPROOT/out" 2>/dev/null
+RB2="${CTX_DIR}/s-restart.budget"
+if grep -q '^clear_mode=restart$' "$RB2" && grep -q "clear_mode=restart" "$TMPROOT/out"; then
+    ok "landed --restart records clear_mode=restart when the restart command is on PATH"
+else
+    bad "landed --restart records clear_mode=restart when the restart command is on PATH" \
+        "budget='$(cat "$RB2")' out='$(cat "$TMPROOT/out")'"
+fi
+
+fixture s-restart-missing 40
+env PATH="$STUBBIN:/usr/bin:/bin" ALFRED_SESSION_RESTART_CMD=restart-does-not-exist \
+    "$SCRIPT" landed --restart --summary "no cmd" s-restart-missing >"$TMPROOT/out" 2>"$TMPROOT/err"
+RM="${CTX_DIR}/s-restart-missing.budget"
+if grep -q '^clear_mode=none$' "$RM" && grep -q "restart command 'restart-does-not-exist' not found" "$TMPROOT/err"; then
+    ok "landed --restart with a missing command downgrades to clear_mode=none but still records"
+else
+    bad "landed --restart with a missing command downgrades to clear_mode=none but still records" \
+        "budget='$(cat "$RM")' err='$(cat "$TMPROOT/err")'"
+fi
+
+# sender runs the restart command, logs its exit, confirms via the marker
+export RESTART_STUB_LOG="$TMPROOT/restart-ok.log"
+: >"$RESTART_STUB_LOG"
+export RESTART_STUB_CONSUME="${CTX_DIR}/last-clear.json"
+export TMUX_STUB_LOG="$TMPROOT/tmux-restart.log"
+: >"$TMUX_STUB_LOG"
+printf '{"session_id":"s-restart","hook_event_name":"Stop","cwd":"/tmp"}' |
+    env PATH="$STUBBIN:$PATH" ALFRED_SESSION_RESTART_CMD=restart-ok TMUX_PANE='%9' "$SCRIPT" check >/dev/null 2>&1
+if wait_outcome "$RB2" 15 && grep -q '^cleared_ts=[0-9][0-9]*$' "$RB2" &&
+    grep -q '^clear_mode=none$' "$RB2" && grep -q 'called' "$RESTART_STUB_LOG" &&
+    ! grep -q 'send-keys' "$TMUX_STUB_LOG"; then
+    ok "the sender runs the restart command (not tmux send-keys) and confirms via the consumed marker"
+else
+    bad "the sender runs the restart command (not tmux send-keys) and confirms via the consumed marker" \
+        "budget='$(cat "$RB2")' restart_log='$(cat "$RESTART_STUB_LOG" 2>/dev/null)' tmux_log='$(cat "$TMUX_STUB_LOG" 2>/dev/null)'"
+fi
+unset RESTART_STUB_CONSUME
+rm -f "${CTX_DIR}/last-clear.json.seen"
+
+# sender: the restart command fails (non-zero exit) — clear_mode kept for retry
+fixture s-restart-fail 40
+env PATH="$STUBBIN:$PATH" ALFRED_SESSION_RESTART_CMD=restart-fail \
+    "$SCRIPT" landed --restart --summary "will fail" s-restart-fail >/dev/null 2>&1
+RF="${CTX_DIR}/s-restart-fail.budget"
+export TMUX_STUB_LOG="$TMPROOT/tmux-restart-fail.log"
+: >"$TMUX_STUB_LOG"
+printf '{"session_id":"s-restart-fail","hook_event_name":"Stop","cwd":"/tmp"}' |
+    env PATH="$STUBBIN:$PATH" ALFRED_SESSION_RESTART_CMD=restart-fail TMUX_PANE='%9' "$SCRIPT" check >/dev/null 2>&1
+if wait_for "$RF" '^clear_mode=restart$' 10 && [ ! -f "${CTX_DIR}/last-clear.json" ]; then
+    ok "a failing restart command leaves clear_mode=restart for the next attempt"
+else
+    bad "a failing restart command leaves clear_mode=restart for the next attempt" "$(cat "$RF")"
+fi
+
+# sender: independent defensive re-check — the command named at send time is
+# not the one that was on PATH at arm time (simulates a PATH/config change)
+fixture s-restart-race 40
+env PATH="$STUBBIN:$PATH" ALFRED_SESSION_RESTART_CMD=restart-ok \
+    "$SCRIPT" landed --restart --summary "race" s-restart-race >/dev/null 2>&1
+RR="${CTX_DIR}/s-restart-race.budget"
+export TMUX_STUB_LOG="$TMPROOT/tmux-restart-race.log"
+: >"$TMUX_STUB_LOG"
+printf '{"session_id":"s-restart-race","hook_event_name":"Stop","cwd":"/tmp"}' |
+    env PATH="$STUBBIN:$PATH" ALFRED_SESSION_RESTART_CMD=restart-vanished TMUX_PANE='%9' "$SCRIPT" check >/dev/null 2>&1
+if wait_for "$RR" '^clear_mode=none$' 10 &&
+    wait_for "${CTX_DIR}/s-restart-race.sender.log" "no restart command" 5 &&
+    ! grep -q 'send-keys' "$TMPROOT/tmux-restart-race.log"; then
+    ok "the sender independently re-checks the restart command and aborts if it vanished"
+else
+    bad "the sender independently re-checks the restart command and aborts if it vanished" \
+        "budget='$(cat "$RR")' sender='$(cat "${CTX_DIR}/s-restart-race.sender.log" 2>/dev/null)'"
+fi
+
+# ===========================================================================
 # Session id resolution for a landing that arms a clear
 # ===========================================================================
 
@@ -681,6 +826,7 @@ RESOLVE="$TMPROOT/resolve"
 mkdir -p "$RESOLVE/context"
 printf '{"pct":40,"used":80000,"size":200000,"ts":%s}\n' "$(date +%s)" >"$RESOLVE/context/r-code.json"
 printf '{"pct":40,"used":80000,"size":200000,"ts":%s}\n' "$(date +%s)" >"$RESOLVE/context/r-pane.json"
+write_handover "$RESOLVE/context"
 
 # check writes a pane-keyed pointer next to the unkeyed one
 printf '{"session_id":"r-pane","hook_event_name":"UserPromptSubmit","cwd":"/tmp"}' |
@@ -753,7 +899,12 @@ else
         "stop_rc=$junk_stop_rc ups_rc=$RC err='$junk_stop_err'"
 fi
 
-# --- session-start injection -------------------------------------------------
+# ===========================================================================
+# session-start: classification (graceful / unplanned / fresh) + handover
+# ===========================================================================
+
+# --- graceful: marker present, no handover file yet — isolates the marker line
+rm -f "${CTX_DIR}/handover.md"
 printf '{"prev_session_id":"sess-old","mode":"clear","summary":"landed PR #93","ts":%s}\n' \
     "$(date +%s)" >"${CTX_DIR}/last-clear.json"
 printf '{"session_id":"new-one","source":"clear","cwd":"/tmp"}' |
@@ -761,35 +912,355 @@ printf '{"session_id":"new-one","source":"clear","cwd":"/tmp"}' |
 ss_rc=$?
 ss_out="$(cat "$TMPROOT/out")"
 if [ "$ss_rc" -eq 0 ] && [ "$(wc -l <"$TMPROOT/out")" -eq 1 ] &&
-    case "$ss_out" in *"previous session sess-old self-cleared at"*"landed PR #93"*) true ;; *) false ;; esac &&
+    case "$ss_out" in *"graceful clear after landing"*"previous session sess-old self-cleared at"*"landed PR #93"*) true ;; *) false ;; esac &&
     [ ! -f "${CTX_DIR}/last-clear.json" ]; then
-    ok "session-start prints one handover line for source=clear and consumes the marker"
+    ok "graceful clear: one classified line, marker consumed"
 else
-    bad "session-start prints one handover line for source=clear and consumes the marker" \
-        "rc=$ss_rc out='$ss_out'"
+    bad "graceful clear: one classified line, marker consumed" "rc=$ss_rc out='$ss_out'"
 fi
 
 printf '{"prev_session_id":"sess-old","mode":"compact","summary":"s","ts":%s}\n' \
     "$(date +%s)" >"${CTX_DIR}/last-clear.json"
-printf '{"session_id":"new-one","source":"startup","cwd":"/tmp"}' |
+printf '{"session_id":"new-one","source":"resume","cwd":"/tmp"}' |
     "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
-if [ ! -s "$TMPROOT/out" ] && [ -f "${CTX_DIR}/last-clear.json" ]; then
-    ok "session-start prints nothing for source=startup and keeps the marker"
+if case "$(cat "$TMPROOT/out")" in *"graceful compact after landing"*"self-compacted"*) true ;; *) false ;; esac &&
+    [ ! -f "${CTX_DIR}/last-clear.json" ]; then
+    ok "graceful compact: source=resume also consumes the marker"
 else
-    bad "session-start prints nothing for source=startup and keeps the marker" \
-        "out='$(cat "$TMPROOT/out")'"
+    bad "graceful compact: source=resume also consumes the marker" "out='$(cat "$TMPROOT/out")'"
+fi
+
+# restart's new session comes up via `claude -c`, which the Claude Code hooks
+# docs report as source=resume — not source=startup or a dedicated "restart".
+printf '{"prev_session_id":"sess-old","mode":"restart","summary":"s","ts":%s}\n' \
+    "$(date +%s)" >"${CTX_DIR}/last-clear.json"
+printf '{"session_id":"new-one","source":"resume","cwd":"/tmp"}' |
+    "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
+if case "$(cat "$TMPROOT/out")" in *"graceful restart after landing"*"restarted itself at"*) true ;; *) false ;; esac &&
+    [ ! -f "${CTX_DIR}/last-clear.json" ]; then
+    ok "graceful restart: claude -c (source=resume) prints the restart wording"
+else
+    bad "graceful restart: claude -c (source=resume) prints the restart wording" "out='$(cat "$TMPROOT/out")'"
 fi
 
 printf '{"prev_session_id":"sess-old","mode":"clear","summary":"s","ts":%s}\n' \
-    "$(($(date +%s) - 1200))" >"${CTX_DIR}/last-clear.json"
-printf '{"session_id":"new-one","source":"clear","cwd":"/tmp"}' |
+    "$(date +%s)" >"${CTX_DIR}/last-clear.json"
+printf '{"session_id":"new-one","source":"startup","cwd":"/tmp"}' |
     "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
-if [ ! -s "$TMPROOT/out" ]; then
-    ok "session-start prints nothing for a marker older than 15 min"
+if [ -n "$(cat "$TMPROOT/out")" ] && [ ! -f "${CTX_DIR}/last-clear.json" ]; then
+    ok "source=startup also consumes the marker (all four sources match)"
 else
-    bad "session-start prints nothing for a marker older than 15 min" "out='$(cat "$TMPROOT/out")'"
+    bad "source=startup also consumes the marker (all four sources match)" "out='$(cat "$TMPROOT/out")'"
+fi
+
+# an unmatched source (e.g. a hook-level "fork") is not one of the four and
+# never touches the marker
+printf '{"prev_session_id":"sess-old","mode":"clear","summary":"s","ts":%s}\n' \
+    "$(date +%s)" >"${CTX_DIR}/last-clear.json"
+printf '{"session_id":"new-one","source":"fork","cwd":"/tmp"}' |
+    "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
+if [ ! -s "$TMPROOT/out" ] && [ -f "${CTX_DIR}/last-clear.json" ]; then
+    ok "session-start ignores an unmatched source (fork) and keeps the marker"
+else
+    bad "session-start ignores an unmatched source (fork) and keeps the marker" "out='$(cat "$TMPROOT/out")'"
 fi
 rm -f "${CTX_DIR}/last-clear.json"
+
+# Isolated dir: CTX_DIR holds many earlier fixture sessions that were never
+# landed, so the unplanned-detection signal (last_prompt_ts > landed_ts on the
+# most recent OTHER session) would otherwise fire here — correctly, for a dir
+# that dirty, but not what this specific assertion means to isolate.
+STALEMARKER_DIR="$TMPROOT/stalemarker"
+mkdir -p "$STALEMARKER_DIR/context"
+printf '{"prev_session_id":"sess-old","mode":"clear","summary":"s","ts":%s}\n' \
+    "$(($(date +%s) - 1200))" >"$STALEMARKER_DIR/context/last-clear.json"
+printf '{"session_id":"new-one","source":"clear","cwd":"/tmp"}' |
+    ALFRED_STATE_DIR="$STALEMARKER_DIR" "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
+if [ ! -s "$TMPROOT/out" ] && [ ! -f "$STALEMARKER_DIR/context/last-clear.json" ]; then
+    ok "a marker older than 15 min prints nothing and is dropped"
+else
+    bad "a marker older than 15 min prints nothing and is dropped" "out='$(cat "$TMPROOT/out")'"
+fi
+
+# --- handover file: injected once under its own header, then consumed ------
+write_handover "$CTX_DIR"
+printf '{"session_id":"new-one","source":"startup","cwd":"/tmp"}' |
+    "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
+hv_out="$(cat "$TMPROOT/out")"
+if case "$hv_out" in *"HANDOVER (written"*"consumed now):"*"first thing: pick up issue #847"*) true ;; *) false ;; esac &&
+    [ ! -f "${CTX_DIR}/handover.md" ]; then
+    ok "handover file is injected under its own header and deleted"
+else
+    bad "handover file is injected under its own header and deleted" "out='$hv_out'"
+fi
+
+# Isolated dir, same reason as above: CTX_DIR's other sessions would otherwise
+# make this look unplanned.
+SECONDSTART_DIR="$TMPROOT/secondstart"
+mkdir -p "$SECONDSTART_DIR/context"
+printf '{"session_id":"new-one","source":"startup","cwd":"/tmp"}' |
+    ALFRED_STATE_DIR="$SECONDSTART_DIR" "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
+if [ ! -s "$TMPROOT/out" ]; then
+    ok "a fresh start with nothing pending injects nothing"
+else
+    bad "a fresh start with nothing pending injects nothing" "out='$(cat "$TMPROOT/out")'"
+fi
+
+# handover + marker together: both appear, marker line first, both consumed
+write_handover "$CTX_DIR"
+printf '{"prev_session_id":"sess-old","mode":"clear","summary":"both","ts":%s}\n' \
+    "$(date +%s)" >"${CTX_DIR}/last-clear.json"
+printf '{"session_id":"new-one","source":"clear","cwd":"/tmp"}' |
+    "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
+combo_out="$(cat "$TMPROOT/out")"
+if case "$combo_out" in *"graceful clear after landing"*"HANDOVER (written"*) true ;; *) false ;; esac &&
+    [ ! -f "${CTX_DIR}/last-clear.json" ] && [ ! -f "${CTX_DIR}/handover.md" ]; then
+    ok "marker line and handover both appear, marker first, both consumed"
+else
+    bad "marker line and handover both appear, marker first, both consumed" "out='$combo_out'"
+fi
+
+# --- unplanned: a boot-recovery marker with no graceful marker -------------
+# Isolated state dirs from here on: CTX_DIR by this point in the suite holds
+# dozens of .budget files from earlier cases, and "most recent OTHER session"
+# is an mtime race the shared dir should not be asked to settle.
+UNPLANNED1="$TMPROOT/unplanned1"
+mkdir -p "$UNPLANNED1/context"
+BOOT_FILE="$UNPLANNED1/context/boot-recovery.json"
+printf '{"ts":%s,"boot_ts":%s,"reason":"oom-kill","host":"dock-worker-3"}\n' \
+    "$(date +%s)" "$(date +%s)" >"$BOOT_FILE"
+printf '{"session_id":"new-one","source":"startup","cwd":"/tmp"}' |
+    ALFRED_STATE_DIR="$UNPLANNED1" "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
+boot_out="$(cat "$TMPROOT/out")"
+if case "$boot_out" in *"unplanned restart detected"*"RECOVERY:"*"boot time"*"oom-kill"*"dock-worker-3"*"/alfred-agent:recover now"*) true ;; *) false ;; esac &&
+    [ ! -f "$BOOT_FILE" ]; then
+    ok "a boot-recovery marker classifies the start as unplanned and is consumed"
+else
+    bad "a boot-recovery marker classifies the start as unplanned and is consumed" "out='$boot_out'"
+fi
+
+# --- unplanned: no boot marker, but the most recent OTHER session shows
+# activity after its last landing (or no landing at all) ---------------------
+UNPLANNED2="$TMPROOT/unplanned2"
+mkdir -p "$UNPLANNED2/context"
+printf 'last_prompt_ts=%s\nlanded_ts=%s\n' "$(date +%s)" 0 >"$UNPLANNED2/context/sess-abrupt.budget"
+printf '{"session_id":"new-two","source":"startup","cwd":"/tmp"}' |
+    ALFRED_STATE_DIR="$UNPLANNED2" "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
+abrupt_out="$(cat "$TMPROOT/out")"
+if case "$abrupt_out" in *"unplanned restart detected"*"RECOVERY: previous session sess-abrupt"*"last landing never"*"/alfred-agent:recover now"*) true ;; *) false ;; esac; then
+    ok "a most-recent-other-session with activity after its (never) landing is unplanned"
+else
+    bad "a most-recent-other-session with activity after its (never) landing is unplanned" "out='$abrupt_out'"
+fi
+
+# --- 5b: PreCompact cannot block (verified against the Claude Code hooks
+# docs, both triggers) — an un-landed compaction is caught the same generic
+# way, via the old session's last_prompt_ts/landed_ts, not via anything
+# PreCompact itself records. Covered explicitly for both compact and clear.
+COMPACT_DIR="$TMPROOT/compactflow"
+mkdir -p "$COMPACT_DIR/context"
+# last_prompt_ts is only ever recorded onto an EXISTING budget file (see
+# do_check's UserPromptSubmit branch) — write the pre-existing state directly,
+# the way a session with real prior activity would already have it, rather
+# than depending on hook-call ordering the test does not otherwise need.
+printf 'last_prompt_ts=%s\nlanded_ts=0\n' "$(date +%s)" >"$COMPACT_DIR/context/sess-precompact.budget"
+printf '{"session_id":"sess-precompact","hook_event_name":"PreCompact","trigger":"auto","custom_instructions":""}' |
+    ALFRED_STATE_DIR="$COMPACT_DIR" "$SCRIPT" pre-compact >/dev/null 2>&1
+# no landed call at all — this session's compaction was never landed. Proves
+# PreCompact itself records nothing that classification depends on; the
+# pre-existing last_prompt_ts/landed_ts state alone drives it.
+printf '{"session_id":"new-after-compact","source":"compact","cwd":"/tmp"}' |
+    ALFRED_STATE_DIR="$COMPACT_DIR" "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
+compact_out="$(cat "$TMPROOT/out")"
+if case "$compact_out" in *"unplanned restart detected"*"RECOVERY: previous session sess-precompact"*) true ;; *) false ;; esac; then
+    ok "an un-landed auto-compaction produces an unplanned next SessionStart(source=compact)"
+else
+    bad "an un-landed auto-compaction produces an unplanned next SessionStart(source=compact)" "out='$compact_out'"
+fi
+
+CLEARFLOW_DIR="$TMPROOT/clearflow"
+mkdir -p "$CLEARFLOW_DIR/context"
+printf 'last_prompt_ts=%s\nlanded_ts=0\n' "$(date +%s)" >"$CLEARFLOW_DIR/context/sess-preclear.budget"
+# the owner ran a manual /clear directly — never went through `landed`
+printf '{"session_id":"new-after-clear","source":"clear","cwd":"/tmp"}' |
+    ALFRED_STATE_DIR="$CLEARFLOW_DIR" "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
+clearflow_out="$(cat "$TMPROOT/out")"
+if case "$clearflow_out" in *"unplanned restart detected"*"RECOVERY: previous session sess-preclear"*) true ;; *) false ;; esac; then
+    ok "a manual /clear with no landed call produces an unplanned next SessionStart(source=clear)"
+else
+    bad "a manual /clear with no landed call produces an unplanned next SessionStart(source=clear)" "out='$clearflow_out'"
+fi
+
+# --- fresh: nothing known at all --------------------------------------------
+FRESH_DIR="$TMPROOT/freshstart"
+mkdir -p "$FRESH_DIR/context"
+printf '{"session_id":"new-three","source":"startup","cwd":"/tmp"}' |
+    ALFRED_STATE_DIR="$FRESH_DIR" "$SCRIPT" session-start >"$TMPROOT/out" 2>/dev/null
+if [ ! -s "$TMPROOT/out" ]; then
+    ok "fresh start (no marker, no boot file, no stale other session) prints nothing"
+else
+    bad "fresh start (no marker, no boot file, no stale other session) prints nothing" "out='$(cat "$TMPROOT/out")'"
+fi
+
+# restore the shared handover for every later test in this file that arms a
+# real mode via landed --clear/--compact/--restart.
+write_handover "$CTX_DIR"
+
+# ===========================================================================
+# Completeness gate (Change 5a): handover / git / running-agent / --force
+# ===========================================================================
+# All of these run with $PWD = $GITROOT (clean and pushed by default, see the
+# top of this file) so the git-completeness check has a real, controlled tree
+# to look at. Each dirtying test restores the baseline immediately after its
+# own assertion so it never leaks into a later test.
+
+# --- 1a: handover present but with no Metis capture id ----------------------
+printf 'landed: PR #93 merged.\nfirst thing: pick up issue #847.\n' >"${CTX_DIR}/handover.md"
+fixture s-gate-nocap 40
+"$SCRIPT" landed --clear --summary "no capture id" s-gate-nocap >"$TMPROOT/out" 2>"$TMPROOT/err"
+gate_rc=$?
+if [ "$gate_rc" -ne 0 ] && [ ! -f "${CTX_DIR}/s-gate-nocap.budget" ] &&
+    grep -q "no Metis capture id" "$TMPROOT/err"; then
+    ok "a handover with no Metis capture id refuses the landing and records nothing"
+else
+    bad "a handover with no Metis capture id refuses the landing and records nothing" \
+        "rc=$gate_rc err='$(cat "$TMPROOT/err")' budget_exists=$([ -f "${CTX_DIR}/s-gate-nocap.budget" ] && echo yes || echo no)"
+fi
+write_handover "$CTX_DIR"
+
+# --- 1b: handover present, valid content, but stale (> 30 min old) ---------
+write_handover "$CTX_DIR"
+touch -d "40 minutes ago" "${CTX_DIR}/handover.md"
+fixture s-gate-stale 40
+"$SCRIPT" landed --clear --summary "stale handover" s-gate-stale >"$TMPROOT/out" 2>"$TMPROOT/err"
+gate_rc=$?
+if [ "$gate_rc" -ne 0 ] && [ ! -f "${CTX_DIR}/s-gate-stale.budget" ] &&
+    grep -q "over the 1800s (30 min) limit" "$TMPROOT/err"; then
+    ok "a handover older than 30 min refuses the landing and records nothing"
+else
+    bad "a handover older than 30 min refuses the landing and records nothing" \
+        "rc=$gate_rc err='$(cat "$TMPROOT/err")'"
+fi
+write_handover "$CTX_DIR"
+
+# --- 2a: uncommitted changes in the project tree ----------------------------
+echo dirty >>"$GITROOT/seed.txt"
+fixture s-gate-dirty 40
+"$SCRIPT" landed --clear --summary "dirty tree" s-gate-dirty >"$TMPROOT/out" 2>"$TMPROOT/err"
+gate_rc=$?
+if [ "$gate_rc" -ne 0 ] && [ ! -f "${CTX_DIR}/s-gate-dirty.budget" ] &&
+    grep -q "uncommitted changes" "$TMPROOT/err" && grep -q "$GITROOT" "$TMPROOT/err"; then
+    ok "uncommitted changes in the project tree refuse the landing and record nothing"
+else
+    bad "uncommitted changes in the project tree refuse the landing and record nothing" \
+        "rc=$gate_rc err='$(cat "$TMPROOT/err")'"
+fi
+(cd "$GITROOT" && git checkout -q -- seed.txt)
+
+# --- 2b: a committed but unpushed change ------------------------------------
+echo more >>"$GITROOT/seed.txt"
+(cd "$GITROOT" && git commit -q -am "unpushed")
+fixture s-gate-unpushed 40
+"$SCRIPT" landed --clear --summary "unpushed" s-gate-unpushed >"$TMPROOT/out" 2>"$TMPROOT/err"
+gate_rc=$?
+if [ "$gate_rc" -ne 0 ] && [ ! -f "${CTX_DIR}/s-gate-unpushed.budget" ] &&
+    grep -q "unpushed commits" "$TMPROOT/err"; then
+    ok "an unpushed commit refuses the landing and records nothing"
+else
+    bad "an unpushed commit refuses the landing and records nothing" "rc=$gate_rc err='$(cat "$TMPROOT/err")'"
+fi
+(cd "$GITROOT" && git push -q origin HEAD:main)
+
+# --- 2c: a worker worktree still registered ---------------------------------
+WORKER_WT="$TMPROOT/worker-wt"
+(cd "$GITROOT" && git worktree add -q -b worker-branch "$WORKER_WT" >/dev/null 2>&1)
+fixture s-gate-wt 40
+"$SCRIPT" landed --clear --summary "worktree left behind" s-gate-wt >"$TMPROOT/out" 2>"$TMPROOT/err"
+gate_rc=$?
+if [ "$gate_rc" -ne 0 ] && [ ! -f "${CTX_DIR}/s-gate-wt.budget" ] &&
+    grep -q "worker worktree still present" "$TMPROOT/err" && grep -q "$WORKER_WT" "$TMPROOT/err"; then
+    ok "a worker worktree still registered refuses the landing and names it"
+else
+    bad "a worker worktree still registered refuses the landing and names it" \
+        "rc=$gate_rc err='$(cat "$TMPROOT/err")'"
+fi
+(cd "$GITROOT" && git worktree remove -f "$WORKER_WT" && git branch -D worker-branch) >/dev/null 2>&1
+
+# --- 3a: a background agent transcript touched recently ---------------------
+AGENT_SLUG=$(printf '%s' "$GITROOT" | tr '/' '-')
+fixture s-gate-agent 40
+AGENT_TASKS="${ALFRED_CLAUDE_TMP_DIR}/${AGENT_SLUG}/s-gate-agent/tasks"
+mkdir -p "$AGENT_TASKS"
+printf '{}\n' >"${AGENT_TASKS}/deadbeef123.output"
+"$SCRIPT" landed --clear --summary "agent running" s-gate-agent >"$TMPROOT/out" 2>"$TMPROOT/err"
+gate_rc=$?
+if [ "$gate_rc" -ne 0 ] && [ ! -f "${CTX_DIR}/s-gate-agent.budget" ] &&
+    grep -q "possibly still running" "$TMPROOT/err" && grep -q "deadbeef123" "$TMPROOT/err"; then
+    ok "a recently-touched background-agent transcript refuses the landing and names it"
+else
+    bad "a recently-touched background-agent transcript refuses the landing and names it" \
+        "rc=$gate_rc err='$(cat "$TMPROOT/err")'"
+fi
+
+# --- 3b: the same transcript, but stale (> 60s) — not flagged ---------------
+touch -d "5 minutes ago" "${AGENT_TASKS}/deadbeef123.output"
+fixture s-gate-agent-old 40
+"$SCRIPT" landed --clear --summary "agent long done" s-gate-agent-old >"$TMPROOT/out" 2>"$TMPROOT/err"
+gate_rc=$?
+if [ "$gate_rc" -eq 0 ] && [ -f "${CTX_DIR}/s-gate-agent-old.budget" ] &&
+    grep -q '^clear_mode=clear$' "${CTX_DIR}/s-gate-agent-old.budget"; then
+    ok "a background-agent transcript stale beyond the window is not flagged"
+else
+    bad "a background-agent transcript stale beyond the window is not flagged" \
+        "rc=$gate_rc err='$(cat "$TMPROOT/err")'"
+fi
+rm -rf "${ALFRED_CLAUDE_TMP_DIR}/${AGENT_SLUG}"
+
+# --- --force skips git + running-agent checks, never the handover check ----
+echo dirty >>"$GITROOT/seed.txt"
+FORCE_TASKS="${ALFRED_CLAUDE_TMP_DIR}/${AGENT_SLUG}/s-gate-force/tasks"
+mkdir -p "$FORCE_TASKS"
+printf '{}\n' >"${FORCE_TASKS}/stillhot99.output"
+fixture s-gate-force 40
+"$SCRIPT" landed --clear --force --summary "forced past dirty tree + running agent" s-gate-force \
+    >"$TMPROOT/out" 2>"$TMPROOT/err"
+gate_rc=$?
+FB="${CTX_DIR}/s-gate-force.budget"
+if [ "$gate_rc" -eq 0 ] && grep -q '^clear_mode=clear$' "$FB" && grep -q '^forced=true$' "$FB"; then
+    ok "--force skips the git and running-agent checks and records forced=true"
+else
+    bad "--force skips the git and running-agent checks and records forced=true" \
+        "rc=$gate_rc budget='$(cat "$FB" 2>/dev/null)' err='$(cat "$TMPROOT/err")'"
+fi
+rm -rf "${ALFRED_CLAUDE_TMP_DIR}/${AGENT_SLUG}"
+(cd "$GITROOT" && git checkout -q -- seed.txt)
+
+# --force never skips the handover check
+printf 'no capture id here\n' >"${CTX_DIR}/handover.md"
+fixture s-gate-force-handover 40
+"$SCRIPT" landed --clear --force --summary "forced but no handover" s-gate-force-handover \
+    >"$TMPROOT/out" 2>"$TMPROOT/err"
+gate_rc=$?
+if [ "$gate_rc" -ne 0 ] && [ ! -f "${CTX_DIR}/s-gate-force-handover.budget" ] &&
+    grep -q "no Metis capture id" "$TMPROOT/err" &&
+    grep -q "force.*never skips the handover check" "$TMPROOT/err"; then
+    ok "--force never skips the handover check"
+else
+    bad "--force never skips the handover check" "rc=$gate_rc err='$(cat "$TMPROOT/err")'"
+fi
+write_handover "$CTX_DIR"
+
+# --- a genuinely clean pass records forced=false ----------------------------
+fixture s-gate-clean 40
+"$SCRIPT" landed --clear --summary "clean pass" s-gate-clean >"$TMPROOT/out" 2>"$TMPROOT/err"
+gate_rc=$?
+CLB="${CTX_DIR}/s-gate-clean.budget"
+if [ "$gate_rc" -eq 0 ] && grep -q '^clear_mode=clear$' "$CLB" && grep -q '^forced=false$' "$CLB"; then
+    ok "a clean pass (no --force needed) records forced=false"
+else
+    bad "a clean pass (no --force needed) records forced=false" \
+        "rc=$gate_rc budget='$(cat "$CLB" 2>/dev/null)' err='$(cat "$TMPROOT/err")'"
+fi
 
 # --- pre-compact records the auto-compaction --------------------------------
 fixture s-ac 15
