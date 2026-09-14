@@ -653,6 +653,13 @@ landing_running_agent_issues() {
     now=$(now_epoch)
     for f in "$tasks_dir"/*.output; do
         [ -e "$f" ] || continue
+        # A Bash tool call creates its own *.output file empty and deletes it
+        # when the call returns, for the duration of every single Bash call —
+        # including the one `landed` itself is invoked from. That transient
+        # 0-byte file is not a sub-agent: a live transcript being written has
+        # content. Skip empty files so a landing doesn't perpetually refuse
+        # itself.
+        [ -s "$f" ] || continue
         mtime=$(stat -c %Y "$f" 2>/dev/null) || continue
         age=$((now - mtime))
         if [ "$age" -le "$RUNNING_AGENT_WINDOW" ]; then

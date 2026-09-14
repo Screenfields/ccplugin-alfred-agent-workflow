@@ -1291,7 +1291,31 @@ else
         "rc=$gate_rc err='$(cat "$TMPROOT/err")'"
 fi
 
+# --- 3a2: a zero-byte transcript touched recently — not flagged -------------
+# Every Bash tool call creates its own empty *.output file for the duration
+# of the call (including the call `landed` itself runs from) and deletes it
+# after. A live sub-agent transcript has content; an empty one is just the
+# gate's own invocation and must never block itself.
+fixture s-gate-agent-empty 40
+EMPTY_TASKS="${ALFRED_CLAUDE_TMP_DIR}/${AGENT_SLUG}/s-gate-agent-empty/tasks"
+mkdir -p "$EMPTY_TASKS"
+: >"${EMPTY_TASKS}/cafef00d99.output"
+"$SCRIPT" landed --clear --summary "own bash call output, empty" s-gate-agent-empty \
+    >"$TMPROOT/out" 2>"$TMPROOT/err"
+gate_rc=$?
+if [ "$gate_rc" -eq 0 ] && [ -f "${CTX_DIR}/s-gate-agent-empty.budget" ] &&
+    grep -q '^clear_mode=clear$' "${CTX_DIR}/s-gate-agent-empty.budget"; then
+    ok "a zero-byte recently-touched transcript is not flagged as a running agent"
+else
+    bad "a zero-byte recently-touched transcript is not flagged as a running agent" \
+        "rc=$gate_rc err='$(cat "$TMPROOT/err")'"
+fi
+rm -rf "${ALFRED_CLAUDE_TMP_DIR:?}/${AGENT_SLUG:?}"
+
 # --- 3b: the same transcript, but stale (> 60s) — not flagged ---------------
+AGENT_TASKS="${ALFRED_CLAUDE_TMP_DIR}/${AGENT_SLUG}/s-gate-agent/tasks"
+mkdir -p "$AGENT_TASKS"
+printf '{}\n' >"${AGENT_TASKS}/deadbeef123.output"
 touch -d "5 minutes ago" "${AGENT_TASKS}/deadbeef123.output"
 fixture s-gate-agent-old 40
 "$SCRIPT" landed --clear --summary "agent long done" s-gate-agent-old >"$TMPROOT/out" 2>"$TMPROOT/err"
