@@ -44,7 +44,7 @@ Two things make this work, and both are easy to get wrong:
 Sweep every source. When the sweep is more than two or three calls, run the sources in parallel
 via read-only sub-agents so the owner is not kept waiting; the lead only merges. **Do not make the
 owner wait for the sweep:** if you already know two or three genuine owner items from the session or
-the last handover, show the agenda with those and present item 1 while the sweep runs, then fold the
+earlier notes, show the agenda with those and present item 1 while the sweep runs, then fold the
 sweep's additions into the agenda at the next natural pause ("sweep landed; added X, dropped Y").
 The first live run stalled for minutes on a background sweep and the owner said so. Say plainly
 that the agenda may still change ("sweep still running; the list can grow"), and if the sweep lands a
