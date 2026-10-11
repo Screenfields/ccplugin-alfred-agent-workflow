@@ -131,9 +131,12 @@ If no unread messages: when the user ran this command, report "No new messages" 
 
 4. Offer to view full thread if relevant context might be needed.
 
-**Exception:** Do NOT auto-mark as read if:
-- The message requires urgent action that hasn't been taken yet
-- The user explicitly asks to keep messages unread
+**Unread means "not yet delivered to the session" and nothing else.** Mark
+every displayed message read, including messages that still need action. A
+to-do that outlives the turn goes into an issue (`/alfred-agent:drop-issue`, or
+the repo it belongs to) or gets answered on its thread. Never leave a message
+unread as a reminder: the platform's unread-age metric and nudge-watcher read a
+message that stays unread as a deaf lead.
 
 ## Ad-hoc poll loop when actively waiting on a reply
 

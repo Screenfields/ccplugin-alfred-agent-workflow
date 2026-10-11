@@ -57,8 +57,9 @@ append it to the end.
   answered in a later comment.
 - **Open PRs** that need the owner: labelled `requires-elevated-merge`, review requested from the
   owner, or blocked on a policy call the PR body names.
-- **Agent-messaging inbox**: unread or unanswered threads where a peer relays or requests an owner
-  decision, approval or credential.
+- **Agent-messaging threads**: threads whose last message is a peer relaying or requesting an
+  owner decision, approval or credential that has not been answered, whether read or not
+  (messages are marked read on delivery, so read state says nothing about whether they were handled).
 - **This session**: questions you asked earlier that were never answered, and "waiting on you"
   lines in your own recent messages.
 
