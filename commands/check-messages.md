@@ -6,46 +6,59 @@ Check for new unread messages using the agent-messaging MCP service.
 
 ## Session-start mandate
 
-**Before anything else in a session, arm the wake bridge.** It is a deterministic
-bash watcher (no LLM anywhere in it) that wakes the session only when there is
-genuinely new news, replacing the 15-minute inbox loop and its ~96 empty model
-turns per day:
+**Before anything else in a session, start the wake bridge.** `alfred-wake` is
+deterministic bash (no LLM anywhere in it). It runs as a background Bash task,
+stays silent while there is nothing new, and exits as soon as there is news;
+the harness then re-invokes the session with its output.
 
 ```bash
 command -v alfred-wake >/dev/null 2>&1 || "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake" install
 ```
 
 ```
-Monitor(command: "alfred-wake run", timeout_ms: 1800000,
-        description: "inbox wake: agent-messaging + Buzz")
+Bash(command: "alfred-wake wait", run_in_background: true)
 ```
 
-There is no `persistent` parameter on the `Monitor` tool — the schema only
-accepts `command`, `ws`, `description`, and `timeout_ms` (capped at
-1800000 ms / 30 minutes). The Monitor always expires after 30 minutes and
-must be re-armed on each expiry notification; nothing re-arms it
-automatically, so an unnoticed expiry is a silent wake-coverage gap.
+Do **not** arm it with `Monitor`: a Monitor expires every 30 minutes, needs a
+re-arm turn each time, and leaves an unfinished task behind per re-arm.
 
 Then **call `get_messages` once** to pick up whatever arrived before the bridge
-came up (the bridge seeds its cursors on first run and deliberately never
-replays history).
+came up (the bridge seeds its cursors silently on first run and never replays
+history).
 
-**Only if arming fails** — the `Monitor` tool errors, or
-`alfred-wake check` reports `WAKE-ERROR agent-messaging` — fall back to the old
-cadence: `/loop 15m /alfred-agent:check-messages`. Say so explicitly when you
-fall back; a silent fallback looks identical to a working bridge.
+## When the `alfred-wake wait` task exits
+
+Act on its output line(s) exactly as follows. "Relaunch" means the same
+`Bash(command: "alfred-wake wait", run_in_background: true)` call; a new wait
+replaces any previous one, so relaunching is always safe.
+
+| Output | Action | Text to the user |
+|---|---|---|
+| `WAKE am …` | `get_messages`, handle per the rules below, relaunch | Only what the messages themselves warrant |
+| `WAKE buzz …` | Read that channel, handle, relaunch | Only what the posts warrant |
+| `WAKE-ERROR …` (exit 2) | Relaunch | One line, once per source per session |
+| `WAKE-RECOVERED …` | Relaunch | None |
+| `WAKE-STOPPED signal=…` | Relaunch | None |
+| `WAKE-STOPPED replaced …` | Nothing — a newer wait is already running | None |
+
+## Hard rule: no news, no text
+
+A wake, relaunch, re-arm or stop that brings no new message produces **no model
+text at all**. No "restarted the watcher", no "still waiting on …", no recap of
+open items: make the tool call and end the turn. The same applies when the
+`get_messages` after a `WAKE am` turns up nothing that needs handling. Only real
+news — a message that needs a reply or a decision, or a `WAKE-ERROR` — gets text.
 
 ## Wake-armed check (run this every time this command runs)
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake" status >/dev/null 2>&1 || \
-  echo "WARNING: no wake bridge armed — this inbox is poll-only. Arm it: Monitor(command: \"alfred-wake run\", timeout_ms: 1800000)"
+alfred-wake status >/dev/null 2>&1 || echo "no wake bridge running"
 ```
 
-`alfred-wake status` exits 0 only while a `run` loop has touched its marker file
-within the last 5 minutes. **Surface that warning line to the user verbatim** —
-an unarmed lead misses messages until someone manually checks, which is exactly
-the failure this bridge exists to remove.
+`status` exits 0 only while a live `wait`/`run` process holds the bridge's
+pidfile. If it prints, relaunch the wait silently. Mention it to the user only
+if the relaunch itself fails, and then fall back to
+`/loop 15m /alfred-agent:check-messages`, saying so in one line.
 
 See the `alfred-wake` section of the plugin README for configuration, state
 layout, and how to verify with `alfred-wake check`.
@@ -88,7 +101,7 @@ This prevents exceeding response-token budgets on large inboxes (e.g. 41 message
 - Body (formatted)
 - Timestamp (relative, e.g., "5 min ago")
 
-If no unread messages, report "No new messages" — that's the full answer, nothing else needed.
+If no unread messages: when the user ran this command, report "No new messages" — that's the full answer. When a wake or session start triggered the check, say nothing (see "no news, no text").
 
 **After displaying messages:**
 

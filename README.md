@@ -129,18 +129,23 @@ command -v alfred-wake >/dev/null 2>&1 || "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake
 ```
 
 ```
-Monitor(command: "alfred-wake run", timeout_ms: 1800000,
-        description: "inbox wake: agent-messaging + Buzz")
+Bash(command: "alfred-wake wait", run_in_background: true)
 ```
 
-If `~/.local/bin` is not on `PATH`, arm the full path instead:
-`Monitor(command: "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake run", timeout_ms: 1800000, …)`.
+If `~/.local/bin` is not on `PATH`, use the full path:
+`${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake wait`.
 
-There is no `persistent` parameter on the `Monitor` tool — the schema only
-accepts `command`, `ws`, `description`, and `timeout_ms` (capped at
-1800000 ms / 30 minutes). The Monitor always expires after 30 minutes and
-must be re-armed on each expiry notification; nothing re-arms it
-automatically, so an unnoticed expiry is a silent wake-coverage gap.
+`wait` is one-shot: it stays silent while nothing is new, prints the news
+line(s) as soon as there is news, and exits. The harness re-invokes the session
+on that exit; the session handles the news and starts `wait` again. There is no
+30-minute expiry to re-arm, and each wait leaves a normal completion record, so
+a restart no longer reports a pile of unfinished background tasks. How the
+session reacts to each line, and the rule that a wake without news produces no
+model text, are in `commands/check-messages.md`.
+
+Only one `wait`/`run` runs per state dir. Starting a new one stops the previous
+one (SIGTERM, then SIGKILL after `ALFRED_WAKE_STOP_GRACE` seconds), which prints
+`WAKE-STOPPED replaced by=<pid>` and exits 0.
 
 Fall back to `/loop 15m /alfred-agent:check-messages` **only** when arming
 fails, and say so — a silent fallback is indistinguishable from a working
@@ -150,7 +155,7 @@ bridge.
 
 ```bash
 alfred-wake check     # one dry-run pass: never writes cursors, explains itself on stderr
-alfred-wake status    # config + whether a run loop is currently armed (exit 0 = armed)
+alfred-wake status    # config + whether a wait/run process is alive (exit 0 = armed)
 ```
 
 `check` is safe to run at any time: it resolves config, proves auth against both
@@ -161,10 +166,12 @@ it cannot swallow news that the running bridge should deliver.
 
 | Invocation | Behaviour |
 |---|---|
-| `alfred-wake run [interval]` | Watch loop. Default tick 20s (Buzz), agent-messaging every 60s with failure backoff to 600s |
+| `alfred-wake wait [interval]` | One-shot: polls like `run`, prints the first news and exits 0 (2 if a `WAKE-ERROR` was printed). A first-ever run seeds cursors silently |
+| `alfred-wake run --until-wake` | Same as `wait` |
+| `alfred-wake run [interval]` | Legacy watch loop for a `Monitor`. Default tick 20s (Buzz), agent-messaging every 60s with failure backoff to 600s |
 | `alfred-wake check` | One dry-run pass, diagnostics on stderr, exit 0 |
 | `alfred-wake install` | Symlink into `~/.local/bin` (override with `ALFRED_WAKE_BIN_DIR`) |
-| `alfred-wake status` | Print config; exit 0 only if a `run` loop touched its marker in the last 5 min |
+| `alfred-wake status` | Print config; exit 0 only while a live `wait`/`run` process holds the pidfile |
 
 ### Event lines (the stdout contract)
 
@@ -174,9 +181,11 @@ Only these shapes are ever printed to stdout. Anything else there is a bug.
 |---|---|
 | `WAKE am unread=<n> from=<a,b>` | New unread agent-messaging item(s); `n` = current total unread |
 | `WAKE buzz <label> new=<n> from=<…> last=<HH:MM TZ>` | New non-self posts in that Buzz channel |
-| `WAKE-INIT …` | First ever run: cursors seeded, history deliberately not replayed |
+| `WAKE-INIT …` | Legacy `run` only, first ever run: cursors seeded, history deliberately not replayed |
 | `WAKE-ERROR <source>: <reason>` | A source failed 5 consecutive passes (repeats at most hourly) |
 | `WAKE-RECOVERED <source>` | A previously-failing source succeeded again |
+| `WAKE-STOPPED replaced by=<pid>` | `wait` only: a newer instance took over; nothing to do |
+| `WAKE-STOPPED signal=<TERM\|INT\|HUP>` | `wait` only: stopped by a signal after cleaning up; start a new wait |
 
 `<source>` is `agent-messaging`, `buzz`, or `buzz-<label>` per channel.
 
@@ -198,6 +207,8 @@ Everything is env-driven; the defaults are correct for a standard devbox pod.
 | `ALFRED_WAKE_INTERVAL` | `20` | Tick seconds |
 | `ALFRED_WAKE_AM_INTERVAL` / `ALFRED_WAKE_AM_MAX_INTERVAL` | `60` / `600` | agent-messaging poll interval and failure-backoff ceiling |
 | `ALFRED_WAKE_BUZZ_CHANNEL_REFRESH` | `900` | How often the channel list is re-read and an absent sidecar re-probed |
+| `ALFRED_WAKE_STOP_GRACE` | `5` | Seconds a new instance waits for the previous one to exit after SIGTERM before SIGKILL |
+| `ALFRED_WAKE_FAIL_THRESHOLD` | `5` | Consecutive failed passes before a source raises `WAKE-ERROR` |
 | `ALFRED_WAKE_STATE_DIR` | `/workspace/.alfred-wake`, else `$XDG_STATE_HOME/alfred-wake` | Where cursors live |
 | `ALFRED_WAKE_TZ` | `Europe/Amsterdam` | Timezone for `last=` timestamps |
 | `ALFRED_WAKE_BIN_DIR` | `$HOME/.local/bin` | Target of `alfred-wake install` |
@@ -258,7 +269,7 @@ In multi-agent project setups, only the project's lead agent typically gets a me
 | `/plugin install` errors with `terminal prompts disabled` (HTTPS) | Repo private / no credential helper | The marketplace + plugin repos are public; verify you're using the HTTPS URL form in step 3 |
 | `MCP server failed to connect` | Required env var missing or empty | `/mcp` to see error; check env vars per step 1 |
 | Messages reach the service but you don't receive them | `X-Agent-ID` header mismatch | Verify your `AGENT_ID` env matches what senders address |
-| `WARNING: no wake bridge armed` from `/alfred-agent:check-messages` | No `alfred-wake run` Monitor in this session | Arm it (see [Arming it](#arming-it)); `alfred-wake status` shows the marker age |
+| `no wake bridge running` from `/alfred-agent:check-messages` | No live `alfred-wake wait` process for this state dir | Start one: `Bash(command: "alfred-wake wait", run_in_background: true)`; `alfred-wake status` shows the pidfile PID and last-pass age |
 | Wake bridge silent while messages arrive | Wrong or missing `AGENT_MESSAGING_TOKEN` / `AGENT_ID` | `alfred-wake check` — it prints the resolved URL, auth mode and agent id, and any `WAKE-ERROR` reason |
 | Buzz never wakes you | No buzz-mcp sidecar in the pod, or no Buzz identity | `alfred-wake check` says `buzz: no sidecar …`. Expected for leads without a Buzz identity — it is not an error |
 
