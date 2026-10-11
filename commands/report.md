@@ -50,7 +50,7 @@ Call `mcp__agent-messaging__get_messages(unread_only=true, as_agent="{agent_id}"
 Collect from:
 - Issues labeled `blocked`, `waiting`, or `needs-decision`
 - Open PRs where review or CI is blocked on a specific actor
-- Unread inbox messages that require a decision before action
+- Agent-messaging threads whose last message is an unanswered request for a decision (messages are marked read on delivery, so look at the thread, not the unread flag)
 - Items from current session context explicitly noted as "waiting on [actor]" or "pending user direction"
 
 ## Output format
