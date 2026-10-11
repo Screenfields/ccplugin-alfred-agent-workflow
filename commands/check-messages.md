@@ -36,7 +36,7 @@ replaces any previous one, so relaunching is always safe.
 |---|---|---|
 | `WAKE am …` | `get_messages`, handle per the rules below, relaunch | Only what the messages themselves warrant |
 | `WAKE buzz …` | Read that channel, handle, relaunch | Only what the posts warrant |
-| `WAKE-ERROR …` (exit 2) | Relaunch | One line, once per source per session |
+| `WAKE-ERROR …` (exit 2) | Relaunch. If it is `WAKE-ERROR alfred-wake`, or the second `WAKE-ERROR agent-messaging` this session: see "Bridge down" | One line, once per source per session |
 | `WAKE-RECOVERED …` | Relaunch | None |
 | `WAKE-STOPPED signal=…` | Relaunch | None |
 | `WAKE-STOPPED replaced …` | Nothing — a newer wait is already running | None |
@@ -56,9 +56,23 @@ alfred-wake status >/dev/null 2>&1 || echo "no wake bridge running"
 ```
 
 `status` exits 0 only while a live `wait`/`run` process holds the bridge's
-pidfile. If it prints, relaunch the wait silently. Mention it to the user only
-if the relaunch itself fails, and then fall back to
-`/loop 15m /alfred-agent:check-messages`, saying so in one line.
+pidfile. If it prints, relaunch the wait silently.
+
+## Bridge down: tell the user once, notify the hub, never poll
+
+The bridge is down when the wait cannot start (the task exits with no `WAKE`
+line, or prints `WAKE-ERROR alfred-wake`), or when `WAKE-ERROR agent-messaging`
+comes back a second time in a session. Then, once per session:
+
+1. Tell the user in one line: `wake bridge down: <the error line>`.
+2. Send `alfred-platform` the subject `wake bridge down on <agent_id>`, with
+   the error line as the body. If agent-messaging itself is what is down, the
+   send fails; the user line is then the whole report.
+
+Do **not** fall back to `/loop`, `ScheduleWakeup`, cron or any other periodic
+check-messages: a scheduled check may not consume tokens (platform doctrine
+22). The hub fixes the bridge, and its nudge-watcher catches deaf leads
+deterministically.
 
 See the `alfred-wake` section of the plugin README for configuration, state
 layout, and how to verify with `alfred-wake check`.

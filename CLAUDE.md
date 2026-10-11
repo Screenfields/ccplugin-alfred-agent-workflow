@@ -77,8 +77,10 @@ At the start of every session using this plugin, agents MUST, in this order:
    produces no model text at all. Do not arm it with `Monitor` (30-minute
    expiry, a re-arm turn each time, an unfinished task per re-arm).
 
-   **Fall back to `/loop 15m /alfred-agent:check-messages` only if the wait
-   cannot run at all**, and say so in one line.
+   **Never fall back to a `/loop` or any other periodic check-messages** — a
+   scheduled check may not consume tokens (platform doctrine 22). If the wait
+   cannot run, tell the user once and notify `alfred-platform` ("wake bridge
+   down on <agent_id>"); see "Bridge down" in `commands/check-messages.md`.
 
 2. **Run `/alfred-agent:check-messages` once** to pick up anything that arrived
    before the bridge came up. The bridge seeds its cursors on first run and

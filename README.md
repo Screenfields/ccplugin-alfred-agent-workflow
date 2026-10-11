@@ -147,9 +147,11 @@ Only one `wait`/`run` runs per state dir. Starting a new one stops the previous
 one (SIGTERM, then SIGKILL after `ALFRED_WAKE_STOP_GRACE` seconds), which prints
 `WAKE-STOPPED replaced by=<pid>` and exits 0.
 
-Fall back to `/loop 15m /alfred-agent:check-messages` **only** when arming
-fails, and say so — a silent fallback is indistinguishable from a working
-bridge.
+There is no polling fallback: a scheduled check may not consume tokens
+(platform doctrine 22). If the wait cannot start, or `WAKE-ERROR
+agent-messaging` repeats, the session tells the user once and messages
+`alfred-platform` ("wake bridge down on <agent_id>"); the hub's nudge-watcher
+catches deaf leads deterministically.
 
 ### Verifying it
 
