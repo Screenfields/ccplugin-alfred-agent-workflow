@@ -93,6 +93,27 @@ no_leftovers() {
   no_leftovers
 }
 
+@test "a first wait over a non-empty inbox reports the backlog once, then stays quiet" {
+  inbox m1:bob m2:carol
+  run timeout 5 "$WAKE" wait
+  [ "$status" -eq 0 ]
+  [ "$output" = "WAKE am unread=2 from=bob,carol pending-at-start" ]
+
+  start a wait
+  sleep 2.5
+  alive "$a_pid"
+  [ -z "$(out_of a)" ]
+}
+
+@test "legacy run still seeds with WAKE-INIT only, never a pending-at-start line" {
+  inbox m1:bob
+  start a run
+  until_true 30 test -s "$BATS_TEST_TMPDIR/a.out"
+  sleep 1.5
+  [ "$(out_of a | cut -d' ' -f1)" = "WAKE-INIT" ]
+  [ "$(out_of a | wc -l)" -eq 1 ]
+}
+
 @test "a relaunched wait does not re-report old unread mail, only new mail" {
   mkdir -p "$STATE" && touch "$STATE/.initialized"
   echo '{"unread_ids":["m1"]}' > "$STATE/am_state.json"

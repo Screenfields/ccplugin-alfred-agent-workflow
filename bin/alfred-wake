@@ -39,7 +39,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -425,6 +425,14 @@ check_agent_messaging() {
   if [ ! -f "$AM_STATE_FILE" ]; then
     write_json_state "$AM_STATE_FILE" "{\"unread_ids\": $current_ids}"
     diag "agent-messaging: seeded (unread=$total_unread)"
+    # A `wait` that seeds over a non-empty inbox reports it once: a lead that
+    # switches to the bridge mid-session, or whose state was wiped, has not
+    # necessarily called get_messages, and mail already unread at seed time
+    # would otherwise never wake it. History is still never replayed: only
+    # the count and senders, and only this once.
+    if [ "$WAIT_MODE" = "true" ] && [ "$total_unread" -gt 0 ]; then
+      echo "WAKE am unread=$total_unread from=$(printf '%s' "$structured" | jq -r '[.messages[].from_agent] | unique | join(",")') pending-at-start"
+    fi
     record_result "agent-messaging" true
     return
   fi
@@ -694,8 +702,11 @@ run_pass() {
     echo "WAKE-INIT alfred-wake armed at $(now_local_hm) state=$STATE_DIR buzz=$BUZZ_ENABLED"
     touch "$INIT_MARKER"
   else
-    # In `wait` mode a first run seeds silently: a seed is not news, and any
-    # line printed here would end the wait and spend a model turn on nothing.
+    # In `wait` mode a first run prints no WAKE-INIT: a seed is not news, and
+    # that line would end the wait and spend a model turn on nothing. Mail
+    # already unread at seed time is the exception (`pending-at-start` line
+    # from check_agent_messaging), so a backlog never sits behind an armed
+    # bridge.
     if [ "$first_run" = "true" ] && [ "$PERSIST" = "true" ]; then touch "$INIT_MARKER"; fi
     cat "$out"
   fi

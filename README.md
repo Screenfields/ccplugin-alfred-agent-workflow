@@ -168,7 +168,7 @@ it cannot swallow news that the running bridge should deliver.
 
 | Invocation | Behaviour |
 |---|---|
-| `alfred-wake wait [interval]` | One-shot: polls like `run`, prints the first news and exits 0 (2 if a `WAKE-ERROR` was printed). A first-ever run seeds cursors silently |
+| `alfred-wake wait [interval]` | One-shot: polls like `run`, prints the first news and exits 0 (2 if a `WAKE-ERROR` was printed). A first-ever run seeds cursors without a `WAKE-INIT` line, but reports mail already unread at that moment once (`pending-at-start`) |
 | `alfred-wake run --until-wake` | Same as `wait` |
 | `alfred-wake run [interval]` | Legacy watch loop for a `Monitor`. Default tick 20s (Buzz), agent-messaging every 60s with failure backoff to 600s |
 | `alfred-wake check` | One dry-run pass, diagnostics on stderr, exit 0 |
@@ -182,6 +182,7 @@ Only these shapes are ever printed to stdout. Anything else there is a bug.
 | Line | Meaning |
 |---|---|
 | `WAKE am unread=<n> from=<a,b>` | New unread agent-messaging item(s); `n` = current total unread |
+| `WAKE am unread=<n> from=<a,b> pending-at-start` | `wait` only: the inbox already had unread mail when the cursors were first seeded |
 | `WAKE buzz <label> new=<n> from=<…> last=<HH:MM TZ>` | New non-self posts in that Buzz channel |
 | `WAKE-INIT …` | Legacy `run` only, first ever run: cursors seeded, history deliberately not replayed |
 | `WAKE-ERROR <source>: <reason>` | A source failed 5 consecutive passes (repeats at most hourly) |
