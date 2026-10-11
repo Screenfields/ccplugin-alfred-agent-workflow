@@ -116,7 +116,7 @@ no_leftovers() {
 
 @test "a relaunched wait does not re-report old unread mail, only new mail" {
   mkdir -p "$STATE" && touch "$STATE/.initialized"
-  echo '{"unread_ids":["m1"]}' > "$STATE/am_state.json"
+  echo '{"cursor":"c1"}' > "$STATE/am_state.json"
   inbox m1:bob
   start a wait
   sleep 2.5
@@ -130,11 +130,59 @@ no_leftovers() {
 
 @test "mail that arrived between two waits wakes the next wait immediately" {
   mkdir -p "$STATE" && touch "$STATE/.initialized"
-  echo '{"unread_ids":[]}' > "$STATE/am_state.json"
+  echo '{"cursor":"c0"}' > "$STATE/am_state.json"
   inbox m1:bob
   run timeout 5 "$WAKE" run --until-wake
   [ "$status" -eq 0 ]
   [ "$output" = "WAKE am unread=1 from=bob" ]
+}
+
+@test "#849: with 8 unread and 1 new, exactly one wake naming only the new sender" {
+  mkdir -p "$STATE" && touch "$STATE/.initialized"
+  echo '{"cursor":"c7"}' > "$STATE/am_state.json"
+  inbox m1:a m2:b m3:c m4:d m5:e m6:f m7:g m8:zed
+  run timeout 5 "$WAKE" wait
+  [ "$status" -eq 0 ]
+  [ "$output" = "WAKE am unread=8 from=zed" ]
+
+  start a wait
+  sleep 2.5
+  alive "$a_pid"
+  [ -z "$(out_of a)" ]
+}
+
+@test "a cursor the server no longer knows is reseated without replaying history" {
+  mkdir -p "$STATE" && touch "$STATE/.initialized"
+  echo '{"cursor":"not-a-cursor"}' > "$STATE/am_state.json"
+  inbox m1:bob m2:carol
+  run timeout 5 "$WAKE" wait
+  [ "$status" -eq 0 ]
+  [ "$output" = "WAKE am unread=2 from=bob,carol cursor-reset" ]
+  [ "$(jq -r .cursor "$STATE/am_state.json")" = "c2" ]
+}
+
+@test "more new mail than one page: one wake, every page read, cursor at the end" {
+  local i ids=()
+  mkdir -p "$STATE" && touch "$STATE/.initialized"
+  echo '{"cursor":"c0"}' > "$STATE/am_state.json"
+  for i in $(seq 1 59); do ids+=("m$i:bulk"); done
+  inbox "${ids[@]}" m60:late
+  run timeout 10 "$WAKE" wait
+  [ "$status" -eq 0 ]
+  [ "$output" = "WAKE am unread=60 from=bulk,late" ]
+  [ "$(jq -r .cursor "$STATE/am_state.json")" = "c60" ]
+}
+
+@test "a server without the cursor API falls back to the window and is re-tried hourly" {
+  touch "$STUB_DIR/legacy"
+  start a wait
+  sleep 2.5
+  [ -z "$(out_of a)" ]
+  [ "$(cat "$STATE/alfred-wake.lock" >/dev/null; cat "$STATE/am_legacy_until")" -gt "$(date +%s)" ]
+  inbox m1:bob
+  reap "$a_pid"
+  [ "$rc" -eq 0 ]
+  [ "$(out_of a)" = "WAKE am unread=1 from=bob" ]
 }
 
 @test "wait exits 2 with a WAKE-ERROR line when agent-messaging fails" {

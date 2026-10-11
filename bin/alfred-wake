@@ -39,7 +39,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.1.1"
+VERSION="1.2.0"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -63,6 +63,7 @@ LOG_MAX_BYTES=1048576
 ARMED_MARKER="$STATE_DIR/armed"
 INIT_MARKER="$STATE_DIR/.initialized"
 AM_STATE_FILE="$STATE_DIR/am_state.json"
+AM_LEGACY_FILE="$STATE_DIR/am_legacy_until"
 FAILURES_FILE="$STATE_DIR/failures.json"
 BUZZ_IDENTITY_FILE="$STATE_DIR/buzz_identity.json"
 PID_FILE="$STATE_DIR/alfred-wake.pid"
@@ -115,6 +116,9 @@ AM_NEXT_AT=0
 AM_BACKOFF="$AM_INTERVAL"
 MCP_HTTP_CODE=0
 MCP_BODY=""
+AM_CFG=""
+AM_RESULT=""
+AM_ERR=""
 
 TAB=$'\t'
 
@@ -385,73 +389,179 @@ am_write_auth_headers() {
   return 0
 }
 
-check_agent_messaging() {
-  local workdir cfg
-  workdir=$(new_curl_workdir) || { record_result "agent-messaging" false "cannot create temp dir"; return; }
-  cfg="$workdir/curl.cfg"
-  # shellcheck disable=SC2064
-  trap "rm -rf '$workdir'" RETURN
-
-  if ! am_write_auth_headers "$cfg"; then
-    record_result "agent-messaging" false "no credential: set AGENT_MESSAGING_TOKEN (or ALFRED_WAKE_MCP_JSON)"
-    return
+# One get_messages call through the open MCP session. Sets AM_RESULT to the
+# structured payload. Returns 1 on transport/shape errors (AM_ERR says which)
+# and 2 when the server rejects an argument it does not know yet (an
+# agent-messaging deploy without the cursor API).
+am_call() {
+  local args="$1" structured
+  AM_RESULT=""
+  if ! mcp_tool_call "$AM_URL" "$AM_CFG" "get_messages" "$args"; then
+    AM_ERR="get_messages http $MCP_HTTP_CODE"
+    return 1
   fi
-
-  if ! mcp_initialize "$AM_URL" "$cfg" "$workdir" "alfred-wake"; then
-    record_result "agent-messaging" false "initialize http $MCP_HTTP_CODE"
-    return
+  if printf '%s' "$MCP_BODY" | jq -e '.result.isError == true' >/dev/null 2>&1; then
+    if printf '%s' "$MCP_BODY" | grep -qiE 'unexpected.keyword'; then return 2; fi
+    AM_ERR="get_messages returned an error"
+    return 1
   fi
-
-  if ! mcp_tool_call "$AM_URL" "$cfg" "get_messages" \
-      '{"unread_only":true,"limit":5,"preview_chars":0}'; then
-    record_result "agent-messaging" false "get_messages http $MCP_HTTP_CODE"
-    return
-  fi
-
-  local structured
   structured=$(printf '%s' "$MCP_BODY" | jq -c '.result.structuredContent // empty' 2>/dev/null)
   if [ -z "$structured" ] || [ "$structured" = "null" ]; then
     structured=$(mcp_items "$MCP_BODY" | jq -c '.[0] // empty' 2>/dev/null)
   fi
   if [ -z "$structured" ] || ! printf '%s' "$structured" | jq -e '.messages? != null' >/dev/null 2>&1; then
-    record_result "agent-messaging" false "unrecognised get_messages response shape"
-    return
+    AM_ERR="unrecognised get_messages response shape"
+    return 1
   fi
+  AM_RESULT="$structured"
+  return 0
+}
 
-  local total_unread current_ids
-  total_unread=$(printf '%s' "$structured" | jq -r '.total_unread // (.messages | length)')
-  current_ids=$(printf '%s' "$structured" | jq -c '[.messages[]?.id] | sort')
+# Senders of up to 5 unread messages, for a pending line.
+am_pending_senders() {
+  if am_call '{"unread_only":true,"limit":5,"include_body":false}'; then
+    printf '%s' "$AM_RESULT" | jq -r '[.messages[].from_agent] | unique | join(",")'
+  fi
+}
 
-  if [ ! -f "$AM_STATE_FILE" ]; then
-    write_json_state "$AM_STATE_FILE" "{\"unread_ids\": $current_ids}"
-    diag "agent-messaging: seeded (unread=$total_unread)"
+# Cursor pass (alfred-platform#849): ask the server for exactly the messages
+# after our stored position, so a backlog of any size can neither replay nor
+# hide a wake. Contract agreed with the agent-messaging lead:
+#   get_messages(since, limit, include_body:false)
+#     -> {messages (ascending), total_unread, next_cursor, has_more, cursor_reset}
+#   limit:0 without since seeds next_cursor at the high-water mark.
+# Returns like am_call (2 = server has no cursor API yet).
+am_cursor_pass() {
+  local state cursor total next reset args n from="" new_count=0 pages=0 rc
+  state=$(read_json_state "$AM_STATE_FILE" '{}')
+  cursor=$(printf '%s' "$state" | jq -r '.cursor // empty')
+
+  if [ -z "$cursor" ]; then
+    am_call '{"unread_only":true,"limit":0,"include_body":false}' || return $?
+    next=$(printf '%s' "$AM_RESULT" | jq -r '.next_cursor // empty')
+    [ -n "$next" ] || return 2
+    total=$(printf '%s' "$AM_RESULT" | jq -r '.total_unread // 0')
+    write_json_state "$AM_STATE_FILE" "$(jq -cn --arg c "$next" '{cursor:$c}')"
+    diag "agent-messaging: seeded cursor (unread=$total)"
     # A `wait` that seeds over a non-empty inbox reports it once: a lead that
-    # switches to the bridge mid-session, or whose state was wiped, has not
-    # necessarily called get_messages, and mail already unread at seed time
-    # would otherwise never wake it. History is still never replayed: only
-    # the count and senders, and only this once.
-    if [ "$WAIT_MODE" = "true" ] && [ "$total_unread" -gt 0 ]; then
-      echo "WAKE am unread=$total_unread from=$(printf '%s' "$structured" | jq -r '[.messages[].from_agent] | unique | join(",")') pending-at-start"
+    # switched to the bridge mid-session, or lost its state, has not
+    # necessarily called get_messages. Count and senders only, never history.
+    if [ "$WAIT_MODE" = "true" ] && [ "$total" -gt 0 ]; then
+      echo "WAKE am unread=$total from=$(am_pending_senders) pending-at-start"
     fi
-    record_result "agent-messaging" true
-    return
+    return 0
   fi
 
-  local prev_ids new_ids new_count from_list
-  prev_ids=$(jq -c '.unread_ids // []' "$AM_STATE_FILE" 2>/dev/null || echo '[]')
+  while :; do
+    args=$(jq -cn --arg c "$cursor" '{unread_only:true,limit:50,include_body:false,since:$c}')
+    am_call "$args"
+    rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    reset=$(printf '%s' "$AM_RESULT" | jq -r '.cursor_reset // false')
+    next=$(printf '%s' "$AM_RESULT" | jq -r '.next_cursor // empty')
+    total=$(printf '%s' "$AM_RESULT" | jq -r '.total_unread // 0')
+    [ -n "$next" ] || { AM_ERR="get_messages returned no next_cursor"; return 1; }
+    if [ "$reset" = "true" ]; then
+      # The server no longer knows our position: never replay, reseat and
+      # report what is pending.
+      write_json_state "$AM_STATE_FILE" "$(jq -cn --arg c "$next" '{cursor:$c}')"
+      if [ "$total" -gt 0 ]; then echo "WAKE am unread=$total from=$(am_pending_senders) cursor-reset"; fi
+      return 0
+    fi
+    n=$(printf '%s' "$AM_RESULT" | jq '.messages | length')
+    new_count=$((new_count + n))
+    from="$from $(printf '%s' "$AM_RESULT" | jq -r '[.messages[].from_agent] | join(" ")')"
+    cursor="$next"
+    pages=$((pages + 1))
+    if [ "$(printf '%s' "$AM_RESULT" | jq -r '.has_more // false')" != "true" ] || [ "$pages" -ge 20 ]; then break; fi
+  done
+
+  write_json_state "$AM_STATE_FILE" "$(jq -cn --arg c "$cursor" '{cursor:$c}')"
+  if [ "$new_count" -gt 0 ]; then
+    from=$(printf '%s' "$from" | tr ' ' '\n' | grep -v '^$' | sort -u | paste -sd, -)
+    echo "WAKE am unread=$total from=$from"
+  else
+    diag "agent-messaging: nothing new (unread=$total)"
+  fi
+  return 0
+}
+
+# Legacy pass for agent-messaging deploys without the cursor API: diff the
+# ids of a 5-message window. Misses or replays wakes once more than 5 are
+# unread (alfred-platform#849); kept only as a fallback.
+am_window_pass() {
+  local state current_ids total_unread prev_ids new_ids new_count from_list
+  am_call '{"unread_only":true,"limit":5,"preview_chars":0}' || return $?
+  total_unread=$(printf '%s' "$AM_RESULT" | jq -r '.total_unread // (.messages | length)')
+  current_ids=$(printf '%s' "$AM_RESULT" | jq -c '[.messages[]?.id] | sort')
+  state=$(read_json_state "$AM_STATE_FILE" '{}')
+
+  if ! printf '%s' "$state" | jq -e 'has("unread_ids")' >/dev/null 2>&1; then
+    write_json_state "$AM_STATE_FILE" "{\"unread_ids\": $current_ids}"
+    diag "agent-messaging: seeded window (unread=$total_unread)"
+    if [ "$WAIT_MODE" = "true" ] && [ "$total_unread" -gt 0 ]; then
+      echo "WAKE am unread=$total_unread from=$(printf '%s' "$AM_RESULT" | jq -r '[.messages[].from_agent] | unique | join(",")') pending-at-start"
+    fi
+    return 0
+  fi
+
+  prev_ids=$(printf '%s' "$state" | jq -c '.unread_ids // []')
   new_ids=$(jq -cn --argjson cur "$current_ids" --argjson prev "$prev_ids" '$cur - $prev')
   new_count=$(printf '%s' "$new_ids" | jq 'length')
-
   if [ "$new_count" -gt 0 ]; then
-    from_list=$(printf '%s' "$structured" | jq -r --argjson newids "$new_ids" \
+    from_list=$(printf '%s' "$AM_RESULT" | jq -r --argjson newids "$new_ids" \
       '[.messages[] | select(.id as $i | $newids | index($i)) | .from_agent] | unique | join(",")')
     echo "WAKE am unread=$total_unread from=$from_list"
   else
     diag "agent-messaging: nothing new (unread=$total_unread)"
   fi
-
   write_json_state "$AM_STATE_FILE" "{\"unread_ids\": $current_ids}"
-  record_result "agent-messaging" true
+  return 0
+}
+
+check_agent_messaging() {
+  local workdir rc now legacy_until
+  workdir=$(new_curl_workdir) || { record_result "agent-messaging" false "cannot create temp dir"; return; }
+  AM_CFG="$workdir/curl.cfg"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$workdir'" RETURN
+
+  if ! am_write_auth_headers "$AM_CFG"; then
+    record_result "agent-messaging" false "no credential: set AGENT_MESSAGING_TOKEN (or ALFRED_WAKE_MCP_JSON)"
+    return
+  fi
+
+  if ! mcp_initialize "$AM_URL" "$AM_CFG" "$workdir" "alfred-wake"; then
+    record_result "agent-messaging" false "initialize http $MCP_HTTP_CODE"
+    return
+  fi
+
+  # A server without the cursor API is re-tried at most hourly, so an old
+  # deploy costs one extra call per hour, not one per pass.
+  now=$(now_epoch)
+  legacy_until=$(cat "$AM_LEGACY_FILE" 2>/dev/null || echo 0)
+  [[ "$legacy_until" =~ ^[0-9]+$ ]] || legacy_until=0
+  rc=2
+  if [ "$now" -ge "$legacy_until" ]; then
+    am_cursor_pass
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      diag "agent-messaging: no cursor API on this server - using the 5-message window"
+      [ "$PERSIST" = "true" ] && printf '%s' $((now + 3600)) > "$AM_LEGACY_FILE"
+    elif [ "$rc" -eq 0 ]; then
+      rm -f "$AM_LEGACY_FILE"
+    fi
+  fi
+  if [ "$rc" -eq 2 ]; then
+    am_window_pass
+    rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    record_result "agent-messaging" true
+  else
+    record_result "agent-messaging" false "${AM_ERR:-get_messages failed}"
+  fi
 }
 
 # ---------------------------------------------------------------------------

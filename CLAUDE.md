@@ -113,6 +113,10 @@ Invariants to preserve when editing it:
   `run.<pid>` dir under the state dir that is removed on every exit path.
 - **`status` means a live process.** Never go back to judging "armed" from
   marker-file freshness: a marker stays fresh for minutes after the loop died.
+- **agent-messaging is read by cursor, not by window.** `get_messages(since,
+  include_body:false)` returns exactly what arrived after the stored
+  `next_cursor`; `cursor_reset` reseats without replaying. Never go back to
+  diffing a fixed window except as the fallback for servers without the API.
 - **Cursors live on the workspace volume** (`/workspace/.alfred-wake` when
   writable) so a pod restart never replays history.
 - **shellcheck-clean and tested** — CI runs shellcheck and `bats tests/`
