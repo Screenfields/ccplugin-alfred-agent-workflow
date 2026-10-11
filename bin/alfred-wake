@@ -1,20 +1,28 @@
 #!/usr/bin/env bash
 # alfred-wake — deterministic, no-LLM inbox wake bridge for Alfred lead agents.
 #
-# A lead's Claude Code session arms this as a persistent Monitor. It watches the
-# lead's agent-messaging inbox (and, when the pod has a Buzz identity, the
-# lead's Buzz channels) and prints ONE stdout line per source per pass, ONLY
-# when there is genuinely new news. The harness turns each printed line into a
-# wake-up for the session. Silence means nothing new — and silence costs no
-# tokens, which is the whole point: it replaces the 15-minute
-# `/loop 15m /alfred-agent:check-messages` cron (~96 empty model turns/day).
+# A lead's Claude Code session runs `alfred-wake wait` as a background Bash
+# task. It watches the lead's agent-messaging inbox (and, when the pod has a
+# Buzz identity, the lead's Buzz channels) and stays completely silent until
+# there is genuinely new news; then it prints the news line(s) and exits. The
+# harness re-invokes the session on that exit, the session handles the news
+# and starts a fresh `wait`. Silence costs no tokens: no 30-minute Monitor
+# expiry, no re-arm turn, no unfinished task left behind per re-arm.
 #
 # Modes:
+#   alfred-wake wait [interval]  one-shot: block until the first news, print it,
+#                                exit 0 (exit 2 if a WAKE-ERROR was printed)
+#   alfred-wake run --until-wake same as `wait`
+#   alfred-wake run [interval]   loop forever (legacy Monitor mode)
 #   alfred-wake check            one pass, DRY RUN (never writes cursors),
 #                                diagnostics on stderr, events on stdout
-#   alfred-wake run [interval]   loop forever (default tick 20s)
 #   alfred-wake install          symlink this script into ~/.local/bin
-#   alfred-wake status           show config + whether a run is currently armed
+#   alfred-wake status           show config; exit 0 only while a live
+#                                wait/run process holds the pidfile
+#
+# Single instance: `wait` and `run` share one pidfile per state dir (one state
+# dir per identity on a devbox). A new instance SIGTERMs the previous one,
+# waits up to ALFRED_WAKE_STOP_GRACE seconds, then SIGKILLs it.
 #
 # Security invariants:
 #   - No token, header value, private key or message body is ever printed,
@@ -31,7 +39,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -57,6 +65,8 @@ INIT_MARKER="$STATE_DIR/.initialized"
 AM_STATE_FILE="$STATE_DIR/am_state.json"
 FAILURES_FILE="$STATE_DIR/failures.json"
 BUZZ_IDENTITY_FILE="$STATE_DIR/buzz_identity.json"
+PID_FILE="$STATE_DIR/alfred-wake.pid"
+LOCK_FILE="$STATE_DIR/alfred-wake.lock"
 
 # ---------------------------------------------------------------------------
 # agent-messaging configuration
@@ -86,12 +96,16 @@ BUZZ_CHANNEL_REFRESH_S="${ALFRED_WAKE_BUZZ_CHANNEL_REFRESH:-900}"
 DEFAULT_INTERVAL="${ALFRED_WAKE_INTERVAL:-20}"
 HTTP_TIMEOUT="${ALFRED_WAKE_HTTP_TIMEOUT:-25}"
 FETCH_LIMIT=50
-FAIL_THRESHOLD=5
+FAIL_THRESHOLD="${ALFRED_WAKE_FAIL_THRESHOLD:-5}"
 ERROR_REPEAT_S=3600
+STOP_GRACE_S="${ALFRED_WAKE_STOP_GRACE:-5}"
 TZ_LOCAL="${ALFRED_WAKE_TZ:-Europe/Amsterdam}"
 
 # Runtime flags
 PERSIST=true          # `check` flips this to false — a dry run must not eat news
+WAIT_MODE=false       # `wait` flips this: exit after the first pass with news
+CHILD_PID=""          # the pass or sleep currently being waited on
+RUN_TMP=""            # private per-process temp dir (holds curl auth configs)
 BUZZ_ENABLED=false
 BUZZ_SKIP_LOGGED=false
 BUZZ_SELF_PUBKEY=""
@@ -674,12 +688,15 @@ run_pass() {
     } > "$out"
   fi
 
-  if [ "$first_run" = "true" ] && [ "$PERSIST" = "true" ]; then
+  if [ "$first_run" = "true" ] && [ "$PERSIST" = "true" ] && [ "$WAIT_MODE" = "false" ]; then
     # First ever run: cursors are seeded, history is never replayed into the
     # session. One line so the lead knows the bridge came up.
     echo "WAKE-INIT alfred-wake armed at $(now_local_hm) state=$STATE_DIR buzz=$BUZZ_ENABLED"
     touch "$INIT_MARKER"
   else
+    # In `wait` mode a first run seeds silently: a seed is not news, and any
+    # line printed here would end the wait and spend a model turn on nothing.
+    if [ "$first_run" = "true" ] && [ "$PERSIST" = "true" ]; then touch "$INIT_MARKER"; fi
     cat "$out"
   fi
 
@@ -687,6 +704,113 @@ run_pass() {
   log_line "pass: am=$do_am events=$n_events first_run=$first_run"
   rm -f "$out"
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# Process control: single instance, clean shutdown
+# ---------------------------------------------------------------------------
+
+# True when <pid> is a live `alfred-wake wait|run` process. A bare `kill -0`
+# is not enough: a zombie or a recycled PID would pass it, which is exactly how
+# the old marker-only `status` reported a dead bridge as armed.
+is_wake_pid() {
+  local pid="$1" cmdline
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) || return 1
+  [[ "$cmdline" =~ alfred-wake\ (wait|run)( |$) ]]
+}
+
+# Kill <pid> and everything below it (curl, sleep, the pass subshell),
+# deepest first so nothing is re-parented to init and left running.
+kill_tree() {
+  local pid="$1" sig="${2:-TERM}" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_tree "$child" "$sig"
+  done
+  kill "-$sig" "$pid" 2>/dev/null || true
+}
+
+# Become the only wait/run for this state dir. Serialised with flock so two
+# instances started together cannot both win.
+take_over() {
+  local old waited=0 limit=$((STOP_GRACE_S * 10)) dir
+  exec 9>"$LOCK_FILE"
+  flock -w $((STOP_GRACE_S + 10)) 9 2>/dev/null || true
+
+  old=$(cat "$PID_FILE" 2>/dev/null || true)
+  if [ "$old" != "$$" ] && is_wake_pid "$old"; then
+    # Tell the old instance why it is stopping, so it reports `replaced`
+    # (which the session ignores) rather than an unexplained signal.
+    printf '%s' "$$" > "$STATE_DIR/replaced_by.$old"
+    kill -TERM "$old" 2>/dev/null || true
+    while is_wake_pid "$old" && [ "$waited" -lt "$limit" ]; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if is_wake_pid "$old"; then
+      kill_tree "$old" KILL
+      log_line "previous instance $old ignored SIGTERM for ${STOP_GRACE_S}s — SIGKILLed"
+    else
+      log_line "previous instance $old stopped"
+    fi
+    rm -f "$STATE_DIR/replaced_by.$old"
+  fi
+
+  # Temp dirs of instances that died without cleaning up (SIGKILL, OOM).
+  for dir in "$STATE_DIR"/run.*; do
+    [ -d "$dir" ] || continue
+    is_wake_pid "${dir##*.}" || rm -rf "$dir"
+  done
+
+  printf '%s\n' "$$" > "$PID_FILE"
+  flock -u 9 2>/dev/null || true
+  exec 9>&-
+}
+
+release_pidfile() {
+  if [ "$(cat "$PID_FILE" 2>/dev/null)" = "$$" ]; then rm -f "$PID_FILE"; fi
+}
+
+# Everything this process may have left on disk. Cursors need no flush: each
+# one is written with an atomic rename at the end of the pass that produced
+# it, so stopping mid-pass at worst re-reports that pass's news next time —
+# it never loses it.
+cleanup_files() {
+  if [ -n "$RUN_TMP" ]; then rm -rf "$RUN_TMP"; fi
+  rm -f "$STATE_DIR"/*.json.?????? 2>/dev/null || true
+  release_pidfile
+}
+
+on_signal() {
+  local sig="$1" reason marker="$STATE_DIR/replaced_by.$$"
+  trap '' TERM INT HUP
+  if [ -n "$CHILD_PID" ]; then
+    kill_tree "$CHILD_PID" TERM
+    wait "$CHILD_PID" 2>/dev/null || true
+  fi
+  if [ -f "$marker" ]; then
+    reason="replaced by=$(cat "$marker" 2>/dev/null)"
+    rm -f "$marker"
+  else
+    reason="signal=$sig"
+  fi
+  cleanup_files
+  log_line "stopped ($reason)"
+  # Only `wait` reports its stop on stdout: its caller gets exactly one line.
+  # A legacy `run` Monitor would turn the line into a pointless wake.
+  if [ "$WAIT_MODE" = "true" ]; then echo "WAKE-STOPPED $reason"; fi
+  exit 0
+}
+
+# Run a command as a waited background child. `wait` returns as soon as a
+# trapped signal arrives, so shutdown takes well under a second instead of
+# waiting out a 25s curl or a 20s sleep in the foreground.
+run_child() {
+  "$@" &
+  CHILD_PID=$!
+  wait "$CHILD_PID" 2>/dev/null
+  CHILD_PID=""
 }
 
 # ---------------------------------------------------------------------------
@@ -721,8 +845,24 @@ cmd_run() {
     interval="$DEFAULT_INTERVAL"
   fi
   ensure_state_dir || exit 1
-  trap 'log_line "stopped"; exit 0' TERM INT
-  log_line "started (tick=${interval}s am_interval=${AM_INTERVAL}s state=$STATE_DIR)"
+  if ! command -v flock >/dev/null 2>&1 || ! command -v pgrep >/dev/null 2>&1; then
+    echo "WAKE-ERROR alfred-wake: requires flock and pgrep (util-linux, procps)"
+    exit 2
+  fi
+  trap 'on_signal TERM' TERM
+  trap 'on_signal INT' INT
+  trap 'on_signal HUP' HUP
+  take_over
+
+  # curl auth configs live here, not in /tmp, so a killed pass can never
+  # leave a bearer token behind outside the private state dir.
+  RUN_TMP="$STATE_DIR/run.$$"
+  mkdir -p "$RUN_TMP" && chmod 700 "$RUN_TMP"
+  export TMPDIR="$RUN_TMP"
+
+  local mode="run"
+  if [ "$WAIT_MODE" = "true" ]; then mode="wait"; fi
+  log_line "started $mode (pid=$$ tick=${interval}s am_interval=${AM_INTERVAL}s state=$STATE_DIR)"
 
   if buzz_probe; then BUZZ_ENABLED=true; else BUZZ_ENABLED=false; fi
 
@@ -730,7 +870,7 @@ cmd_run() {
   AM_NEXT_AT=0
   local buzz_reprobe_at=$(( $(now_epoch) + BUZZ_CHANNEL_REFRESH_S ))
 
-  local now do_am consecutive
+  local now do_am consecutive news="$RUN_TMP/news" rc
   while true; do
     now=$(now_epoch)
     do_am=false
@@ -746,7 +886,19 @@ cmd_run() {
     fi
 
     touch "$ARMED_MARKER" 2>/dev/null || true
-    run_pass "$do_am"
+    if [ "$WAIT_MODE" = "true" ]; then
+      run_child run_pass_to "$news" "$do_am"
+      if [ -s "$news" ]; then
+        cat "$news"
+        rc=0
+        if grep -q '^WAKE-ERROR' "$news"; then rc=2; fi
+        cleanup_files
+        log_line "wait: news delivered, exit $rc"
+        exit "$rc"
+      fi
+    else
+      run_child run_pass "$do_am"
+    fi
 
     if [ "$do_am" = "true" ]; then
       # Backoff on failure only: agent-messaging offers no push, and a broken
@@ -761,8 +913,19 @@ cmd_run() {
       AM_NEXT_AT=$(( $(now_epoch) + AM_BACKOFF ))
     fi
 
-    sleep "$interval"
+    run_child sleep "$interval"
   done
+}
+
+run_pass_to() {
+  local file="$1"
+  shift
+  run_pass "$@" > "$file"
+}
+
+cmd_wait() {
+  WAIT_MODE=true
+  cmd_run "$@"
 }
 
 cmd_install() {
@@ -783,22 +946,28 @@ cmd_install() {
 }
 
 cmd_status() {
-  local age
+  local age pid
   echo "alfred-wake $VERSION"
   echo "state dir:  $STATE_DIR"
   echo "am url:     $AM_URL"
   echo "am auth:    $(am_auth_mode)"
   echo "buzz mode:  $BUZZ_MODE (url $BUZZ_MCP_URL)"
+  # Armed means a live process, not a fresh marker: a marker stays fresh for
+  # minutes after the loop died, which is the window in which news is missed.
+  pid=$(cat "$PID_FILE" 2>/dev/null || true)
+  age="never"
   if [ -f "$ARMED_MARKER" ]; then
-    age=$(( $(now_epoch) - $(stat -c %Y "$ARMED_MARKER" 2>/dev/null || echo 0) ))
-    if [ "$age" -le 300 ]; then
-      echo "armed:      yes (last pass ${age}s ago)"
-      exit 0
-    fi
-    echo "armed:      STALE (last pass ${age}s ago)"
-    exit 1
+    age="$(( $(now_epoch) - $(stat -c %Y "$ARMED_MARKER" 2>/dev/null || echo 0) ))s ago"
   fi
-  echo "armed:      no"
+  if is_wake_pid "$pid"; then
+    echo "armed:      yes (pid $pid, last pass $age)"
+    exit 0
+  fi
+  if [ -n "$pid" ]; then
+    echo "armed:      no (pid $pid is not running; last pass $age)"
+  else
+    echo "armed:      no"
+  fi
   exit 1
 }
 
@@ -807,14 +976,16 @@ usage() {
 alfred-wake — deterministic inbox wake bridge for Alfred lead agents
 
 Usage:
+  alfred-wake wait [interval]    block until news, print it, exit (0; 2 on WAKE-ERROR)
+  alfred-wake run --until-wake   same as wait
+  alfred-wake run [interval]     legacy watch loop for a Monitor (default tick 20s)
   alfred-wake check              one dry-run pass (no cursor writes); diagnostics on stderr
-  alfred-wake run [interval]     watch loop (default tick 20s) — arm this as a Monitor
   alfred-wake install            symlink into ~/.local/bin
-  alfred-wake status             show config + whether a run is currently armed
+  alfred-wake status             show config; exit 0 only while a wait/run is alive
 
-Arm it from a lead session, before anything else:
-  Monitor(command: "alfred-wake run", persistent: true,
-          description: "inbox wake: agent-messaging + Buzz")
+Arm it from a lead session as a background Bash task, and start it again
+after handling each wake:
+  Bash(command: "alfred-wake wait", run_in_background: true)
 EOF
 }
 
@@ -825,7 +996,10 @@ main() {
   fi
   case "${1:-}" in
     check)   cmd_check ;;
-    run)     cmd_run "${2:-}" ;;
+    wait)    cmd_wait "${2:-}" ;;
+    run)
+      if [ "${2:-}" = "--until-wake" ]; then cmd_wait "${3:-}"; else cmd_run "${2:-}"; fi
+      ;;
     install) cmd_install ;;
     status)  cmd_status ;;
     -h|--help|help|'') usage; exit 0 ;;

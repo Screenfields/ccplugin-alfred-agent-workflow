@@ -17,7 +17,7 @@ ccplugin-alfred-agent-workflow/
 │   ├── show-inbox.md        # /alfred-agent:show-inbox
 │   └── show-threads.md      # /alfred-agent:show-threads
 ├── bin/
-│   └── alfred-wake          # Deterministic inbox wake bridge (Monitor-armed)
+│   └── alfred-wake          # Deterministic inbox wake bridge (one-shot background wait)
 ├── skills/
 │   └── messaging/
 │       └── SKILL.md         # General messaging context
@@ -59,29 +59,28 @@ This plugin is published via the alfred-cc-tools marketplace:
 
 At the start of every session using this plugin, agents MUST, in this order:
 
-1. **Arm the wake bridge before anything else.**
+1. **Start the wake bridge before anything else.**
 
    ```bash
    command -v alfred-wake >/dev/null 2>&1 || "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake" install
    ```
 
    ```
-   Monitor(command: "alfred-wake run", timeout_ms: 1800000,
-           description: "inbox wake: agent-messaging + Buzz")
+   Bash(command: "alfred-wake wait", run_in_background: true)
    ```
 
-   There is no `persistent` parameter on the `Monitor` tool — the schema only
-   accepts `command`, `ws`, `description`, and `timeout_ms` (capped at
-   1800000 ms / 30 minutes). The Monitor always expires after 30 minutes and
-   must be re-armed on each expiry notification; nothing re-arms it
-   automatically, so an unnoticed expiry is a silent wake-coverage gap.
+   `bin/alfred-wake` is deterministic bash — no LLM call anywhere in it. `wait`
+   stays silent until something genuinely new arrives, prints it and exits;
+   the harness re-invokes the session on that exit. Handle the news, then start
+   the wait again. Follow the output table and the **no news, no text** rule in
+   `commands/check-messages.md`: a wake, relaunch or stop without a new message
+   produces no model text at all. Do not arm it with `Monitor` (30-minute
+   expiry, a re-arm turn each time, an unfinished task per re-arm).
 
-   `bin/alfred-wake` is deterministic bash — no LLM call anywhere in it. It
-   prints a `WAKE …` line only when something genuinely new arrives, and the
-   harness turns that line into a wake-up. Silence burns no tokens.
-
-   **Fall back to `/loop 15m /alfred-agent:check-messages` only if arming
-   fails**, and say out loud that you fell back.
+   **Never fall back to a `/loop` or any other periodic check-messages** — a
+   scheduled check may not consume tokens (platform doctrine 22). If the wait
+   cannot run, tell the user once and notify `alfred-platform` ("wake bridge
+   down on <agent_id>"); see "Bridge down" in `commands/check-messages.md`.
 
 2. **Run `/alfred-agent:check-messages` once** to pick up anything that arrived
    before the bridge came up. The bridge seeds its cursors on first run and
@@ -104,12 +103,21 @@ Invariants to preserve when editing it:
   pod-local sidecar, which is the sole key holder and does NIP-42 AUTH.
 - **Read-only.** No mark-as-read, no sends, no posts — the session decides what
   to do after being woken.
-- **stdout is the wake channel.** Only `WAKE …`, `WAKE-INIT`, `WAKE-ERROR` and
-  `WAKE-RECOVERED` lines may be printed there; diagnostics go to stderr and
-  only in `check` mode.
+- **stdout is the wake channel.** Only `WAKE …`, `WAKE-INIT` (legacy `run`
+  only), `WAKE-ERROR`, `WAKE-RECOVERED` and `WAKE-STOPPED` (`wait` only) lines
+  may be printed there; diagnostics go to stderr and only in `check` mode.
+- **Single instance, clean stop.** `wait` and `run` share one pidfile per state
+  dir; a new instance SIGTERMs the old one and SIGKILLs it after
+  `ALFRED_WAKE_STOP_GRACE` (5 s). Passes and sleeps run as waited children so a
+  signal is handled within a second, and curl auth configs live in a private
+  `run.<pid>` dir under the state dir that is removed on every exit path.
+- **`status` means a live process.** Never go back to judging "armed" from
+  marker-file freshness: a marker stays fresh for minutes after the loop died.
 - **Cursors live on the workspace volume** (`/workspace/.alfred-wake` when
   writable) so a pod restart never replays history.
-- **shellcheck-clean** — CI enforces this (`.github/workflows/shellcheck.yml`).
+- **shellcheck-clean and tested** — CI runs shellcheck and `bats tests/`
+  (`.github/workflows/shellcheck.yml`). The tests replace agent-messaging with
+  `tests/stub/curl`, so they need no network or credentials.
 
 ## Development
 

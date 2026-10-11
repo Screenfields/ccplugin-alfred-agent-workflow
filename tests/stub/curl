@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Test double for curl. Answers alfred-wake's MCP calls from files in
+# $STUB_DIR, mimicking `curl -w '\n%{http_code}'` output:
+#   inbox.json  structuredContent returned by get_messages
+#   fail        present → every call answers HTTP 500
+#   slow        present → sleep <its content> seconds first (a hung request)
+hdr="" body=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -D) hdr="$2"; shift 2 ;;
+    -d) body="$2"; shift 2 ;;
+    -K|-w|-X) shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+if [ -f "$STUB_DIR/slow" ]; then sleep "$(cat "$STUB_DIR/slow")"; fi
+if [ -n "$hdr" ]; then printf 'HTTP/1.1 200 OK\r\n' > "$hdr"; fi
+if [ -f "$STUB_DIR/fail" ]; then printf '{}\n500'; exit 0; fi
+
+case "$body" in
+  *'"method":"initialize"'*)
+    printf '{"jsonrpc":"2.0","id":1,"result":{}}\n200' ;;
+  *'notifications/initialized'*)
+    printf '\n202' ;;
+  *'"name":"get_messages"'*)
+    printf '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":%s}}\n200' "$(cat "$STUB_DIR/inbox.json")" ;;
+  *)
+    printf '{}\n404' ;;
+esac

@@ -11,11 +11,13 @@ on:
   pull_request:
     paths:
       - 'bin/**'
+      - 'tests/**'
       - '.github/workflows/shellcheck.yml'
   push:
     branches: [main]
     paths:
       - 'bin/**'
+      - 'tests/**'
       - '.github/workflows/shellcheck.yml'
 
 permissions:
@@ -30,8 +32,8 @@ jobs:
       - name: shellcheck version
         run: shellcheck --version
 
-      - name: Lint shipped scripts
-        run: shellcheck bin/*
+      - name: Lint shipped scripts and test helpers
+        run: shellcheck bin/* tests/stub/*
 
       - name: Syntax check
         run: |
@@ -53,3 +55,14 @@ jobs:
             fi
           done
           exit $status
+
+  bats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats
+        run: sudo apt-get update -q && sudo apt-get install -y -q bats
+
+      - name: Behaviour tests (stubbed agent-messaging, no network)
+        run: bats tests/
