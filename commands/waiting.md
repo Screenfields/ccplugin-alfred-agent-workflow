@@ -2,7 +2,7 @@
 description: >
   Guided walkthrough of everything that is waiting on the human owner — decisions, approvals and
   actions only they can take. Presents one item at a time in plain language, lays out the options
-  with pros and cons and a clear recommendation, gives step-by-step instructions with direct links,
+  with pros and cons, the functional benefit of each choice and a clear recommendation, gives step-by-step instructions with direct links,
   waits for the answer, then acts on it (delegating execution to sub-agents) and moves on. Use this
   whenever the user asks "what needs my decision", "what's waiting on me", "walk me through the open
   items", "interview me", "what do you need from me", or when several items have piled up on the
@@ -96,7 +96,18 @@ Item {N}/{T} — {title}
 
 In plain words: {2–3 sentences: what this is, why it needs you and not the agent,
 and what happens if it keeps waiting. No jargon; expand every acronym on first use.}
+
+Why we're doing this: {1–2 sentences: the functional benefit once this is done —
+what works, gets faster, safer or cheaper, or what the owner or the agents can
+do that they cannot do today.}
 ```
+
+**The functional benefit is the reason the item exists, so name it concretely.** Describe the
+effect someone notices: "every lead picks up plugin fixes on its next restart, without you
+re-running installs", not "improves the update mechanism". If the benefit is only avoiding a
+risk, name the risk and who would feel it ("otherwise the next cold boot comes up with no lead
+session, and nobody answers messages until you notice"). Trace it to the record like any other
+statement. If the record does not say why the work matters, say so rather than invent a benefit.
 
 Say only what the record says. Every status statement in this paragraph ("already rotated",
 "verified clean", "merged") must trace to something you read in the issue, thread or PR — the
@@ -111,12 +122,18 @@ Then, by type:
 ```
 Option A — {name}
   What it means: {one sentence}
+  What you get: {the functional benefit of choosing this, in one sentence}
   Pros: {one or two}
   Cons: {one or two}
 Option B — ...
 
-My recommendation: {A/B/none}, because {one or two sentences}.
+My recommendation: {A/B/none}, because {one or two sentences, tied to what you get}.
 ```
+
+"What you get" is the practical result of picking that option. It answers "what will be
+different for me or the platform afterwards?" and is not a restatement of the pros. When two
+options give the same result by different routes, say so: the choice is then about cost or risk,
+not outcome.
 
 State the recommendation explicitly even when you have none ("no preference — it comes down to
 X, which only you know"). When the AskUserQuestion tool is available, present the options through
@@ -132,6 +149,8 @@ description — the owner then answers with a click. Without the tool, the text 
   something worked, a choice that appears on screen), **stop after that step** and ask for the
   result. Do not print the remaining steps yet — they may change.
 - End with what you need back: "tell me when done", "paste the new ID", etc.
+- Say what the steps unlock, in one line before step 1 ("once this is done, the agents can
+  deploy to staging without asking you"), so the owner knows why the clicks are worth it.
 - **One diagnostic step per failed action, then file and move on.** When an owner step fails
   unexpectedly ("the app will not connect", "ssh says not allowed"), take at most one cheap
   read-only check to name the cause; if that does not close it, record the item as parked with the
@@ -139,7 +158,7 @@ description — the owner then answers with a click. Without the tool, the text 
   walkthrough (a certificate project, an ACME error hunt) turns the owner's decision session into a
   debugging session — the first live run did exactly that and the owner called it drift.
 
-**CONFIRMATION** — state exactly what will happen, the blast radius (who or what is affected, for
+**CONFIRMATION** — state exactly what will happen, what it gains (the functional benefit), the blast radius (who or what is affected, for
 how long), whether it can be undone, and what you will verify afterwards. Ask for the go.
 
 **Then stop.** Do not present the next item, do not add "meanwhile", do not pre-answer.
@@ -192,7 +211,11 @@ Then, briefly:
 
 - Plain language throughout; the owner should understand each item without opening anything.
   Explain the why behind a recommendation — a bare "I recommend A" is not a recommendation.
-- Local time (Europe/Amsterdam), never UTC. Links to GitHub records as clickable markdown links.
+- Lead with outcomes, not mechanics: what the owner or the agents gain, before how it works.
+  Keep the mechanism to what the owner needs in order to decide.
+- Local time (Europe/Amsterdam), never UTC. Link every GitHub record with its full URL: in the
+  terminal a short label plus the bare URL (`PR #122 https://github.com/...`), never `[text](url)`,
+  which shows literally there.
 - No timelines, no "by Friday" — sequence and dependencies only.
 - Mirror the owner's language in chat (Dutch or English); keep durable records in English.
 - Keep each item under roughly fifteen lines before the wait. If it needs more, the item is
