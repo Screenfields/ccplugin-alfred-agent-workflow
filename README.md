@@ -264,7 +264,8 @@ The plugin ships a `SessionStart` hook (`hooks/hooks.json` →
 `hooks/owner-communication.sh`) that adds the rules in
 `hooks/owner-communication.md` to every session's context: a fresh
 Europe/Amsterdam timestamp line at the top of each chat reply to the owner,
-local time for anything shown to the owner, and clickable GitHub links. The
+local time for anything shown to the owner, and full-URL links for every
+GitHub record. The
 hook is deterministic (`jq` only, no model call). Edit the `.md` file to
 change the rules.
 
