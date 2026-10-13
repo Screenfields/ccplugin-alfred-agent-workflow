@@ -1066,9 +1066,18 @@ self_upgrade() {
   [ -n "$cand_ver" ] && [ "$cand_ver" != "$VERSION" ] || return 0
   newest=$(printf '%s\n%s\n' "$VERSION" "$cand_ver" | sort -V | tail -1)
   [ "$newest" = "$cand_ver" ] || return 0
+  # The newer script must at least start: a syntax error or a missing
+  # interpreter there would otherwise leave the lead with no bridge at all.
+  if ! "$cand" --version >/dev/null 2>&1; then
+    ensure_state_dir >/dev/null 2>&1 && log_line "upgrade skipped: $cand ($cand_ver) does not start"
+    return 0
+  fi
   link="${ALFRED_WAKE_BIN_DIR:-$HOME/.local/bin}/alfred-wake"
   if [ -L "$link" ] && [ "$(readlink -f "$link")" = "$self" ]; then
-    ln -sfn "$cand" "$link" 2>/dev/null || true
+    # Atomic swap (rename over the old link): `ln -sf` unlinks first, and a
+    # launch in that gap would find no alfred-wake.
+    ln -s "$cand" "$link.tmp.$$" 2>/dev/null && mv -Tf "$link.tmp.$$" "$link" 2>/dev/null \
+      || rm -f "$link.tmp.$$"
   fi
   ensure_state_dir >/dev/null 2>&1 && log_line "upgrade: $VERSION -> $cand_ver ($cand)"
   ALFRED_WAKE_UPGRADED_FROM="$VERSION" exec "$cand" "$@"
@@ -1133,6 +1142,7 @@ Usage:
   alfred-wake check              one dry-run pass (no cursor writes); diagnostics on stderr
   alfred-wake install            symlink into ~/.local/bin
   alfred-wake status             show config; exit 0 only while a wait/run is alive
+  alfred-wake --version          print the version
 
 Arm it from a lead session as a background Bash task, and start it again
 after handling each wake:
@@ -1154,6 +1164,7 @@ main() {
       ;;
     install) cmd_install ;;
     status)  cmd_status ;;
+    version|--version) echo "alfred-wake $VERSION"; exit 0 ;;
     -h|--help|help|'') usage; exit 0 ;;
     *) usage; exit 1 ;;
   esac

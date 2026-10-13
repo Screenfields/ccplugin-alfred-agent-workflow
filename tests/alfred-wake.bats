@@ -277,6 +277,7 @@ fake_install() {
   cat > "$root/bin/alfred-wake" <<EOF
 #!/bin/bash
 VERSION="$1"
+[ "\${1:-}" = --version ] && { echo "alfred-wake $1"; exit 0; }
 echo "ran $1 args=\$* from=\${ALFRED_WAKE_UPGRADED_FROM:-}"
 EOF
   chmod +x "$root/bin/alfred-wake"
@@ -307,4 +308,21 @@ EOF
   fake_install 9.9.0
   ALFRED_WAKE_NO_UPGRADE=1 run timeout 3 "$WAKE" wait
   [[ "$output" != *"ran 9.9.0"* ]]
+}
+
+@test "a newer installed alfred-wake that does not start is skipped" {
+  fake_install 9.9.0
+  printf '#!/bin/bash\nVERSION="9.9.0"\nif then\n' > "$BATS_TEST_TMPDIR/cache/9.9.0/bin/alfred-wake"
+  mkdir -p "$ALFRED_WAKE_BIN_DIR"
+  ln -s "$(readlink -f "$WAKE")" "$ALFRED_WAKE_BIN_DIR/alfred-wake"
+  run timeout 3 "$ALFRED_WAKE_BIN_DIR/alfred-wake" wait
+  [[ "$output" != *"ran 9.9.0"* ]]
+  [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-wake")" = "$(readlink -f "$WAKE")" ]
+  grep -q "upgrade skipped" "$STATE/alfred-wake.log"
+}
+
+@test "--version prints the version" {
+  run "$WAKE" --version
+  [ "$status" -eq 0 ]
+  [ "$output" = "alfred-wake 1.3.0" ]
 }

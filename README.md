@@ -174,6 +174,7 @@ it cannot swallow news that the running bridge should deliver.
 | `alfred-wake check` | One dry-run pass, diagnostics on stderr, exit 0 |
 | `alfred-wake install` | Symlink into `~/.local/bin` (override with `ALFRED_WAKE_BIN_DIR`) |
 | `alfred-wake status` | Print config; exit 0 only while a live `wait`/`run` process holds the pidfile |
+| `alfred-wake --version` | Print the version |
 
 **Self-upgrade.** At launch, `wait` and `run` check which alfred-agent version Claude Code has
 installed (`installed_plugins.json`, user scope). If that version's `alfred-wake` is newer than the
