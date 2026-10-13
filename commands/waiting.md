@@ -136,7 +136,7 @@ options give the same result by different routes, say so: the choice is then abo
 not outcome.
 
 State the recommendation explicitly even when you have none ("no preference — it comes down to
-X, which only you know"). When the AskUserQuestion tool is available, present the options through
+X, which only you know"). When the AskUserQuestion tool is available (the owner started this walkthrough, so a menu is fine here), present the options through
 it with the recommended option first and marked "(Recommended)", and the pros/cons in each option's
 description — the owner then answers with a click. Without the tool, the text above is the format.
 

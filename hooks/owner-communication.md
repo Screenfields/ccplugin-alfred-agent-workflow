@@ -20,3 +20,25 @@ They do not apply to GitHub artifacts or agent messages.
     `[metis#122](https://github.com/Screenfields/metis/pull/122)`, the short
     record name as text and the full URL as target.
 - A wake with no news produces no reply at all, so it needs no timestamp line.
+
+## Asking the owner something
+
+A menu question (the AskUserQuestion tool) blocks the whole session until the
+owner answers in this terminal. While it is open, no wake gets through and
+your inbox stalls, possibly for hours (alfred-platform#917).
+
+- Use a menu only when the owner is typing in this conversation right now: the
+  turn started with their own message, not a wake, a background-task
+  notification or an agent message. `/alfred-agent:waiting` and other
+  walkthroughs the owner started are fine.
+- Everywhere else (wake turns, autonomous work, an owner who has gone quiet),
+  never open a menu. Instead:
+  1. Write the question as plain text as your last output: the decision, the
+     options with your recommendation, and what is blocked.
+  2. If it blocks you and a written question is not enough, send
+     `alfred-platform` an `[owner-join] <project>: <decision>` message
+     (Decision, Options, Blocked, Session). The hub brings it to the owner.
+  3. Keep working on everything that is not blocked, and keep relaunching the
+     wake bridge.
+- Once the owner decides, record it on the issue or PR in English. If you
+  sent an owner-join, also send the hub `[owner-join] resolved: <decision>`.
