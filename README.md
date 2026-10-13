@@ -175,6 +175,14 @@ it cannot swallow news that the running bridge should deliver.
 | `alfred-wake install` | Symlink into `~/.local/bin` (override with `ALFRED_WAKE_BIN_DIR`) |
 | `alfred-wake status` | Print config; exit 0 only while a live `wait`/`run` process holds the pidfile |
 
+**Self-upgrade.** At launch, `wait` and `run` check which alfred-agent version Claude Code has
+installed (`installed_plugins.json`, user scope). If that version's `alfred-wake` is newer than the
+running one, they exec it with the same arguments and point the `~/.local/bin` link at it. This
+needs no network and no model call. It means a devbox whose plugins were updated in the
+background runs the new bridge on the next relaunch, without a restart (ccplugin#107). The upgrade
+is logged as `upgrade: <old> -> <new>` in `alfred-wake.log`; stdout is unchanged. To switch it
+off, set `ALFRED_WAKE_NO_UPGRADE=1`.
+
 ### Event lines (the stdout contract)
 
 Only these shapes are ever printed to stdout. Anything else there is a bug.
@@ -215,7 +223,9 @@ Everything is env-driven; the defaults are correct for a standard devbox pod.
 | `ALFRED_WAKE_FAIL_THRESHOLD` | `5` | Consecutive failed passes before a source raises `WAKE-ERROR` |
 | `ALFRED_WAKE_STATE_DIR` | `/workspace/.alfred-wake`, else `$XDG_STATE_HOME/alfred-wake` | Where cursors live |
 | `ALFRED_WAKE_TZ` | `Europe/Amsterdam` | Timezone for `last=` timestamps |
-| `ALFRED_WAKE_BIN_DIR` | `$HOME/.local/bin` | Target of `alfred-wake install` |
+| `ALFRED_WAKE_BIN_DIR` | `$HOME/.local/bin` | Target of `alfred-wake install`, and the link self-upgrade repoints |
+| `ALFRED_WAKE_NO_UPGRADE` | — | `1` = never exec a newer installed alfred-wake |
+| `ALFRED_WAKE_PLUGINS_JSON` | `$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json` | Where self-upgrade looks up the installed plugin |
 
 ### State
 
