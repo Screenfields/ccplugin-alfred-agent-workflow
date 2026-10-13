@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
 # Test double for curl. Answers alfred-wake's MCP calls from files in
 # $STUB_DIR, mimicking `curl -w '\n%{http_code}'` output:
-#   inbox.json  structuredContent returned by get_messages
+#   inbox.json  {"messages":[...]} — the messages that are unread right now,
+#               in arrival order. Every message ever listed there is also
+#               appended to stream.json, the server's arrival log.
 #   fail        present → every call answers HTTP 500
 #   slow        present → sleep <its content> seconds first (a hung request)
+#   legacy      present → get_messages rejects `since`/`include_body` like an
+#               agent-messaging deploy without the cursor API
+#
+# get_messages follows the cursor contract agreed for alfred-platform#849:
+# without `since` it returns up to `limit` unread messages, newest first,
+# plus `next_cursor` (the arrival high-water mark) and `total_unread`; with
+# `since` it returns unread messages that arrived after the cursor, oldest
+# first, `has_more` when `limit` cut them off, and `cursor_reset` with a fresh
+# cursor when the cursor is not one it issued. Cursors are "c<arrival index>".
 hdr="" body=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -18,13 +29,50 @@ if [ -f "$STUB_DIR/slow" ]; then sleep "$(cat "$STUB_DIR/slow")"; fi
 if [ -n "$hdr" ]; then printf 'HTTP/1.1 200 OK\r\n' > "$hdr"; fi
 if [ -f "$STUB_DIR/fail" ]; then printf '{}\n500'; exit 0; fi
 
+reply() { printf '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":%s}}\n200' "$1"; }
+
+get_messages() {
+  local args="$1" stream="$STUB_DIR/stream.json"
+  if [ -f "$STUB_DIR/legacy" ] && printf '%s' "$args" | jq -e 'has("since") or has("include_body")' >/dev/null; then
+    printf '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"1 validation error for call[get_messages]\\nsince\\n  Unexpected keyword argument [type=unexpected_keyword_argument]"}],"isError":true}}\n200'
+    return
+  fi
+  [ -f "$stream" ] || echo '[]' > "$stream"
+  # Append newly listed messages to the arrival log.
+  jq -c --slurpfile inbox "$STUB_DIR/inbox.json" \
+    '. as $log | $log + [$inbox[0].messages[] | select(.id as $i | ($log | map(.id) | index($i)) | not)]' \
+    "$stream" > "$stream.tmp" && mv "$stream.tmp" "$stream"
+
+  reply "$(jq -c --argjson a "$args" --slurpfile inbox "$STUB_DIR/inbox.json" '
+    . as $log
+    | ($inbox[0].messages | map(.id)) as $unread
+    | ($a.limit // 20) as $limit
+    | ($log | length) as $high
+    | ([$log | to_entries[] | select(.value.id as $i | $unread | index($i))]) as $u
+    | if ($a | has("since")) | not then
+        {messages: ([$u[].value] | reverse | .[0:$limit]), total_unread: ($u | length)}
+        + (if $a | has("include_body") then {next_cursor: ("c" + ($high | tostring)), has_more: false, cursor_reset: false} else {} end)
+      elif ($a.since | test("^c[0-9]+$")) and (($a.since[1:] | tonumber) <= $high) then
+        ($a.since[1:] | tonumber) as $k
+        | [$u[] | select(.key >= $k)] as $after
+        | ($after[0:$limit]) as $page
+        | {messages: [$page[].value], total_unread: ($u | length),
+           has_more: (($after | length) > $limit), cursor_reset: false,
+           next_cursor: (if ($after | length) > $limit then "c" + (($page[-1].key + 1) | tostring)
+                         else "c" + ($high | tostring) end)}
+      else
+        {messages: [], total_unread: ($u | length), has_more: false, cursor_reset: true,
+         next_cursor: ("c" + ($high | tostring))}
+      end' "$stream")"
+}
+
 case "$body" in
   *'"method":"initialize"'*)
     printf '{"jsonrpc":"2.0","id":1,"result":{}}\n200' ;;
   *'notifications/initialized'*)
     printf '\n202' ;;
   *'"name":"get_messages"'*)
-    printf '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":%s}}\n200' "$(cat "$STUB_DIR/inbox.json")" ;;
+    get_messages "$(printf '%s' "$body" | jq -c '.params.arguments')" ;;
   *)
     printf '{}\n404' ;;
 esac

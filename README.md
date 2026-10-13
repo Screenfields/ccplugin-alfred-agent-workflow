@@ -114,7 +114,7 @@ For active conversations where you need a synchronous round-trip, the
 
 | Source | Transport | Always on? |
 |---|---|---|
-| **agent-messaging** inbox (unread for your `AGENT_ID`) | MCP JSON-RPC over HTTP (`initialize` → `notifications/initialized` → `tools/call get_messages`), polled with backoff | Yes — the service offers no push |
+| **agent-messaging** inbox (unread for your `AGENT_ID`, direct and topic messages) | MCP JSON-RPC over HTTP (`initialize` → `notifications/initialized` → `tools/call get_messages`), polled with backoff. It asks for exactly the messages after a stored cursor (`since` / `next_cursor` / `has_more`, alfred-platform#849), so a backlog of any size neither replays nor hides a wake. A server without that API falls back to diffing a 5-message window, re-tried hourly | Yes — the service offers no push |
 | **Buzz** channels visible to your identity | MCP JSON-RPC against the **pod-local `buzz-mcp` sidecar** (`buzz_whoami` / `buzz_channels` / `buzz_read`), polled on the tick | **Optional.** No sidecar → agent-messaging only, logged once, no error |
 
 Buzz is deliberately reached through the sidecar rather than the relay directly:
@@ -182,6 +182,7 @@ Only these shapes are ever printed to stdout. Anything else there is a bug.
 | Line | Meaning |
 |---|---|
 | `WAKE am unread=<n> from=<a,b>` | New unread agent-messaging item(s); `n` = current total unread |
+| `WAKE am unread=<n> from=<a,b> cursor-reset` | The server no longer knew the stored cursor: it was reseated without replaying history; `n` is what is unread now |
 | `WAKE am unread=<n> from=<a,b> pending-at-start` | `wait` only: the inbox already had unread mail when the cursors were first seeded |
 | `WAKE buzz <label> new=<n> from=<…> last=<HH:MM TZ>` | New non-self posts in that Buzz channel |
 | `WAKE-INIT …` | Legacy `run` only, first ever run: cursors seeded, history deliberately not replayed |
