@@ -259,6 +259,20 @@ Delete the state dir to force a fresh seed.
 Pilot order (alfred-platform#835): the RRReis lead first (agent-messaging only —
 that devbox has no Buzz identity), then all leads.
 
+## Owner communication (SessionStart hook)
+
+The plugin ships a `SessionStart` hook (`hooks/hooks.json` →
+`hooks/owner-communication.sh`) that adds the rules in
+`hooks/owner-communication.md` to every session's context: a fresh
+Europe/Amsterdam timestamp line at the top of each chat reply to the owner,
+local time for anything shown to the owner, and full-URL links for every
+GitHub record. The
+hook is deterministic (`jq` only, no model call). Edit the `.md` file to
+change the rules.
+
+Note: files in `rules/` are **not** loaded into session context by Claude Code
+(verified on 2.1.296); anything every session must see goes through this hook.
+
 ## Agent identity convention
 
 Each agent has a unique `agent_id` set via the `AGENT_ID` env var. Choose a stable identifier — other agents will address you by that name.

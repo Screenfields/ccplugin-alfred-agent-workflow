@@ -18,6 +18,10 @@ ccplugin-alfred-agent-workflow/
 │   └── show-threads.md      # /alfred-agent:show-threads
 ├── bin/
 │   └── alfred-wake          # Deterministic inbox wake bridge (one-shot background wait)
+├── hooks/
+│   ├── hooks.json           # SessionStart → owner-communication.sh
+│   ├── owner-communication.sh  # Emits the rules below as additionalContext
+│   └── owner-communication.md  # Owner-communication rules (timestamp line, local time, links)
 ├── skills/
 │   └── messaging/
 │       └── SKILL.md         # General messaging context
