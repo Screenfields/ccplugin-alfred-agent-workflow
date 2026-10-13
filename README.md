@@ -182,7 +182,8 @@ running one, they exec it with the same arguments and point the `~/.local/bin` l
 needs no network and no model call. It means a devbox whose plugins were updated in the
 background runs the new bridge on the next relaunch, without a restart (ccplugin#107). The upgrade
 is logged as `upgrade: <old> -> <new>` in `alfred-wake.log`; stdout is unchanged. To switch it
-off, set `ALFRED_WAKE_NO_UPGRADE=1`.
+off, set `ALFRED_WAKE_NO_UPGRADE=1`. The newer script must start (`--version`), or the upgrade is
+skipped and logged; the `~/.local/bin` link is swapped atomically.
 
 ### Event lines (the stdout contract)
 
