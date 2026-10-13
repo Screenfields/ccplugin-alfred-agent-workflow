@@ -17,6 +17,9 @@ setup() {
   export AGENT_MESSAGING_URL="http://stub.invalid/mcp/"
   export AGENT_MESSAGING_TOKEN="test-token"
   export AGENT_ID="tester"
+  # Never pick up the machine's real installed plugin (self-upgrade).
+  export ALFRED_WAKE_PLUGINS_JSON="$BATS_TEST_TMPDIR/no-plugins.json"
+  export ALFRED_WAKE_BIN_DIR="$BATS_TEST_TMPDIR/bin"
   inbox
   # Job control: without it, `&` jobs of a non-interactive shell start with
   # SIGINT ignored, and an ignored-at-start signal cannot be trapped.
@@ -263,4 +266,45 @@ no_leftovers() {
   run "$WAKE" status
   [ "$status" -eq 0 ]
   [[ "$output" == *"armed:      yes (pid $a_pid"* ]]
+}
+
+# --- self-upgrade (ccplugin#107) ----------------------------------------------
+
+# fake_install <version>: an installed plugin whose alfred-wake reports itself.
+fake_install() {
+  local root="$BATS_TEST_TMPDIR/cache/$1"
+  mkdir -p "$root/bin"
+  cat > "$root/bin/alfred-wake" <<EOF
+#!/bin/bash
+VERSION="$1"
+echo "ran $1 args=\$* from=\${ALFRED_WAKE_UPGRADED_FROM:-}"
+EOF
+  chmod +x "$root/bin/alfred-wake"
+  jq -n --arg p "$root" '{plugins: {"alfred-agent@alfred-cc-tools": [{scope: "user", installPath: $p}]}}' \
+    > "$ALFRED_WAKE_PLUGINS_JSON"
+}
+
+@test "wait execs the installed alfred-wake when it is newer, and relinks ~/.local/bin" {
+  fake_install 9.9.0
+  mkdir -p "$ALFRED_WAKE_BIN_DIR"
+  ln -s "$(readlink -f "$WAKE")" "$ALFRED_WAKE_BIN_DIR/alfred-wake"
+  run "$ALFRED_WAKE_BIN_DIR/alfred-wake" wait 5
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.3.0"* ]]
+  [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-wake")" = "$BATS_TEST_TMPDIR/cache/9.9.0/bin/alfred-wake" ]
+  grep -q "upgrade: 1.3.0 -> 9.9.0" "$STATE/alfred-wake.log"
+}
+
+@test "an older or equal installed alfred-wake is not used" {
+  for v in 1.0.0 1.3.0; do
+    fake_install "$v"
+    run timeout 3 "$WAKE" wait
+    [[ "$output" != *"ran $v"* ]]
+  done
+}
+
+@test "ALFRED_WAKE_NO_UPGRADE=1 keeps the running version" {
+  fake_install 9.9.0
+  ALFRED_WAKE_NO_UPGRADE=1 run timeout 3 "$WAKE" wait
+  [[ "$output" != *"ran 9.9.0"* ]]
 }
