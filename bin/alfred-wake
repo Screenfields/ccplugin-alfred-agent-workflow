@@ -39,7 +39,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -1044,6 +1044,46 @@ run_pass_to() {
   run_pass "$@" > "$file"
 }
 
+# self_upgrade <args...> (ccplugin#107): a devbox updates its plugins in the
+# background, but a lead keeps relaunching the alfred-wake it started with.
+# At launch, exec the alfred-wake of the plugin version Claude Code has
+# installed when that script is newer than this one, and point the
+# ~/.local/bin link at it so later launches go there directly. Deterministic:
+# one local JSON read, no network. Never upgrades twice in one launch.
+self_upgrade() {
+  [ "${ALFRED_WAKE_NO_UPGRADE:-}" = "1" ] && return 0
+  [ -n "${ALFRED_WAKE_UPGRADED_FROM:-}" ] && return 0
+  local plugins_json self install cand cand_ver newest link
+  plugins_json="${ALFRED_WAKE_PLUGINS_JSON:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json}"
+  [ -r "$plugins_json" ] || return 0
+  install=$(jq -r '[.plugins["alfred-agent@alfred-cc-tools"][]? | select(.scope == "user")][0].installPath // empty' \
+    "$plugins_json" 2>/dev/null) || return 0
+  cand="$install/bin/alfred-wake"
+  if [ -z "$install" ] || [ ! -x "$cand" ]; then return 0; fi
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+  [ "$(readlink -f "$cand")" != "$self" ] || return 0
+  cand_ver=$(sed -n 's/^VERSION="\([0-9][0-9.]*\)"$/\1/p' "$cand" | head -1)
+  if [ -z "$cand_ver" ] || [ "$cand_ver" = "$VERSION" ]; then return 0; fi
+  newest=$(printf '%s\n%s\n' "$VERSION" "$cand_ver" | sort -V | tail -1)
+  [ "$newest" = "$cand_ver" ] || return 0
+  # The newer script must at least start: a syntax error or a missing
+  # interpreter there would otherwise leave the lead with no bridge at all.
+  if ! "$cand" --version >/dev/null 2>&1; then
+    ensure_state_dir >/dev/null 2>&1 && log_line "upgrade skipped: $cand ($cand_ver) does not start"
+    return 0
+  fi
+  link="${ALFRED_WAKE_BIN_DIR:-$HOME/.local/bin}/alfred-wake"
+  if [ -L "$link" ] && [ "$(readlink -f "$link")" = "$self" ]; then
+    # Atomic swap (rename over the old link): `ln -sf` unlinks first, and a
+    # launch in that gap would find no alfred-wake.
+    if ! { ln -s "$cand" "$link.tmp.$$" && mv -Tf "$link.tmp.$$" "$link"; } 2>/dev/null; then
+      rm -f "$link.tmp.$$"
+    fi
+  fi
+  ensure_state_dir >/dev/null 2>&1 && log_line "upgrade: $VERSION -> $cand_ver ($cand)"
+  ALFRED_WAKE_UPGRADED_FROM="$VERSION" exec "$cand" "$@"
+}
+
 cmd_wait() {
   WAIT_MODE=true
   cmd_run "$@"
@@ -1103,6 +1143,7 @@ Usage:
   alfred-wake check              one dry-run pass (no cursor writes); diagnostics on stderr
   alfred-wake install            symlink into ~/.local/bin
   alfred-wake status             show config; exit 0 only while a wait/run is alive
+  alfred-wake --version          print the version
 
 Arm it from a lead session as a background Bash task, and start it again
 after handling each wake:
@@ -1117,12 +1158,14 @@ main() {
   fi
   case "${1:-}" in
     check)   cmd_check ;;
-    wait)    cmd_wait "${2:-}" ;;
+    wait)    self_upgrade "$@"; cmd_wait "${2:-}" ;;
     run)
+      self_upgrade "$@"
       if [ "${2:-}" = "--until-wake" ]; then cmd_wait "${3:-}"; else cmd_run "${2:-}"; fi
       ;;
     install) cmd_install ;;
     status)  cmd_status ;;
+    version|--version) echo "alfred-wake $VERSION"; exit 0 ;;
     -h|--help|help|'') usage; exit 0 ;;
     *) usage; exit 1 ;;
   esac
