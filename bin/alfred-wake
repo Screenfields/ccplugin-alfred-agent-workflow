@@ -1059,11 +1059,11 @@ self_upgrade() {
   install=$(jq -r '[.plugins["alfred-agent@alfred-cc-tools"][]? | select(.scope == "user")][0].installPath // empty' \
     "$plugins_json" 2>/dev/null) || return 0
   cand="$install/bin/alfred-wake"
-  [ -n "$install" ] && [ -x "$cand" ] || return 0
+  if [ -z "$install" ] || [ ! -x "$cand" ]; then return 0; fi
   self=$(readlink -f "${BASH_SOURCE[0]}")
   [ "$(readlink -f "$cand")" != "$self" ] || return 0
   cand_ver=$(sed -n 's/^VERSION="\([0-9][0-9.]*\)"$/\1/p' "$cand" | head -1)
-  [ -n "$cand_ver" ] && [ "$cand_ver" != "$VERSION" ] || return 0
+  if [ -z "$cand_ver" ] || [ "$cand_ver" = "$VERSION" ]; then return 0; fi
   newest=$(printf '%s\n%s\n' "$VERSION" "$cand_ver" | sort -V | tail -1)
   [ "$newest" = "$cand_ver" ] || return 0
   # The newer script must at least start: a syntax error or a missing
@@ -1076,8 +1076,9 @@ self_upgrade() {
   if [ -L "$link" ] && [ "$(readlink -f "$link")" = "$self" ]; then
     # Atomic swap (rename over the old link): `ln -sf` unlinks first, and a
     # launch in that gap would find no alfred-wake.
-    ln -s "$cand" "$link.tmp.$$" 2>/dev/null && mv -Tf "$link.tmp.$$" "$link" 2>/dev/null \
-      || rm -f "$link.tmp.$$"
+    if ! { ln -s "$cand" "$link.tmp.$$" && mv -Tf "$link.tmp.$$" "$link"; } 2>/dev/null; then
+      rm -f "$link.tmp.$$"
+    fi
   fi
   ensure_state_dir >/dev/null 2>&1 && log_line "upgrade: $VERSION -> $cand_ver ($cand)"
   ALFRED_WAKE_UPGRADED_FROM="$VERSION" exec "$cand" "$@"
