@@ -71,6 +71,9 @@ case "$body" in
     printf '{"jsonrpc":"2.0","id":1,"result":{}}\n200' ;;
   *'notifications/initialized'*)
     printf '\n202' ;;
+  *'"name":"send_message"'*)
+    printf '%s' "$body" | jq -c '.params.arguments' >> "$STUB_DIR/sent.jsonl"
+    printf '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"status":"sent"}}}\n200' ;;
   *'"name":"get_messages"'*)
     get_messages "$(printf '%s' "$body" | jq -c '.params.arguments')" ;;
   *)

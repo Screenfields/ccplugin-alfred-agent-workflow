@@ -175,6 +175,8 @@ it cannot swallow news that the running bridge should deliver.
 | `alfred-wake install` | Symlink into `~/.local/bin` (override with `ALFRED_WAKE_BIN_DIR`) |
 | `alfred-wake status` | Print config; exit 0 only while a live `wait`/`run` process holds the pidfile |
 | `alfred-wake --version` | Print the version |
+| `alfred-wake unread` | Print the agent-messaging unread count (one request; for the SessionStart check) |
+| `alfred-wake notify <to> <subject> <body>` | Send one agent-messaging message as this agent; exit 0 when accepted. For deterministic callers, e.g. the devbox boot reporting Remote Control off (alfred-devbox#70) |
 
 **Self-upgrade.** At launch, `wait` and `run` check which alfred-agent version Claude Code has
 installed (`installed_plugins.json`, user scope). If that version's `alfred-wake` is newer than the

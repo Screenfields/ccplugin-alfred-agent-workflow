@@ -39,7 +39,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.4.0"
+VERSION="1.5.0"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -1127,6 +1127,33 @@ cmd_unread() {
   exit 1
 }
 
+# cmd_notify <to> <subject> <body>: send one agent-messaging message as this
+# agent, for deterministic callers with something to report (the devbox boot
+# saying Remote Control is off, alfred-devbox#70). One bounded request; exit 0
+# when the server accepted it, 1 otherwise. Nothing is printed on success.
+cmd_notify() {
+  local to="${1:-}" subject="${2:-}" body="${3:-}" workdir args
+  if [ -z "$to" ] || [ -z "$subject" ] || [ -z "$body" ]; then
+    echo "usage: alfred-wake notify <to> <subject> <body>" >&2
+    exit 2
+  fi
+  workdir=$(new_curl_workdir) || exit 1
+  AM_CFG="$workdir/curl.cfg"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$workdir'" EXIT
+  if ! am_write_auth_headers "$AM_CFG" || ! mcp_initialize "$AM_URL" "$AM_CFG" "$workdir" "alfred-wake"; then
+    echo "alfred-wake notify: agent-messaging unreachable or no credential" >&2
+    exit 1
+  fi
+  args=$(jq -cn --arg t "$to" --arg s "$subject" --arg b "$body" '{to:$t,subject:$s,body:$b}')
+  if ! mcp_tool_call "$AM_URL" "$AM_CFG" "send_message" "$args" \
+     || printf '%s' "$MCP_BODY" | jq -e '.result.isError == true' >/dev/null 2>&1; then
+    echo "alfred-wake notify: send_message failed (http $MCP_HTTP_CODE)" >&2
+    exit 1
+  fi
+  exit 0
+}
+
 cmd_status() {
   local age pid
   echo "alfred-wake $VERSION"
@@ -1165,6 +1192,7 @@ Usage:
   alfred-wake install            symlink into ~/.local/bin
   alfred-wake status             show config; exit 0 only while a wait/run is alive
   alfred-wake unread             print the agent-messaging unread count
+  alfred-wake notify TO SUBJ BODY  send one agent-messaging message
   alfred-wake --version          print the version
 
 Arm it from a lead session as a background Bash task, and start it again
@@ -1188,6 +1216,7 @@ main() {
     install) cmd_install ;;
     status)  cmd_status ;;
     unread)  cmd_unread ;;
+    notify)  shift; cmd_notify "$@" ;;
     version|--version) echo "alfred-wake $VERSION"; exit 0 ;;
     -h|--help|help|'') usage; exit 0 ;;
     *) usage; exit 1 ;;
