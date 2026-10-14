@@ -291,13 +291,13 @@ EOF
   ln -s "$(readlink -f "$WAKE")" "$ALFRED_WAKE_BIN_DIR/alfred-wake"
   run "$ALFRED_WAKE_BIN_DIR/alfred-wake" wait 5
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.3.0"* ]]
+  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.4.0"* ]]
   [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-wake")" = "$BATS_TEST_TMPDIR/cache/9.9.0/bin/alfred-wake" ]
-  grep -q "upgrade: 1.3.0 -> 9.9.0" "$STATE/alfred-wake.log"
+  grep -q "upgrade: 1.4.0 -> 9.9.0" "$STATE/alfred-wake.log"
 }
 
 @test "an older or equal installed alfred-wake is not used" {
-  for v in 1.0.0 1.3.0; do
+  for v in 1.0.0 1.4.0; do
     fake_install "$v"
     run timeout 3 "$WAKE" wait
     [[ "$output" != *"ran $v"* ]]
@@ -324,7 +324,7 @@ EOF
 @test "--version prints the version" {
   run "$WAKE" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "alfred-wake 1.3.0" ]
+  [ "$output" = "alfred-wake 1.4.0" ]
 }
 
 # --- Stop hook: never end a turn with the bridge down -----------------------
@@ -392,9 +392,15 @@ fake_tmux() {
 case "$1" in
   capture-pane) cat "$STUB_DIR/pane" 2>/dev/null; true ;;
   send-keys) shift; echo "$*" >> "$STUB_DIR/keys" ;;
+  display-message)
+    case "$*" in
+      *session_attached*) cat "$STUB_DIR/attached" 2>/dev/null || echo 0 ;;
+      *cursor_x*) cat "$STUB_DIR/cursor" 2>/dev/null || echo "2 1" ;;
+    esac ;;
 esac
 EOF
   chmod +x "$BATS_TEST_TMPDIR/tmux"
+  printf 'Claude Code\n❯ Try "write a test"\n' > "$STUB_DIR/pane"
 }
 
 session_hook() {  # session_hook <source> — run session-check.sh in a lead project
@@ -440,6 +446,39 @@ ctx_of() { printf '%s' "$1" | jq -r .hookSpecificOutput.additionalContext; }
   : > "$STUB_DIR/pane"
   sleep 1
   [ ! -s "$STUB_DIR/keys" ]
+}
+
+@test "nudge never types when someone is attached, the prompt has input, or a dialog is open" {
+  fake_tmux
+  echo 1 > "$STUB_DIR/attached"
+  run session_hook startup
+  sleep 1
+  [ ! -s "$STUB_DIR/keys" ]
+  echo 0 > "$STUB_DIR/attached"
+  echo "17 1" > "$STUB_DIR/cursor"
+  run session_hook startup
+  sleep 1
+  [ ! -s "$STUB_DIR/keys" ]
+  echo "2 1" > "$STUB_DIR/cursor"
+  printf 'Do you want to proceed?\n❯ 1. Yes\n  Enter to confirm · Esc to cancel\n' > "$STUB_DIR/pane"
+  run session_hook startup
+  sleep 1
+  [ ! -s "$STUB_DIR/keys" ]
+}
+
+@test "nudge erases its text instead of pressing Enter when someone attaches meanwhile" {
+  fake_tmux
+  # Attach as soon as the prompt has been typed.
+  cat >> "$BATS_TEST_TMPDIR/tmux" <<'EOF'
+[[ "$*" == *"-l "* ]] && echo 1 > "$STUB_DIR/attached"
+true
+EOF
+  run session_hook startup
+  until_true 30 test -s "$STUB_DIR/keys"
+  sleep 1.5
+  grep -q 'substrate wake' "$STUB_DIR/keys"
+  grep -q -- '-N [0-9]* BSpace' "$STUB_DIR/keys"
+  ! grep -q ' Enter$' "$STUB_DIR/keys"
 }
 
 @test "session start with the watcher up and no mail: one quiet line, no nudge" {

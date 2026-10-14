@@ -293,17 +293,23 @@ A watcher is a background task of the session that started it, so it dies with t
 bridge stayed down for 80 minutes after a session restart. `hooks/session-check.sh` runs at every
 session start (`startup`, `resume`, `clear`, `compact`):
 1. It checks the watcher with `alfred-wake status`, or with `ALFRED_WATCHER_STATUS_CMD` on a
-   session with another bridge, such as the hub's `hub-wake-bridge`. It also gets the unread count
+   session with another bridge, such as the hub's `hub-wake-bridge status`. Both watcher
+   variables are shell command lines, run with `bash -c`. It also gets the unread count
    from `alfred-wake unread`.
 2. It adds both to the session context. When the watcher is down or mail is waiting, it adds:
    relaunch the watcher (`ALFRED_WATCHER_START_CMD`, default `alfred-wake wait`), run
    `/alfred-agent:check-messages`, and report in one line.
 3. After a `startup`/`resume` in tmux with the watcher down, it starts the one-shot
-   `hooks/session-nudge.sh`. SessionStart context only acts on a first turn, and a session nobody
+   `hooks/session-nudge.sh`. It never does this on `clear` or `compact`, where the session is
+   already taking a turn. SessionStart context only acts on a first turn, and a session nobody
    types into never gets one. Up to 4 times, 20 s apart, the helper:
    - exits if the watcher runs;
-   - waits if a turn is running;
-   - otherwise types a fixed `[substrate wake]` prompt into this session's own pane, then exits.
+   - exits if a tmux client is attached. Someone is there, and the context acts on their own
+     first prompt.
+   - waits if a turn is running, the prompt has input (it checks the cursor, not the ghost text),
+     or a dialog or menu is on screen;
+   - otherwise types a fixed `[substrate wake]` prompt into this session's own pane, re-checks all
+     of the above, then presses Enter. If anything changed, it clears its text instead.
 
 The hook only runs when a session starts, so a dormant lead is never woken by it, and nothing here
 polls. It only acts in projects with `.alfred/config.json` (an `agent_id`).

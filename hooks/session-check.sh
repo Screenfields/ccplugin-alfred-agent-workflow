@@ -13,7 +13,8 @@
 #      inbox, report in one line" when the watcher is down or mail is waiting;
 #   3. when the watcher is down after a startup/resume in tmux, starts a
 #      one-shot helper (session-nudge.sh) that types a fixed prompt into this
-#      session's pane once the session is idle. SessionStart context alone
+#      session's pane once the session is idle, nobody is attached and the
+#      prompt is empty (never on clear or compact). SessionStart context alone
 #      acts only on a first turn, and a session nobody types into never has
 #      one. The helper gives up as soon as the watcher runs (for example
 #      because a start prompt or the owner already got it going).
@@ -36,12 +37,13 @@ jq -e '.agent_id // empty' "$cwd/.alfred/config.json" >/dev/null 2>&1 || exit 0
 
 here=$(cd "$(dirname "$0")" && pwd)
 wake="${ALFRED_WAKE_CHECK_BIN:-$here/../bin/alfred-wake}"
-status_cmd="${ALFRED_WATCHER_STATUS_CMD:-$wake status}"
+# Both are shell command lines (run with `bash -c`), e.g. on the hub
+# ALFRED_WATCHER_STATUS_CMD="hub-wake-bridge status".
+status_cmd="${ALFRED_WATCHER_STATUS_CMD:-$(printf '%q status' "$wake")}"
 start_cmd="${ALFRED_WATCHER_START_CMD:-alfred-wake wait}"
 
 armed=no
-# shellcheck disable=SC2086  # the status command is a configured command line
-if timeout 10 $status_cmd >/dev/null 2>&1; then armed=yes; fi
+if timeout 10 bash -c "$status_cmd" >/dev/null 2>&1; then armed=yes; fi
 unread=$(timeout 15 "$wake" unread 2>/dev/null) || unread="?"
 [ -n "$unread" ] || unread="?"
 
