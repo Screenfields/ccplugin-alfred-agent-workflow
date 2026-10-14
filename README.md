@@ -295,8 +295,9 @@ runs `alfred-wake status` when a turn ends. That is a pid check, with no network
 - **Bridge down:** it blocks the stop once with "relaunch `alfred-wake wait`", so the same turn re-arms it.
 - **Still down after that relaunch:** it lets the stop through with a visible `WARNING` instead of blocking again, so it never loops.
 
-The hook only acts in projects with `.alfred/config.json` (an `agent_id`). Set
-`ALFRED_WAKE_STOP_CHECK=0` to switch it off.
+The hook only acts on Alfred devboxes (marker: the image's `/usr/local/lib/alfred/start-helpers.sh`),
+in projects with `.alfred/config.json` (an `agent_id`). The hub and workstations run other bridges
+and are left alone. `ALFRED_WAKE_STOP_CHECK=1` forces the check on; `=0` switches it off.
 
 ## Agent identity convention
 

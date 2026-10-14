@@ -13,8 +13,12 @@
 # stop goes through with a visible warning instead of a second block.
 #
 # Silent (allows the stop) when:
+#   - this is not an Alfred devbox, where alfred-wake is the lead's bridge.
+#     The marker is the image's start-helpers.sh. The hub and workstations
+#     run other bridges (hub-wake-bridge) and must never be pushed to start a
+#     competing alfred-wake. ALFRED_WAKE_STOP_CHECK=1 forces the check on,
+#     =0 forces it off.
 #   - the project has no .alfred/config.json with an agent_id (not a lead),
-#   - ALFRED_WAKE_STOP_CHECK=0,
 #   - the bridge is armed (it may take a moment after a relaunch, so the check
 #     retries for about 3 s first).
 # Seen live 2026-10-14 on screenfields-ai: a wake turn ended without the
@@ -22,7 +26,11 @@
 set -u
 
 input=$(cat)
-[ "${ALFRED_WAKE_STOP_CHECK:-1}" = "0" ] && exit 0
+case "${ALFRED_WAKE_STOP_CHECK:-auto}" in
+  0) exit 0 ;;
+  1) ;;
+  *) [ -r "${ALFRED_DEVBOX_MARKER:-/usr/local/lib/alfred/start-helpers.sh}" ] || exit 0 ;;
+esac
 again=$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null)
 
 cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)

@@ -334,7 +334,17 @@ hook() {  # hook <stop_hook_active> — run bridge-check.sh for a lead project
   mkdir -p "$proj/.alfred"
   echo '{"agent_id":"tester"}' > "$proj/.alfred/config.json"
   printf '{"cwd":"%s","stop_hook_active":%s}' "$proj" "${1:-false}" \
-    | ALFRED_WAKE_CHECK_BIN="$WAKE" "$BATS_TEST_DIRNAME/../hooks/bridge-check.sh"
+    | ALFRED_WAKE_CHECK_BIN="$WAKE" ALFRED_DEVBOX_MARKER="${MARKER-$BATS_TEST_DIRNAME/alfred-wake.bats}" \
+      "$BATS_TEST_DIRNAME/../hooks/bridge-check.sh"
+}
+
+@test "stop hook stays out of a lead that is not on a devbox (the hub runs another bridge)" {
+  MARKER="$BATS_TEST_TMPDIR/not-a-devbox" run hook false
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  # ...unless forced on.
+  MARKER="$BATS_TEST_TMPDIR/not-a-devbox" ALFRED_WAKE_STOP_CHECK=1 run hook false
+  [ "$(printf '%s' "$output" | jq -r .decision)" = "block" ]
 }
 
 @test "stop hook blocks the stop when the bridge is not running" {
