@@ -326,3 +326,49 @@ EOF
   [ "$status" -eq 0 ]
   [ "$output" = "alfred-wake 1.3.0" ]
 }
+
+# --- Stop hook: never end a turn with the bridge down -----------------------
+
+hook() {  # hook <stop_hook_active> — run bridge-check.sh for a lead project
+  local proj="$BATS_TEST_TMPDIR/proj"
+  mkdir -p "$proj/.alfred"
+  echo '{"agent_id":"tester"}' > "$proj/.alfred/config.json"
+  printf '{"cwd":"%s","stop_hook_active":%s}' "$proj" "${1:-false}" \
+    | ALFRED_WAKE_CHECK_BIN="$WAKE" "$BATS_TEST_DIRNAME/../hooks/bridge-check.sh"
+}
+
+@test "stop hook blocks the stop when the bridge is not running" {
+  run hook false
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r .decision)" = "block" ]
+  [[ "$(printf '%s' "$output" | jq -r .reason)" == *"alfred-wake wait"* ]]
+}
+
+@test "stop hook stays silent while the bridge is armed" {
+  start a wait
+  until_true 30 pidfile_is "$a_pid"
+  run hook false
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "stop hook never blocks twice: a failed relaunch lets the stop through with a warning" {
+  run hook true
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.decision // "none"')" = "none" ]
+  [[ "$(printf '%s' "$output" | jq -r .systemMessage)" == WARNING:*"still not running"* ]]
+}
+
+@test "stop hook after a successful relaunch is silent" {
+  start a wait
+  until_true 30 pidfile_is "$a_pid"
+  run hook true
+  [ -z "$output" ]
+}
+
+@test "stop hook stays out of non-lead projects and can be switched off" {
+  run bash -c 'printf "{\"cwd\":\"/nonexistent\"}" | "$1"' _ "$BATS_TEST_DIRNAME/../hooks/bridge-check.sh"
+  [ -z "$output" ]
+  ALFRED_WAKE_STOP_CHECK=0 run hook false
+  [ -z "$output" ]
+}

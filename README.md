@@ -286,6 +286,18 @@ change the rules.
 Note: files in `rules/` are **not** loaded into session context by Claude Code
 (verified on 2.1.296); anything every session must see goes through this hook.
 
+## Bridge check at the end of every turn (Stop hook)
+
+A lead relaunches `alfred-wake wait` after every wake. If a turn ends without that, the session
+stays up but deaf. This was seen live on screenfields-ai on 2026-10-14: about three hours with no
+bridge, until a nudge. The plugin therefore ships a `Stop` hook, `hooks/bridge-check.sh`, which
+runs `alfred-wake status` when a turn ends. That is a pid check, with no network and no model call.
+- **Bridge down:** it blocks the stop once with "relaunch `alfred-wake wait`", so the same turn re-arms it.
+- **Still down after that relaunch:** it lets the stop through with a visible `WARNING` instead of blocking again, so it never loops.
+
+The hook only acts in projects with `.alfred/config.json` (an `agent_id`). Set
+`ALFRED_WAKE_STOP_CHECK=0` to switch it off.
+
 ## Agent identity convention
 
 Each agent has a unique `agent_id` set via the `AGENT_ID` env var. Choose a stable identifier — other agents will address you by that name.
