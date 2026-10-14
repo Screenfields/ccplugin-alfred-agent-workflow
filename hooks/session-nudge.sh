@@ -54,6 +54,17 @@ safe_to_type() {
   [ "$x" = 2 ]
 }
 
+# ends_with_our_prompt: the prompt input on screen ends with exactly our text,
+# so nothing was typed after it. Whitespace is ignored on both sides, because
+# the input box wraps long text over several lines.
+ends_with_our_prompt() {
+  local screen input want
+  screen=$("$tmux_bin" capture-pane -p -t "$pane" 2>/dev/null) || return 1
+  input=$(printf '%s\n' "$screen" | awk '/^(❯|>)/ { on = 1 } on && /^─/ { exit } on { print }' | tr -d '[:space:]')
+  want=$(printf '%s' "$prompt" | tr -d '[:space:]')
+  [ -n "$input" ] && [ "${input%"$want"}" != "$input" ]
+}
+
 for _ in $(seq "$tries"); do
   sleep "$delay"
   if bash -c "$status_cmd" >/dev/null 2>&1; then exit 0; fi
@@ -62,9 +73,14 @@ for _ in $(seq "$tries"); do
   "$tmux_bin" send-keys -t "$pane" -l "$prompt" || exit 0
   sleep 1
   # Re-check right before Enter. If the state changed (someone attached, a
-  # dialog opened, the watcher started), erase our text instead of submitting.
+  # dialog opened, the watcher started), do not submit. Erase our text only
+  # when it is still the exact end of the input; if anyone typed after it,
+  # leave it unsent: a visible [substrate wake] is harmless, lost keystrokes
+  # are not.
   if bash -c "$status_cmd" >/dev/null 2>&1 || attached || ! safe_to_type no; then
-    "$tmux_bin" send-keys -t "$pane" -N "${#prompt}" BSpace
+    if ends_with_our_prompt; then
+      "$tmux_bin" send-keys -t "$pane" -N "${#prompt}" BSpace
+    fi
     exit 0
   fi
   "$tmux_bin" send-keys -t "$pane" Enter

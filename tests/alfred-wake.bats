@@ -470,7 +470,7 @@ ctx_of() { printf '%s' "$1" | jq -r .hookSpecificOutput.additionalContext; }
   fake_tmux
   # Attach as soon as the prompt has been typed.
   cat >> "$BATS_TEST_TMPDIR/tmux" <<'EOF'
-[[ "$*" == *"-l "* ]] && echo 1 > "$STUB_DIR/attached"
+[[ "$*" == *"-l "* ]] && { echo 1 > "$STUB_DIR/attached"; printf '❯ %s%s\n──────\n' "${!#}" "$(cat "$STUB_DIR/typed_after" 2>/dev/null)" > "$STUB_DIR/pane"; }
 true
 EOF
   run session_hook startup
@@ -479,6 +479,22 @@ EOF
   grep -q 'substrate wake' "$STUB_DIR/keys"
   grep -q -- '-N [0-9]* BSpace' "$STUB_DIR/keys"
   ! grep -q ' Enter$' "$STUB_DIR/keys"
+}
+
+@test "nudge leaves its text alone when someone typed after it: no erase, no Enter" {
+  fake_tmux
+  cat >> "$BATS_TEST_TMPDIR/tmux" <<'EOF'
+[[ "$*" == *"-l "* ]] && { echo 1 > "$STUB_DIR/attached"; printf '❯ %s%s\n──────\n' "${!#}" "$(cat "$STUB_DIR/typed_after" 2>/dev/null)" > "$STUB_DIR/pane"; }
+true
+EOF
+  echo " hello there" > "$STUB_DIR/typed_after"
+  run session_hook startup
+  until_true 30 test -s "$STUB_DIR/keys"
+  sleep 1.5
+  grep -q 'substrate wake' "$STUB_DIR/keys"
+  ! grep -q 'BSpace' "$STUB_DIR/keys"
+  ! grep -q ' Enter$' "$STUB_DIR/keys"
+  [ "$(wc -l < "$STUB_DIR/keys")" -eq 1 ]
 }
 
 @test "session start with the watcher up and no mail: one quiet line, no nudge" {
