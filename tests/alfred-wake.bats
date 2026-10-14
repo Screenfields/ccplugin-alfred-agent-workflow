@@ -382,3 +382,84 @@ hook() {  # hook <stop_hook_active> — run bridge-check.sh for a lead project
   ALFRED_WAKE_STOP_CHECK=0 run hook false
   [ -z "$output" ]
 }
+
+# --- SessionStart check: watcher and inbox after a (re)start ----------------
+
+# fake tmux: logs send-keys, shows $STUB_DIR/pane as the screen
+fake_tmux() {
+  cat > "$BATS_TEST_TMPDIR/tmux" <<'EOF'
+#!/bin/bash
+case "$1" in
+  capture-pane) cat "$STUB_DIR/pane" 2>/dev/null; true ;;
+  send-keys) shift; echo "$*" >> "$STUB_DIR/keys" ;;
+esac
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/tmux"
+}
+
+session_hook() {  # session_hook <source> — run session-check.sh in a lead project
+  local proj="$BATS_TEST_TMPDIR/proj"
+  mkdir -p "$proj/.alfred"
+  echo '{"agent_id":"tester"}' > "$proj/.alfred/config.json"
+  printf '{"cwd":"%s","source":"%s"}' "$proj" "$1" \
+    | ALFRED_WAKE_CHECK_BIN="$WAKE" ALFRED_TMUX_BIN="$BATS_TEST_TMPDIR/tmux" \
+      ALFRED_NUDGE_DELAY=0.2 ALFRED_NUDGE_TRIES=3 TMUX_PANE="%9" \
+      "$BATS_TEST_DIRNAME/../hooks/session-check.sh"
+}
+ctx_of() { printf '%s' "$1" | jq -r .hookSpecificOutput.additionalContext; }
+
+@test "unread prints the agent-messaging unread count" {
+  inbox m1:alice m2:bob
+  run "$WAKE" unread
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+@test "session start with the watcher down: context says relaunch, read, report; one nudge typed" {
+  fake_tmux
+  inbox m1:alice
+  run session_hook resume
+  [ "$status" -eq 0 ]
+  [[ "$(ctx_of "$output")" == *"watcher is NOT running and the inbox has 1 unread"* ]]
+  [[ "$(ctx_of "$output")" == *'Bash(command: "alfred-wake wait", run_in_background: true)'* ]]
+  [[ "$(ctx_of "$output")" == *"/alfred-agent:check-messages"* ]]
+  until_true 30 test -s "$STUB_DIR/keys"
+  sleep 1
+  [ "$(grep -c 'substrate wake' "$STUB_DIR/keys")" -eq 1 ]
+  grep -q '^-t %9 Enter$' "$STUB_DIR/keys"
+}
+
+@test "nudge waits while a turn runs, and gives up once the watcher is up" {
+  fake_tmux
+  echo "  esc to interrupt" > "$STUB_DIR/pane"
+  run session_hook startup
+  sleep 0.5
+  [ ! -s "$STUB_DIR/keys" ]
+  start a wait
+  until_true 30 pidfile_is "$a_pid"
+  : > "$STUB_DIR/pane"
+  sleep 1
+  [ ! -s "$STUB_DIR/keys" ]
+}
+
+@test "session start with the watcher up and no mail: one quiet line, no nudge" {
+  fake_tmux
+  start a wait
+  until_true 30 pidfile_is "$a_pid"
+  run session_hook resume
+  [[ "$(ctx_of "$output")" == "Wake watcher: running. Inbox: 0 unread."* ]]
+  sleep 1
+  [ ! -s "$STUB_DIR/keys" ]
+}
+
+@test "compact never types into the pane; non-lead projects and the switch stay silent" {
+  fake_tmux
+  run session_hook compact
+  [[ "$(ctx_of "$output")" == *"NOT running"* ]]
+  sleep 1
+  [ ! -s "$STUB_DIR/keys" ]
+  run bash -c 'printf "{\"cwd\":\"/nonexistent\",\"source\":\"startup\"}" | "$1"' _ "$BATS_TEST_DIRNAME/../hooks/session-check.sh"
+  [ -z "$output" ]
+  ALFRED_SESSION_CHECK=0 run session_hook startup
+  [ -z "$output" ]
+}

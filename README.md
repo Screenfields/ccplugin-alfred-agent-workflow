@@ -286,6 +286,30 @@ change the rules.
 Note: files in `rules/` are **not** loaded into session context by Claude Code
 (verified on 2.1.296); anything every session must see goes through this hook.
 
+## Watcher and inbox check at every session start (SessionStart hook)
+
+A watcher is a background task of the session that started it, so it dies with that session:
+`/exit` + `claude -c`, a crash, or a pod restart. This was seen live on 2026-10-14, when the hub's
+bridge stayed down for 80 minutes after a session restart. `hooks/session-check.sh` runs at every
+session start (`startup`, `resume`, `clear`, `compact`):
+1. It checks the watcher with `alfred-wake status`, or with `ALFRED_WATCHER_STATUS_CMD` on a
+   session with another bridge, such as the hub's `hub-wake-bridge`. It also gets the unread count
+   from `alfred-wake unread`.
+2. It adds both to the session context. When the watcher is down or mail is waiting, it adds:
+   relaunch the watcher (`ALFRED_WATCHER_START_CMD`, default `alfred-wake wait`), run
+   `/alfred-agent:check-messages`, and report in one line.
+3. After a `startup`/`resume` in tmux with the watcher down, it starts the one-shot
+   `hooks/session-nudge.sh`. SessionStart context only acts on a first turn, and a session nobody
+   types into never gets one. Up to 4 times, 20 s apart, the helper:
+   - exits if the watcher runs;
+   - waits if a turn is running;
+   - otherwise types a fixed `[substrate wake]` prompt into this session's own pane, then exits.
+
+The hook only runs when a session starts, so a dormant lead is never woken by it, and nothing here
+polls. It only acts in projects with `.alfred/config.json` (an `agent_id`).
+- `ALFRED_SESSION_CHECK=0` switches it off.
+- `ALFRED_SESSION_NUDGE=0` keeps the context but never types into the pane.
+
 ## Bridge check at the end of every turn (Stop hook)
 
 A lead relaunches `alfred-wake wait` after every wake. If a turn ends without that, the session
