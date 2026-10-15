@@ -332,6 +332,19 @@ The hook only acts on Alfred devboxes (marker: the image's `/usr/local/lib/alfre
 in projects with `.alfred/config.json` (an `agent_id`). The hub and workstations run other bridges
 and are left alone. `ALFRED_WAKE_STOP_CHECK=1` forces the check on; `=0` switches it off.
 
+## Theme: owner prompts stand out (`themes/owner-prompts.json`)
+
+The plugin ships a Claude Code theme, **Owner prompts**: the dark preset with the owner's own
+prompts on a blue background (`userMessageBackground: #1e3a5f`), so they are easy to find in a
+long lead transcript. It appears in `/theme` as "Owner prompts from alfred-agent". Selecting it
+stores `"theme": "custom:alfred-agent:owner-prompts"` in the user `settings.json`.
+- **On Alfred devboxes,** the lead start (alfred-devbox) selects it when no theme has been chosen
+  yet. A theme someone already picked is never overridden.
+- **Anywhere else,** pick it once with `/theme`, or set that line in `~/.claude/settings.json`.
+
+Owner suggestion (via zeus and the hub), 2026-10-15. Hooks and status lines cannot recolour
+prompts; a theme can.
+
 ## Agent identity convention
 
 Each agent has a unique `agent_id` set via the `AGENT_ID` env var. Choose a stable identifier — other agents will address you by that name.

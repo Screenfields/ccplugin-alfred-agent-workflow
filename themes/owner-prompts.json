@@ -1,0 +1,7 @@
+{
+  "name": "Owner prompts",
+  "base": "dark",
+  "overrides": {
+    "userMessageBackground": "#1e3a5f"
+  }
+}
