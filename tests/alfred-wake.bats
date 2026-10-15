@@ -291,13 +291,13 @@ EOF
   ln -s "$(readlink -f "$WAKE")" "$ALFRED_WAKE_BIN_DIR/alfred-wake"
   run "$ALFRED_WAKE_BIN_DIR/alfred-wake" wait 5
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.5.0"* ]]
+  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.6.0"* ]]
   [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-wake")" = "$BATS_TEST_TMPDIR/cache/9.9.0/bin/alfred-wake" ]
-  grep -q "upgrade: 1.5.0 -> 9.9.0" "$STATE/alfred-wake.log"
+  grep -q "upgrade: 1.6.0 -> 9.9.0" "$STATE/alfred-wake.log"
 }
 
 @test "an older or equal installed alfred-wake is not used" {
-  for v in 1.0.0 1.5.0; do
+  for v in 1.0.0 1.6.0; do
     fake_install "$v"
     run timeout 3 "$WAKE" wait
     [[ "$output" != *"ran $v"* ]]
@@ -324,7 +324,7 @@ EOF
 @test "--version prints the version" {
   run "$WAKE" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "alfred-wake 1.5.0" ]
+  [ "$output" = "alfred-wake 1.6.0" ]
 }
 
 # --- Stop hook: never end a turn with the bridge down -----------------------
@@ -537,4 +537,61 @@ line 2" ]
   run "$WAKE" notify alfred-platform s b
   [ "$status" -eq 1 ]
   [ ! -s "$STUB_DIR/sent.jsonl" ]
+}
+
+# --- status --json: a just-woken lead is "handling", still armed -------------
+
+@test "status --json: waiting while a wait runs, handling after a wake, down after the grace" {
+  run "$WAKE" status --json
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s' "$output" | jq -r '.armed,.state,.pid,.lastWakeExitAt' | paste -sd' ' -)" = "false down null null" ]
+
+  start a wait
+  until_true 30 pidfile_is "$a_pid"
+  run "$WAKE" status --json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.armed,.state' | paste -sd' ' -)" = "true waiting" ]
+  [ "$(printf '%s' "$output" | jq -r .pid)" = "$a_pid" ]
+
+  inbox m1:alice
+  reap "$a_pid"
+  [ "$rc" -eq 0 ]
+  run "$WAKE" status --json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.armed,.state,.pid' | paste -sd' ' -)" = "true handling null" ]
+  [ "$(printf '%s' "$output" | jq -r '.lastWakeExitAgoSeconds')" -le 5 ]
+  # The plain status stays strict: the hooks must still see "not running".
+  run "$WAKE" status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"handling:   yes"* ]]
+
+  ALFRED_WAKE_HANDLING_GRACE=0 run "$WAKE" status --json
+  sleep 1
+  ALFRED_WAKE_HANDLING_GRACE=0 run "$WAKE" status --json
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s' "$output" | jq -r '.armed,.state' | paste -sd' ' -)" = "false down" ]
+}
+
+@test "status --json: a new wait ends handling; stopping it gives down, not stale handling" {
+  start a wait
+  until_true 30 pidfile_is "$a_pid"
+  inbox m1:alice
+  reap "$a_pid"
+  run "$WAKE" status --json
+  [ "$(printf '%s' "$output" | jq -r .state)" = "handling" ]
+  start b wait
+  until_true 30 pidfile_is "$b_pid"
+  kill -TERM "$b_pid"
+  reap "$b_pid"
+  run "$WAKE" status --json
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s' "$output" | jq -r '.armed,.state,.lastWakeExitAt' | paste -sd' ' -)" = "false down null" ]
+}
+
+@test "status --json: a bad grace falls back to 600, a future stamp never gives a negative age" {
+  mkdir -p "$STATE"
+  echo $(( $(date +%s) + 3600 )) > "$STATE/last_wake_exit"
+  ALFRED_WAKE_HANDLING_GRACE=10m run "$WAKE" status --json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.graceSeconds,.state,.lastWakeExitAgoSeconds' | paste -sd' ' -)" = "600 handling 0" ]
 }

@@ -39,7 +39,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.5.0"
+VERSION="1.6.0"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -67,6 +67,13 @@ AM_LEGACY_FILE="$STATE_DIR/am_legacy_until"
 FAILURES_FILE="$STATE_DIR/failures.json"
 BUZZ_IDENTITY_FILE="$STATE_DIR/buzz_identity.json"
 PID_FILE="$STATE_DIR/alfred-wake.pid"
+# Epoch of the last `wait` that exited with news (any WAKE line, WAKE-ERROR
+# included: the lead has to act on that too); `status --json` reports the lead
+# as "handling" (still armed) for HANDLING_GRACE seconds after it, until the
+# next wait starts.
+LAST_WAKE_FILE="$STATE_DIR/last_wake_exit"
+HANDLING_GRACE="${ALFRED_WAKE_HANDLING_GRACE:-600}"
+[[ "$HANDLING_GRACE" =~ ^[0-9]+$ ]] || HANDLING_GRACE=600
 LOCK_FILE="$STATE_DIR/alfred-wake.lock"
 
 # ---------------------------------------------------------------------------
@@ -984,6 +991,8 @@ cmd_run() {
   local mode="run"
   if [ "$WAIT_MODE" = "true" ]; then mode="wait"; fi
   log_line "started $mode (pid=$$ tick=${interval}s am_interval=${AM_INTERVAL}s state=$STATE_DIR)"
+  # A new wait ends the "handling" window of the previous wake.
+  rm -f "$LAST_WAKE_FILE"
 
   if buzz_probe; then BUZZ_ENABLED=true; else BUZZ_ENABLED=false; fi
 
@@ -1014,6 +1023,7 @@ cmd_run() {
         rc=0
         if grep -q '^WAKE-ERROR' "$news"; then rc=2; fi
         cleanup_files
+        now_epoch > "$LAST_WAKE_FILE" 2>/dev/null || true
         log_line "wait: news delivered, exit $rc"
         exit "$rc"
       fi
@@ -1154,8 +1164,46 @@ cmd_notify() {
   exit 0
 }
 
+# status_json: the machine-readable state for probes. A lead between a wake
+# and its relaunch (handling the news, up to HANDLING_GRACE s) counts as armed
+# here, so a busy lead does not flap to "degraded". "News" is any wake line,
+# WAKE-ERROR included. Starting a new wait ends the window. The plain `status` exit
+# code stays strict (a live wait only): the Stop and SessionStart hooks use it
+# to catch a turn that ends without the relaunch.
+#   {"armed": bool, "state": "waiting"|"handling"|"down", "pid": int|null,
+#    "lastWakeExitAt": "<ISO-8601 UTC>"|null, "lastWakeExitAgoSeconds": int|null,
+#    "graceSeconds": int, "version": "<x.y.z>"}
+# Exit 0 when armed, 1 when down.
+status_json() {
+  local pid live=false last="" ago="" state armed
+  pid=$(cat "$PID_FILE" 2>/dev/null || true)
+  if is_wake_pid "$pid"; then live=true; fi
+  last=$(cat "$LAST_WAKE_FILE" 2>/dev/null || true)
+  [[ "$last" =~ ^[0-9]+$ ]] || last=""
+  if [ -n "$last" ]; then
+    ago=$(( $(now_epoch) - last ))
+    [ "$ago" -ge 0 ] || ago=0   # clock step or future stamp: never negative
+  fi
+  if [ "$live" = true ]; then state=waiting; armed=true
+  elif [ -n "$ago" ] && [ "$ago" -le "$HANDLING_GRACE" ]; then state=handling; armed=true
+  else state=down; armed=false; fi
+  [ "$live" = true ] || pid=""
+  jq -cn --argjson armed "$armed" --arg state "$state" --arg pid "$pid" --arg last "$last" \
+    --arg ago "$ago" --argjson grace "$HANDLING_GRACE" --arg v "$VERSION" '{
+      armed: $armed, state: $state,
+      pid: (if $pid == "" then null else ($pid | tonumber) end),
+      lastWakeExitAt: (if $last == "" then null else ($last | tonumber | todate) end),
+      lastWakeExitAgoSeconds: (if $ago == "" then null else ($ago | tonumber) end),
+      graceSeconds: $grace, version: $v }'
+  [ "$armed" = true ]
+}
+
 cmd_status() {
-  local age pid
+  local age pid last ago
+  if [ "${1:-}" = "--json" ]; then
+    status_json
+    exit $?
+  fi
   echo "alfred-wake $VERSION"
   echo "state dir:  $STATE_DIR"
   echo "am url:     $AM_URL"
@@ -1177,6 +1225,13 @@ cmd_status() {
   else
     echo "armed:      no"
   fi
+  last=$(cat "$LAST_WAKE_FILE" 2>/dev/null || true)
+  if [[ "$last" =~ ^[0-9]+$ ]]; then
+    ago=$(( $(now_epoch) - last ))
+    if [ "$ago" -le "$HANDLING_GRACE" ]; then
+      echo "handling:   yes (woke ${ago}s ago; the session should relaunch wait)"
+    fi
+  fi
   exit 1
 }
 
@@ -1191,6 +1246,7 @@ Usage:
   alfred-wake check              one dry-run pass (no cursor writes); diagnostics on stderr
   alfred-wake install            symlink into ~/.local/bin
   alfred-wake status             show config; exit 0 only while a wait/run is alive
+  alfred-wake status --json      armed/state for probes (a just-woken lead counts as armed)
   alfred-wake unread             print the agent-messaging unread count
   alfred-wake notify TO SUBJ BODY  send one agent-messaging message
   alfred-wake --version          print the version
@@ -1214,7 +1270,7 @@ main() {
       if [ "${2:-}" = "--until-wake" ]; then cmd_wait "${3:-}"; else cmd_run "${2:-}"; fi
       ;;
     install) cmd_install ;;
-    status)  cmd_status ;;
+    status)  cmd_status "${2:-}" ;;
     unread)  cmd_unread ;;
     notify)  shift; cmd_notify "$@" ;;
     version|--version) echo "alfred-wake $VERSION"; exit 0 ;;
