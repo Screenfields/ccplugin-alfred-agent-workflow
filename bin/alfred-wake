@@ -67,10 +67,13 @@ AM_LEGACY_FILE="$STATE_DIR/am_legacy_until"
 FAILURES_FILE="$STATE_DIR/failures.json"
 BUZZ_IDENTITY_FILE="$STATE_DIR/buzz_identity.json"
 PID_FILE="$STATE_DIR/alfred-wake.pid"
-# Epoch of the last `wait` that exited with news; `status --json` reports the
-# lead as "handling" (still armed) for HANDLING_GRACE seconds after it.
+# Epoch of the last `wait` that exited with news (any WAKE line, WAKE-ERROR
+# included: the lead has to act on that too); `status --json` reports the lead
+# as "handling" (still armed) for HANDLING_GRACE seconds after it, until the
+# next wait starts.
 LAST_WAKE_FILE="$STATE_DIR/last_wake_exit"
 HANDLING_GRACE="${ALFRED_WAKE_HANDLING_GRACE:-600}"
+[[ "$HANDLING_GRACE" =~ ^[0-9]+$ ]] || HANDLING_GRACE=600
 LOCK_FILE="$STATE_DIR/alfred-wake.lock"
 
 # ---------------------------------------------------------------------------
@@ -988,6 +991,8 @@ cmd_run() {
   local mode="run"
   if [ "$WAIT_MODE" = "true" ]; then mode="wait"; fi
   log_line "started $mode (pid=$$ tick=${interval}s am_interval=${AM_INTERVAL}s state=$STATE_DIR)"
+  # A new wait ends the "handling" window of the previous wake.
+  rm -f "$LAST_WAKE_FILE"
 
   if buzz_probe; then BUZZ_ENABLED=true; else BUZZ_ENABLED=false; fi
 
@@ -1161,7 +1166,8 @@ cmd_notify() {
 
 # status_json: the machine-readable state for probes. A lead between a wake
 # and its relaunch (handling the news, up to HANDLING_GRACE s) counts as armed
-# here, so a busy lead does not flap to "degraded". The plain `status` exit
+# here, so a busy lead does not flap to "degraded". "News" is any wake line,
+# WAKE-ERROR included. Starting a new wait ends the window. The plain `status` exit
 # code stays strict (a live wait only): the Stop and SessionStart hooks use it
 # to catch a turn that ends without the relaunch.
 #   {"armed": bool, "state": "waiting"|"handling"|"down", "pid": int|null,
@@ -1174,7 +1180,10 @@ status_json() {
   if is_wake_pid "$pid"; then live=true; fi
   last=$(cat "$LAST_WAKE_FILE" 2>/dev/null || true)
   [[ "$last" =~ ^[0-9]+$ ]] || last=""
-  [ -n "$last" ] && ago=$(( $(now_epoch) - last ))
+  if [ -n "$last" ]; then
+    ago=$(( $(now_epoch) - last ))
+    [ "$ago" -ge 0 ] || ago=0   # clock step or future stamp: never negative
+  fi
   if [ "$live" = true ]; then state=waiting; armed=true
   elif [ -n "$ago" ] && [ "$ago" -le "$HANDLING_GRACE" ]; then state=handling; armed=true
   else state=down; armed=false; fi

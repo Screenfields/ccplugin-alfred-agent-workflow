@@ -571,3 +571,27 @@ line 2" ]
   [ "$status" -eq 1 ]
   [ "$(printf '%s' "$output" | jq -r '.armed,.state' | paste -sd' ' -)" = "false down" ]
 }
+
+@test "status --json: a new wait ends handling; stopping it gives down, not stale handling" {
+  start a wait
+  until_true 30 pidfile_is "$a_pid"
+  inbox m1:alice
+  reap "$a_pid"
+  run "$WAKE" status --json
+  [ "$(printf '%s' "$output" | jq -r .state)" = "handling" ]
+  start b wait
+  until_true 30 pidfile_is "$b_pid"
+  kill -TERM "$b_pid"
+  reap "$b_pid"
+  run "$WAKE" status --json
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s' "$output" | jq -r '.armed,.state,.lastWakeExitAt' | paste -sd' ' -)" = "false down null" ]
+}
+
+@test "status --json: a bad grace falls back to 600, a future stamp never gives a negative age" {
+  mkdir -p "$STATE"
+  echo $(( $(date +%s) + 3600 )) > "$STATE/last_wake_exit"
+  ALFRED_WAKE_HANDLING_GRACE=10m run "$WAKE" status --json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.graceSeconds,.state,.lastWakeExitAgoSeconds' | paste -sd' ' -)" = "600 handling 0" ]
+}

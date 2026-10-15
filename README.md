@@ -175,7 +175,7 @@ it cannot swallow news that the running bridge should deliver.
 | `alfred-wake install` | Symlink into `~/.local/bin` (override with `ALFRED_WAKE_BIN_DIR`) |
 | `alfred-wake status` | Print config; exit 0 only while a live `wait`/`run` process holds the pidfile |
 | `alfred-wake --version` | Print the version |
-| `alfred-wake status --json` | Machine-readable state for probes: `{"armed", "state": "waiting"\|"handling"\|"down", "pid", "lastWakeExitAt", "lastWakeExitAgoSeconds", "graceSeconds", "version"}`. A lead whose `wait` exited with news less than `ALFRED_WAKE_HANDLING_GRACE` s ago (default 600) is `handling` and counts as armed. Exit 0 when armed. The plain `status` exit code stays strict (a live wait only), because the hooks rely on it |
+| `alfred-wake status --json` | Machine-readable state for probes: `{"armed", "state": "waiting"\|"handling"\|"down", "pid", "lastWakeExitAt", "lastWakeExitAgoSeconds", "graceSeconds", "version"}`. A lead whose `wait` exited with news (any WAKE line, WAKE-ERROR included) less than `ALFRED_WAKE_HANDLING_GRACE` s ago (default 600; a non-integer value falls back to 600), with no wait started since, is `handling` and counts as armed. Exit 0 when armed. The plain `status` exit code stays strict (a live wait only), because the hooks rely on it |
 | `alfred-wake unread` | Print the agent-messaging unread count (one request; for the SessionStart check) |
 | `alfred-wake notify <to> <subject> <body>` | Send one agent-messaging message as this agent; exit 0 when accepted. For deterministic callers, e.g. the devbox boot reporting Remote Control off (alfred-devbox#70) |
 
