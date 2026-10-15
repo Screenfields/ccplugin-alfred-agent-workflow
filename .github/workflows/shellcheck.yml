@@ -11,12 +11,18 @@ on:
   pull_request:
     paths:
       - 'bin/**'
+      - 'hooks/**'
+      - 'themes/**'
+      - '.claude-plugin/**'
       - 'tests/**'
       - '.github/workflows/shellcheck.yml'
   push:
     branches: [main]
     paths:
       - 'bin/**'
+      - 'hooks/**'
+      - 'themes/**'
+      - '.claude-plugin/**'
       - 'tests/**'
       - '.github/workflows/shellcheck.yml'
 
@@ -33,13 +39,26 @@ jobs:
         run: shellcheck --version
 
       - name: Lint shipped scripts and test helpers
-        run: shellcheck bin/* tests/stub/*
+        run: shellcheck bin/* hooks/*.sh tests/stub/*
 
       - name: Syntax check
         run: |
           for f in bin/*; do
             bash -n "$f"
           done
+
+      - name: Plugin JSON parses (manifest, hooks, themes)
+        run: |
+          status=0
+          for f in .claude-plugin/plugin.json hooks/hooks.json themes/*.json; do
+            [ -e "$f" ] || continue
+            jq -e 'type == "object"' "$f" >/dev/null || { echo "::error file=$f::not a JSON object"; status=1; }
+          done
+          for f in themes/*.json; do
+            [ -e "$f" ] || continue
+            jq -e '(.overrides // {}) | type == "object"' "$f" >/dev/null || { echo "::error file=$f::overrides must be an object"; status=1; }
+          done
+          exit $status
 
       - name: Scripts must be executable and free of `set -x`
         run: |
