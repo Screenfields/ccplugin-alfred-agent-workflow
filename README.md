@@ -150,7 +150,7 @@ one (SIGTERM, then SIGKILL after `ALFRED_WAKE_STOP_GRACE` seconds), which prints
 There is no polling fallback: a scheduled check may not consume tokens
 (platform doctrine 22). If the wait cannot start, or `WAKE-ERROR
 agent-messaging` repeats, the session tells the user once and messages
-`alfred-platform` ("wake bridge down on <agent_id>"); the hub's nudge-watcher
+`hub` ("wake bridge down on <agent_id>"); the hub's nudge-watcher
 catches deaf leads deterministically.
 
 ### Verifying it
@@ -266,7 +266,7 @@ Delete the state dir to force a fresh seed.
 
 | Agent | Today |
 |---|---|
-| **hub** (`alfred-platform`) | Its own `scripts/hub/wake-bridge.sh` on platform-ops, live since 2026-09-10; polls agent-messaging + Buzz channels via the `buzz` CLI |
+| **hub** (`hub`; repo alfred-platform) | Its own `scripts/hub/wake-bridge.sh` on platform-ops, live since 2026-09-10; polls agent-messaging + Buzz channels via the `buzz` CLI |
 | **Metis** | In-session Monitor polling its buzz-mcp sidecar (20 s) + inbox, re-armed at bootstrap — the pattern this script generalises |
 | **Zelda** | Out of scope: the Hermes runtime holds its own relay socket |
 | **every other lead** | 15-minute inbox loops — this is what `alfred-wake` replaces |

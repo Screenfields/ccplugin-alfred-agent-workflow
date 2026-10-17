@@ -520,21 +520,21 @@ EOF
 }
 
 @test "notify sends one message as this agent and prints nothing" {
-  run "$WAKE" notify alfred-platform "[login] x: Remote Control off" "line 1
+  run "$WAKE" notify hub "[login] x: Remote Control off" "line 1
 line 2"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [ "$(jq -r .to "$STUB_DIR/sent.jsonl")" = "alfred-platform" ]
+  [ "$(jq -r .to "$STUB_DIR/sent.jsonl")" = "hub" ]
   [ "$(jq -r .subject "$STUB_DIR/sent.jsonl")" = "[login] x: Remote Control off" ]
   [ "$(jq -r .body "$STUB_DIR/sent.jsonl")" = "line 1
 line 2" ]
 }
 
 @test "notify fails cleanly: missing arguments exit 2, server down exit 1" {
-  run "$WAKE" notify alfred-platform "subject only"
+  run "$WAKE" notify hub "subject only"
   [ "$status" -eq 2 ]
   touch "$STUB_DIR/fail"
-  run "$WAKE" notify alfred-platform s b
+  run "$WAKE" notify hub s b
   [ "$status" -eq 1 ]
   [ ! -s "$STUB_DIR/sent.jsonl" ]
 }

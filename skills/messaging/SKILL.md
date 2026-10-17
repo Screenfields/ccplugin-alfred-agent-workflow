@@ -27,7 +27,7 @@ Each project has a unique agent ID configured in `.mcp.json`:
 
 | Project | X-Agent-ID |
 |---------|------------|
-| alfred-platform | `alfred-platform` |
+| hub (repo alfred-platform) | `hub` |
 | alfred-agent-messaging | `alfred-agent-messaging` |
 | secret-service | `secret-service` |
 | project-manager | `project-manager` |

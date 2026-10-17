@@ -20,7 +20,7 @@ complete set of drafts — human reviews and commits each one. Not a one-shot au
 Use this skill when **all three** of the following hold:
 
 1. **Three or more agents will be involved** — the new spoke will need to send/receive messages
-   from at least two other platform agents (e.g., alfred-platform, project-manager).
+   from at least two other platform agents (e.g., hub, project-manager).
 2. **Cross-project scope** — the spoke owns infrastructure or capabilities that other projects
    depend on (e.g., a shared service, a new plugin source repo, a platform utility).
 3. **Shared infrastructure is required** — the spoke needs a devbox K8s manifest, a gitops
@@ -174,7 +174,7 @@ Guidance for Claude Code sessions running as the **{project-name} lead-agent**.
 
 ## Coordination
 
-- **alfred-platform:** message for architecture decisions, infrastructure changes
+- **hub:** message for architecture decisions, infrastructure changes
 - **project-manager:** message for scaffolding, new repo requests
 - **alfred-cc-tools:** message for plugin/skill updates
 
@@ -296,7 +296,7 @@ After all drafts are produced, output this checklist for the human to work throu
 ### Manual registration steps
 - [ ] Create GitHub App installation, store key in 1Password
 - [ ] Confirm messaging identity active (first message sent with X-Agent-ID: {project-name})
-- [ ] Message alfred-platform to add repo to lead-role token-generator manifest
+- [ ] Message hub to add repo to lead-role token-generator manifest
 - [ ] Verify gitops PR merged and token re-minted (ESO confirms within ~30s of merge)
 - [ ] Message project-manager if new repos need scaffolding
 

@@ -65,7 +65,7 @@ line, or prints `WAKE-ERROR alfred-wake`), or when `WAKE-ERROR agent-messaging`
 comes back a second time in a session. Then, once per session:
 
 1. Tell the user in one line: `wake bridge down: <the error line>`.
-2. Send `alfred-platform` the subject `wake bridge down on <agent_id>`, with
+2. Send `hub` the subject `wake bridge down on <agent_id>`, with
    the error line as the body. If agent-messaging itself is what is down, the
    send fails; the user line is then the whole report.
 
