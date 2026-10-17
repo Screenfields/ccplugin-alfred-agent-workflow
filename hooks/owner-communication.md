@@ -36,7 +36,7 @@ your inbox stalls, possibly for hours (alfred-platform#917).
   1. Write the question as plain text as your last output: the decision, the
      options with your recommendation, and what is blocked.
   2. If it blocks you and a written question is not enough, send
-     `alfred-platform` an `[owner-join] <project>: <decision>` message
+     `hub` an `[owner-join] <project>: <decision>` message
      (Decision, Options, Blocked, Session). The hub brings it to the owner.
   3. Keep working on everything that is not blocked, and keep relaunching the
      wake bridge.

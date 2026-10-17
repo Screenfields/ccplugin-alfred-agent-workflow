@@ -83,7 +83,7 @@ At the start of every session using this plugin, agents MUST, in this order:
 
    **Never fall back to a `/loop` or any other periodic check-messages** — a
    scheduled check may not consume tokens (platform doctrine 22). If the wait
-   cannot run, tell the user once and notify `alfred-platform` ("wake bridge
+   cannot run, tell the user once and notify `hub` ("wake bridge
    down on <agent_id>"); see "Bridge down" in `commands/check-messages.md`.
 
 2. **Run `/alfred-agent:check-messages` once** to pick up anything that arrived
