@@ -319,6 +319,19 @@ polls. It only acts in projects with `.alfred/config.json` (an `agent_id`).
 - `ALFRED_SESSION_CHECK=0` switches it off.
 - `ALFRED_SESSION_NUDGE=0` keeps the context but never types into the pane.
 
+## Rules and doctrines in every session (SessionStart hook)
+
+`hooks/doctrines-context.sh` puts two things into every session's context
+(ccplugin#121, AP-ADR0021):
+- every `rules/*.md` file **in full**. Each is one short judgment.
+- an **index of the 22 doctrines** in `doctrines/`: one line per doctrine (number, title, its
+  one-line rule), plus the path of the full texts, which the agent reads on demand.
+
+Claude Code does not load a plugin's `rules/` folder by itself (ccplugin#110), so this hook is
+how the rules reach a session. The doctrines are owned in `Screenfields/alfred-platform`
+`docs/doctrines/` and copied here verbatim; see `doctrines/README.md`. The context stays under the
+10,000-character hook cap, and a test enforces 9,500.
+
 ## Bridge check at the end of every turn (Stop hook)
 
 A lead relaunches `alfred-wake wait` after every wake. If a turn ends without that, the session
