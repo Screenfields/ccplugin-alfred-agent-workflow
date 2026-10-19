@@ -595,3 +595,23 @@ line 2" ]
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.graceSeconds,.state,.lastWakeExitAgoSeconds' | paste -sd' ' -)" = "600 handling 0" ]
 }
+
+# --- doctrines and rules in the session context (ccplugin#121) ---------------
+
+@test "doctrines hook: every rule in full, one index line per doctrine, under the hook cap" {
+  run "$BATS_TEST_DIRNAME/../hooks/doctrines-context.sh"
+  [ "$status" -eq 0 ]
+  ctx=$(printf '%s' "$output" | jq -r .hookSpecificOutput.additionalContext)
+  [ "$(printf '%s' "$output" | jq -r .hookSpecificOutput.hookEventName)" = "SessionStart" ]
+  # Every rules/ file appears in full (first 60 characters checked).
+  for f in "$BATS_TEST_DIRNAME"/../rules/*.md; do
+    head_txt=$(tr '\n' ' ' < "$f" | cut -c1-60)
+    [[ "$ctx" == *"$head_txt"* ]]
+  done
+  # One "- DNN <title>: <rule>" line per doctrine file, none with an empty title or rule.
+  n_files=$(ls "$BATS_TEST_DIRNAME"/../doctrines/[0-9][0-9]-*.md | wc -l)
+  [ "$(printf '%s\n' "$ctx" | grep -cE '^- D[0-9]{2} [^:]+: .+')" -eq "$n_files" ]
+  ! printf '%s\n' "$ctx" | grep -qE '^- D[0-9]{2} :'
+  # Hook strings are capped at 10,000 characters; keep headroom.
+  [ "${#ctx}" -lt 9500 ]
+}
