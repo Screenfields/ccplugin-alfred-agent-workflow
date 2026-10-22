@@ -419,6 +419,46 @@ note() {
   CLAUDE_CODE_ENTRYPOINT="${2-cli}" "$LC" note-turn < <(jq -cn --arg c "$PROJ" --arg p "$1" '{session_id: "s1", cwd: $c, prompt: $p}')
 }
 
+# note_src <source> — as note, with a hook-input `source` field (CCW-141).
+note_src() {
+  CLAUDE_CODE_ENTRYPOINT=cli "$LC" note-turn < <(jq -cn --arg c "$PROJ" --arg s "$1" '{session_id: "s1", cwd: $c, prompt: "hello", source: $s}')
+}
+
+@test "machine turn: source system" {
+  rm -rf "$STATEDIR"; note_src system
+  [ "$(state_of .last_turn)" = "machine" ]
+}
+
+@test "machine turn: source loop_wakeup" {
+  rm -rf "$STATEDIR"; note_src loop_wakeup
+  [ "$(state_of .last_turn)" = "machine" ]
+}
+
+@test "machine turn: source schedule_wakeup" {
+  rm -rf "$STATEDIR"; note_src schedule_wakeup
+  [ "$(state_of .last_turn)" = "machine" ]
+}
+
+@test "machine turn: source poll_event" {
+  rm -rf "$STATEDIR"; note_src poll_event
+  [ "$(state_of .last_turn)" = "machine" ]
+}
+
+@test "owner turn: source user and sdk still count as owner" {
+  for s in user sdk; do
+    rm -rf "$STATEDIR"; note_src "$s"
+    [ "$(state_of .last_turn)" = "owner" ] || { echo "$s"; return 1; }
+  done
+}
+
+@test "note-turn with a missing lib records a machine turn and exits 0" {
+  cp -r "$ROOT/bin" "$BATS_TEST_TMPDIR/pl-bin"
+  rm -rf "$STATEDIR"
+  CLAUDE_CODE_ENTRYPOINT=cli run "$BATS_TEST_TMPDIR/pl-bin/alfred-loop-check" note-turn < <(jq -cn --arg c "$PROJ" '{session_id: "s1", cwd: $c, prompt: "hello"}')
+  [ "$status" -eq 0 ]
+  [ "$(state_of .last_turn)" = "machine" ]
+}
+
 @test "owner turn: interactive session, plain prompt: a soft note, never a block" {
   issues o/a "7:Fix:status:ready"
   note "please look at the board"
@@ -790,7 +830,7 @@ one_object() { [ "$(jq -s length <<< "$output")" -le 1 ]; }
 }
 
 @test "audit: hook-mode scripts hold no set -e/-u and no non-zero exit outside the cli-only lines" {
-  for f in "$ROOT/hooks/stop.sh" "$ROOT/bin/alfred-loop-check"; do
+  for f in "$ROOT/hooks/stop.sh" "$ROOT/bin/alfred-loop-check" "$ROOT/hooks/reply-timestamp.sh" "$ROOT/lib/owner-turn.sh"; do
     not grep -nE '^\s*set\s+-[a-z]*[eu]' "$f"
     bad=$(grep -nE '\bexit +[1-9]' "$f" | grep -v 'cli-only' || true)
     [ -z "$bad" ] || { echo "$f: $bad"; return 1; }
