@@ -55,6 +55,11 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/alfred-workitem\" hook",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/reply-timestamp.sh\"",
+            "timeout": 5
           }
         ]
       }
