@@ -491,6 +491,7 @@ note_turn_main() {
   prompt=$(jq -r '.prompt // empty' <<< "$input" 2>/dev/null)
   src=$(jq -r '.source // empty' <<< "$input" 2>/dev/null)
   # shellcheck source=../lib/owner-turn.sh
+  # shellcheck disable=SC1091
   . "$HERE/../lib/owner-turn.sh" 2>/dev/null || is_owner_turn() { return 1; }
   kind=machine
   is_owner_turn "${CLAUDE_CODE_ENTRYPOINT:-}" "$src" "$prompt" && kind=owner

@@ -61,7 +61,7 @@ jobs:
       - name: Hook exit-code audit
         run: |
           status=0
-          for f in hooks/stop.sh bin/alfred-loop-check; do
+          for f in hooks/stop.sh bin/alfred-loop-check hooks/reply-timestamp.sh lib/owner-turn.sh; do
             if grep -nE '^\s*set\s+-[a-z]*[eu]' "$f"; then
               echo "::error file=$f::hook-mode script must not use set -e or set -u"
               status=1

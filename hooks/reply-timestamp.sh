@@ -17,6 +17,7 @@
 input=$(cat)
 command -v jq >/dev/null 2>&1 || exit 0
 # shellcheck source=../lib/owner-turn.sh
+# shellcheck disable=SC1091
 . "$(dirname "$0")/../lib/owner-turn.sh" 2>/dev/null || exit 0
 
 src=$(jq -r '.source // empty' <<< "$input" 2>/dev/null)
@@ -31,7 +32,12 @@ if [ -n "${ALFRED_REPLY_TS_LOG:-}" ]; then
 fi
 [ "$owner" = true ] || exit 0
 
-now=$(TZ=Europe/Amsterdam date '+%F %H:%M %Z' 2>/dev/null)
+# ALFRED_REPLY_TS_NOW=<epoch> fixes the instant; used only by the DST test.
+if [ -n "${ALFRED_REPLY_TS_NOW:-}" ]; then
+  now=$(TZ=Europe/Amsterdam date -d "@$ALFRED_REPLY_TS_NOW" '+%F %H:%M %Z' 2>/dev/null)
+else
+  now=$(TZ=Europe/Amsterdam date '+%F %H:%M %Z' 2>/dev/null)
+fi
 case "$now" in
   *" CET"|*" CEST") ;;
   *) echo "reply-timestamp: no Europe/Amsterdam time (tzdata missing?), no time line" >&2; exit 0 ;;

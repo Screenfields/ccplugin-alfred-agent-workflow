@@ -75,6 +75,15 @@ line_is() {
   [[ "$(jq -r '.hookSpecificOutput.additionalContext' <<< "$output")" =~ _\[[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}\ CES?T\]_ ]]
 }
 
+@test "DST boundary 2026-10-25 (real date, fixed instant): 00:30 UTC is 02:30 CEST, 01:30 UTC is 02:30 CET" {
+  [ -e /usr/share/zoneinfo/Europe/Amsterdam ] || skip "no Europe/Amsterdam tzdata"
+  rm "$BATS_TEST_TMPDIR/bin/date"
+  ALFRED_REPLY_TS_NOW=$(date -u -d '2026-10-25 00:30' +%s) hook "$(prompt_json "hello" user)"
+  line_is "2026-10-25 02:30 CEST"
+  ALFRED_REPLY_TS_NOW=$(date -u -d '2026-10-25 01:30' +%s) hook "$(prompt_json "hello" user)"
+  line_is "2026-10-25 02:30 CET"
+}
+
 @test "missing tzdata (zone is not CET or CEST): no output, one line on stderr" {
   FAKE_DATE="2026-10-22 16:40 UTC" hook "$(prompt_json "hello" user)"
   silent
