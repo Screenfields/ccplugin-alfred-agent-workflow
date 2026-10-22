@@ -478,7 +478,7 @@ cli_main() {
 # (an interactive session and a prompt without a machine prefix) or a machine.
 # Unknown is treated as machine, so the check falls back to blocking.
 note_turn_main() {
-  local input sid cwd prompt kind ep prev
+  local input sid cwd prompt kind src prev
   command -v jq >/dev/null 2>&1 || return
   [ "${ALFRED_LOOP_CHECK:-1}" = "0" ] && return
   [ "${ALFRED_ROLE:-}" = "worker" ] && return
@@ -489,13 +489,11 @@ note_turn_main() {
   [ -n "$cwd" ] || cwd="$PWD"
   [ -f "$cwd/.alfred/config.json" ] || return
   prompt=$(jq -r '.prompt // empty' <<< "$input" 2>/dev/null)
-  prompt="${prompt#"${prompt%%[![:space:]]*}"}"
-  kind=owner
-  ep="${CLAUDE_CODE_ENTRYPOINT:-}"
-  case "$ep" in cli|claude-vscode|claude-desktop) ;; *) kind=machine ;; esac
-  case "$prompt" in
-    "<task-notification>"*|"<cross-session-message"*|"[substrate wake]"*|"<scheduled-task"*|"[scheduled-task"*|"") kind=machine ;;
-  esac
+  src=$(jq -r '.source // empty' <<< "$input" 2>/dev/null)
+  # shellcheck source=../lib/owner-turn.sh
+  . "$HERE/../lib/owner-turn.sh" 2>/dev/null || is_owner_turn() { return 1; }
+  kind=machine
+  is_owner_turn "${CLAUDE_CODE_ENTRYPOINT:-}" "$src" "$prompt" && kind=owner
   SID="$sid"
   prev=$(read_state)
   write_state "$(jq -c --arg k "$kind" --argjson n "$(now)" '. + {last_turn: $k, last_turn_ts: $n}' <<< "$prev")"
