@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Test double for curl, for bin/ecr-models-check. Records its argv in
+# $STUB_DIR/argv and the header file's content and mode in $STUB_DIR/hdr and
+# $STUB_DIR/hdr.mode, then answers GET /v1/models from $STUB_DIR/models.json
+# with the HTTP code in $STUB_DIR/code (default 200).
+out="" hdrfile=""
+printf '%s\n' "$@" > "$STUB_DIR/argv"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -H) case "$2" in @*) hdrfile="${2#@}" ;; esac; shift 2 ;;
+    -w|--max-time) shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$hdrfile" ]; then
+  cp "$hdrfile" "$STUB_DIR/hdr"
+  stat -c %a "$hdrfile" > "$STUB_DIR/hdr.mode"
+fi
+[ -n "$out" ] && cp "$STUB_DIR/models.json" "$out"
+cat "$STUB_DIR/code" 2>/dev/null || printf 200

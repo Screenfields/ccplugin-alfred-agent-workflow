@@ -27,7 +27,7 @@ Query three external top-tier AI models via LiteLLM **plus** a Claude sub-agent 
 |----------|----------|----------|---------|------------|
 | `gpt-5.4` | OpenAI | Strongest overall reasoning, thorough implementation details | 90s | 8000 |
 | `gemini-3.1-pro` | Google | Practical, concise, good at catching operational risks | 90s | 8000 |
-| `glm-5.1` | Fireworks (Zhipu) | Strong structured analysis, good at edge cases; thinking model | 180s | 12000 |
+| `glm-5.3` | Fireworks (Zhipu) | Strong structured analysis, good at edge cases; thinking model that spends most of its tokens on reasoning (about 11.5k completion tokens on a 10.8k-token prompt) | 400s | 32000 |
 
 ### Self-Review Sub-Agent (4th voice — via Agent tool)
 
@@ -43,8 +43,8 @@ The sub-agent is given the ECR prompt and asked to return: verdict, top-3 insigh
 
 | Model ID | Provider | Use when | Timeout | max_tokens |
 |----------|----------|----------|---------|------------|
-| `kimi-k2` | Fireworks (Moonshot) | Alternative to GLM-5.1, strong on complex reasoning; thinking model | 180s | 12000 |
-| `deepseek-v4-pro` | Fireworks (DeepSeek) | Budget option, good for code-heavy reviews; thinking model | 180s | 12000 |
+| `kimi-k3` | Fireworks (Moonshot) | Alternative to GLM-5.3, strong on complex reasoning; thinking model; slow, untested to completion (timed out at 300s) | 600s | 32000 |
+| `deepseek-v4.1-flash` | Fireworks (DeepSeek) | Budget option, good for code-heavy reviews | 180s | 12000 |
 | `o3` | OpenAI | Deep reasoning — **only if gpt-5.4 fails for a non-quota reason**; same provider means o3 also fails on quota errors | 90s | 8000 |
 
 ### Rules
@@ -125,10 +125,11 @@ if [ -z "$LITELLM_KEY" ]; then
 fi
 PROMPT=$(cat /tmp/ecr-prompt.txt)
 
-# Timeout: 90s for OpenAI/Google; 180s for Fireworks (glm-5.1, kimi-k2, deepseek-v4-pro)
-# max_tokens: 8000 for OpenAI/Google; 12000 for Fireworks thinking models (they burn tokens on reasoning traces)
-TIMEOUT=90     # override to 180 for Fireworks models
-MAX_TOKENS=8000  # override to 12000 for Fireworks models
+# Timeout: 90s for OpenAI/Google; 400s glm-5.3; 600s kimi-k3; 180s deepseek-v4.1-flash
+# max_tokens: 8000 for OpenAI/Google; 32000 for glm-5.3 and kimi-k3 (thinking models burn
+# most of their tokens on reasoning; 12000 left glm-5.3 with no content); 12000 for deepseek-v4.1-flash
+TIMEOUT=90     # override per the table: 400 glm-5.3, 600 kimi-k3, 180 deepseek-v4.1-flash
+MAX_TOKENS=8000  # override per the table: 32000 glm-5.3 and kimi-k3, 12000 deepseek-v4.1-flash
 RESULT=$(curl -s --max-time "$TIMEOUT" "$LITELLM_URL/v1/chat/completions" \
   -H "Authorization: Bearer $LITELLM_KEY" \
   -H "Content-Type: application/json" \
@@ -180,7 +181,7 @@ Format:
 |-------|----------|---------|-------------|
 | GPT 5.4 | OpenAI | ... | ... |
 | Gemini 3.1 Pro | Google | ... | ... |
-| GLM-5.1 | Fireworks | TIMEOUT (>180s) | — |
+| GLM-5.3 | Fireworks | TIMEOUT (>400s) | — |
 | Claude Opus 4.8 | Anthropic (sub-agent) | ... | ... |
 
 ### Consensus
@@ -206,13 +207,15 @@ LiteLLM proxy is reachable via the `LITELLM_URL` env var. Default if unset: `htt
 
 Available top-tier models:
 ```
-gpt-5.4          OpenAI
-gemini-3.1-pro   Google
-glm-5.1          Fireworks (Zhipu)
-kimi-k2          Fireworks (Moonshot)
-deepseek-v4-pro  Fireworks (DeepSeek)
-o3               OpenAI (reasoning)
+gpt-5.4              OpenAI
+gemini-3.1-pro       Google
+glm-5.3              Fireworks (Zhipu)
+kimi-k3              Fireworks (Moonshot)
+deepseek-v4.1-flash  Fireworks (DeepSeek)
+o3                   OpenAI (reasoning)
 ```
+
+The key's model list changes. Run `${CLAUDE_PLUGIN_ROOT}/bin/ecr-models-check` to confirm every model named in the two tables above is on the `ecr-reviews` key (`GET /v1/models`); it exits non-zero and names the missing ones, and prints `skipped: no LITELLM_API_KEY` when the key is absent.
 
 ECR virtual key: `op://sf-platform/litellm/virtual-key/ecr-reviews/password` — read via `LITELLM_API_KEY` env var first, `op` CLI as fallback (see Step 3).
 
