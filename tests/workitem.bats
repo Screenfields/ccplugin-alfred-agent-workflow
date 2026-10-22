@@ -687,18 +687,34 @@ suppressed() {
   [ "$(jq -r --arg s "$1" 'select(.session_id == $s) | .notified' "$DIR/deviations.jsonl")" = "suppressed:$2" ]
 }
 
+# dev_rec <sid> <first-ago-s> <last-ago-s> [transcript] — a deviation record with those ages.
+dev_rec() {
+  jq -cn --arg s "$1" --arg f "$(date -u -d "$2 seconds ago" +%Y-%m-%dT%H:%M:%SZ)" --arg l "$(date -u -d "$3 seconds ago" +%Y-%m-%dT%H:%M:%SZ)" --arg t "${4:-}" \
+    '{session_id: $s, first_unmarked_at: $f, last_seen_at: $l, cwd: "/x"} + (if $t == "" then {} else {transcript: $t} end)' > "$DIR/deviations.jsonl"
+}
+
+# ts_transcript <file> <started-ago-s> <tool-calls> — a transcript whose first entry has that age.
+ts_transcript() {
+  local i
+  jq -cn --arg t "$(date -u -d "$2 seconds ago" +%Y-%m-%dT%H:%M:%SZ)" '{type: "user", timestamp: $t, message: {role: "user", content: "hi"}}' > "$1"
+  jq -cn '{type: "assistant", message: {role: "assistant", content: [{type: "text", text: "x"}]}}' >> "$1"
+  for ((i = 0; i < $3; i++)); do
+    jq -cn '{type: "assistant", message: {role: "assistant", content: [{type: "tool_use", id: "t", name: "Bash", input: {}}]}}' >> "$1"
+  done
+}
+
 @test "a zero-length window sends nothing but is recorded" {
   export CLAUDE_CODE_ENTRYPOINT=cli
   mkdir -p "$DIR"
-  jq -cn '{session_id: "sess-zero", first_unmarked_at: "2026-01-01T00:00:00Z", last_seen_at: "2026-01-01T00:00:00Z", cwd: "/x"}' > "$DIR/deviations.jsonl"
+  dev_rec sess-zero 0 0
   "$WI" check-session sess-zero
   suppressed sess-zero short-window
 }
 
-@test "a window under 60 s sends nothing but is recorded" {
+@test "a 30 s window sends nothing but is recorded" {
   export CLAUDE_CODE_ENTRYPOINT=cli
   mkdir -p "$DIR"
-  jq -cn '{session_id: "sess-short", first_unmarked_at: "2026-01-01T00:00:00Z", last_seen_at: "2026-01-01T00:00:59Z", cwd: "/x"}' > "$DIR/deviations.jsonl"
+  dev_rec sess-short 30 0
   "$WI" check-session sess-short
   suppressed sess-short short-window
 }
@@ -749,6 +765,53 @@ suppressed() {
   long_unmarked sess-unmarked
   "$WI" check-session sess-unmarked
   [ "$(jq -r '.subject' "$STUB_DIR/notify.jsonl")" = "[deviation] sess-unmarked" ]
+}
+
+@test "one prompt then long unmarked work with many tool calls sends (window 0 s between Stops)" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  mkdir -p "$DIR"
+  ts_transcript "$BATS_TEST_TMPDIR/t.jsonl" 3600 12
+  dev_rec sess-unmarked 0 0 "$BATS_TEST_TMPDIR/t.jsonl"
+  touch "$STUB_DIR/fail"
+  "$WI" check-session sess-unmarked
+  [ "$(jq -r '.subject' "$STUB_DIR/notify.jsonl")" = "[deviation] sess-unmarked" ]
+}
+
+@test "tool calls without any transcript timestamps are never suppressed as short-window" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  mkdir -p "$DIR"
+  transcript "$BATS_TEST_TMPDIR/t.jsonl" hi 5
+  dev_rec sess-unmarked 0 0 "$BATS_TEST_TMPDIR/t.jsonl"
+  touch "$STUB_DIR/fail"
+  "$WI" check-session sess-unmarked
+  [ -s "$STUB_DIR/notify.jsonl" ]
+}
+
+@test "a two-turn session with Stops 30 s apart, a transcript from 1 h ago and tool calls sends" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  mkdir -p "$DIR"
+  ts_transcript "$BATS_TEST_TMPDIR/t.jsonl" 3600 4
+  dev_rec sess-unmarked 30 0 "$BATS_TEST_TMPDIR/t.jsonl"
+  "$WI" check-session sess-unmarked
+  [ -s "$STUB_DIR/notify.jsonl" ]
+}
+
+@test "a true 10 s scratch session without tool calls is still suppressed" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  mkdir -p "$DIR"
+  ts_transcript "$BATS_TEST_TMPDIR/t.jsonl" 10 0
+  dev_rec sess-unmarked 10 0 "$BATS_TEST_TMPDIR/t.jsonl"
+  "$WI" check-session sess-unmarked
+  suppressed sess-unmarked short-window
+}
+
+@test "a later Stop of a resumed session keeps the suppressed tag" {
+  export CLAUDE_CODE_ENTRYPOINT=sdk-cli
+  long_unmarked sess-unmarked
+  "$WI" check-session sess-unmarked
+  hook_in "$(ev Stop sess-unmarked)"
+  [ "$(jq -r '.notified' "$DIR/deviations.jsonl")" = "suppressed:non-interactive" ]
+  [ -n "$(jq -r '.notified_at // empty' "$DIR/deviations.jsonl")" ]
 }
 
 @test "the detached SessionEnd run is time-limited" {

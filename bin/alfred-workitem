@@ -405,20 +405,22 @@ with_dev_lock() {
 record_deviation() { with_dev_lock record_deviation_locked "$@"; }
 
 record_deviation_locked() { # <sid> <cwd> [transcript path]
-  local sid="$1" cwd="$2" tpath="${3:-}" old first="" notified="" now tmp
+  local sid="$1" cwd="$2" tpath="${3:-}" old first="" notified="" tag="" now tmp
   now=$(now_iso)
   old=$(jq -c --arg s "$sid" 'select(.session_id == $s)' "$DEV_FILE" 2>/dev/null | head -1)
   if [ -n "$old" ]; then
     first=$(jq -r '.first_unmarked_at' <<<"$old")
     notified=$(jq -r '.notified_at // empty' <<<"$old")
+    tag=$(jq -r '.notified // empty' <<<"$old")
   fi
   tmp="$DEV_FILE.tmp.$$"
   {
     jq -c --arg s "$sid" 'select(.session_id != $s)' "$DEV_FILE" 2>/dev/null
-    jq -cn --arg s "$sid" --arg first "${first:-$now}" --arg last "$now" --arg cwd "$cwd" --arg n "$notified" --arg t "$tpath" \
+    jq -cn --arg s "$sid" --arg first "${first:-$now}" --arg last "$now" --arg cwd "$cwd" --arg n "$notified" --arg g "$tag" --arg t "$tpath" \
       '{session_id: $s, first_unmarked_at: $first, last_seen_at: $last, cwd: $cwd}
        + (if $t == "" then {} else {transcript: $t} end)
-       + (if $n == "" then {} else {notified_at: $n} end)'
+       + (if $n == "" then {} else {notified_at: $n} end)
+       + (if $g == "" then {} else {notified: $g} end)'
   } | tail -n "$DEV_KEEP" > "$tmp" && mv "$tmp" "$DEV_FILE"
   rm -f "$tmp"
 }
@@ -531,23 +533,27 @@ deviation_min_seconds() {
   echo "$v"
 }
 
-# suppress_reason <first> <last> <entrypoint> <amounts> <transcript>: prints why
-# a deviation is recorded but not sent to the hub; nothing when it should be sent.
+# suppress_reason <first stop> <entrypoint> <amounts> <transcript>: prints why a
+# deviation is recorded but not sent to the hub; nothing when it should be sent.
+# The window runs from the transcript's first entry (else the first Stop) to now,
+# the SessionEnd time. A session with any tool call is never short-window.
 suppress_reason() {
-  local first="$1" last="$2" ep="$3" amounts="$4" tpath="$5" f l n
-  f=$(date -u -d "$first" +%s 2>/dev/null) || f=""
-  l=$(date -u -d "$last" +%s 2>/dev/null) || l=""
-  if [ -z "$f" ] || [ -z "$l" ]; then f=0; l=-1; fi
-  if [ "$l" -ge 0 ] && [ $((l - f)) -lt "$(deviation_min_seconds)" ]; then echo short-window; return; fi
+  local first="$1" ep="$2" amounts="$3" tpath="$4" n="" t0="" start win
+  tpath="${tpath/#\~/$HOME}"
+  if [ -n "$tpath" ] && [ -r "$tpath" ]; then
+    n=$(jq -rn '[inputs | select(.type == "assistant") | .message.content[]? | select(.type? == "tool_use")] | length' "$tpath" 2>/dev/null)
+    t0=$(jq -rn 'first(inputs | .timestamp? | strings) // empty' "$tpath" 2>/dev/null)
+  fi
+  start=""
+  [ -n "$t0" ] && start=$(date -u -d "$t0" +%s 2>/dev/null)
+  [ -n "$start" ] || start=$(date -u -d "$first" +%s 2>/dev/null) || start=""
+  if [ -n "$start" ] && [ "${n:-0}" = 0 ]; then
+    win=$(($(date +%s) - start))
+    if [ "$win" -lt "$(deviation_min_seconds)" ]; then echo short-window; return; fi
+  fi
   # same allow-list as bin/alfred-loop-check
   interactive_entrypoint "$ep" || { echo non-interactive; return; }
-  if [ -z "$amounts" ]; then
-    tpath="${tpath/#\~/$HOME}"
-    if [ -n "$tpath" ] && [ -r "$tpath" ]; then
-      n=$(jq -rn '[inputs | select(.type == "assistant") | .message.content[]? | select(.type? == "tool_use")] | length' "$tpath" 2>/dev/null)
-      if [ "${n:-1}" = 0 ]; then echo no-activity; return; fi
-    fi
-  fi
+  if [ -z "$amounts" ] && [ "$n" = 0 ]; then echo no-activity; fi
 }
 
 # check-session <sid> [entrypoint]: the detached SessionEnd run. One [deviation]
@@ -570,7 +576,7 @@ cmd_check_session() {
       [.deviations[]? | select(.session_id == $s)] | first // empty
       | "Store: requests \((.requests // 0) + 0), tokens \((.tokens // {}) | ((.input // 0) + (.output // 0) + (.cache_read // 0) + (.cache_write // 0))) (all types), cost_usd \((.cost_usd // 0) + 0)."' 2>/dev/null)
   fi
-  reason=$(suppress_reason "$first" "$last" "$ep" "$amounts" "$(jq -r '.transcript // empty' <<<"$rec")")
+  reason=$(suppress_reason "$first" "$ep" "$amounts" "$(jq -r '.transcript // empty' <<<"$rec")")
   if [ -n "$reason" ]; then
     with_dev_lock mark_notified "$sid" "$last" "suppressed:$reason"
     exit 0
