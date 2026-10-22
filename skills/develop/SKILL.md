@@ -80,6 +80,22 @@ Use the `/commit` skill or follow commit conventions:
 
 ## Step 6: Push and create PR
 
+**Workers only commit, with any author. Every push, and the PR creation, uses the lead role.** The review identity (the `build`, `spec` and `review` roles are one GitHub login) reviews the PR, and GitHub does not count an approval from the PR's author or its last pusher. A push made with `build` would make the reviewer the last pusher and no approval could count.
+
+**If multi-role devbox** (`switch-role` is installed):
+```bash
+switch-role lead
+git push -u origin feature/issue-{N}-{short-description}
+gh pr create --title "{short title}" --body "Closes #{N}
+
+## Changes
+- {what changed}
+
+## Testing
+- {what was tested}"
+```
+
+**If single-role devbox** (`switch-role` is not installed):
 ```bash
 git push -u origin feature/issue-{N}-{short-description}
 gh pr create --title "{short title}" --body "Closes #{N}
@@ -102,7 +118,7 @@ gh run view {run-id} --log-failed    # detail on a failed run
 
 **If an API call appears unavailable, attempt it before claiming so.** "Not visible in this context" is never an acceptable first-pass claim — try the call, report the actual error. The GitHub App token that authored the PR can read the PR's checks.
 
-If CI is green, proceed to Step 7. If any check reports FAILURE / CANCELLED / TIMED_OUT, see Step 6.5.
+If CI is green, proceed to Step 7 (review, then merge). If any check reports FAILURE / CANCELLED / TIMED_OUT, see Step 6.5.
 
 ## Step 6.5: When CI fails
 
@@ -162,22 +178,38 @@ The push on PR events is intended; the login conditional is the bug. Ungating th
 
 And since this file was scaffold-generated (from `project-manager/templates/web-app/repo/.github/workflows/ci.yaml.hbs`), the upstream bug gets filed too — every future project inherits the fix, not just this one.
 
-## Step 7: Merge
+## Step 7: Review, then merge
 
-Merge only if CI is green. Role-switching is conditional on devbox mode (see Step 2 for detection):
+Merge only if CI is green. A review at the final head comes first; GitHub's verdict gates the merge, and the merge skill checks it.
 
-**If multi-role devbox** (`switch-role` is installed — switch to lead role to merge):
+**1. Review after the final push.** Run the review as in `/alfred-agent:review-panel` and post it at the head with `alfred-review post` (review-panel, Step 4, "Posting the review"). The review is posted with the `review` identity through `gh-as review`, which does not change the active role. The `no review token` rule of review-panel applies: on exit 4, `alfred-review check` decides whether the flow continues (`not-required`) or stops (ask the hub).
+
+**2. Fix rounds.** The loop is review, fix, review again. After a REQUEST_CHANGES, commit the fix, then push with the lead role (each fix push is a new head, and the old approval or request is stale):
+
+**If multi-role devbox:**
 ```bash
 switch-role lead
-gh pr merge --squash
+git push
 ```
 
-**If single-role devbox** (`switch-role` is not installed — merge with the current token):
+**If single-role devbox:**
 ```bash
-gh pr merge --squash
+git push
 ```
 
-If CI is red, go back to Step 6.5. **Never merge on red CI** — no exceptions, regardless of urgency, diff size, or how confident you are the failure is unrelated.
+Review the new head and post again. The new APPROVE supersedes the old CHANGES_REQUESTED of the same login.
+
+**3. Merge through the merge skill.** Never merge with a direct command; `/alfred-agent:merge` checks CI, GitHub's review verdict and the label gate, and merges pinned to the reviewed head.
+
+**If multi-role devbox** (the lead role merges):
+```bash
+switch-role lead
+```
+then run `/alfred-agent:merge {PR}`.
+
+**If single-role devbox:** run `/alfred-agent:merge {PR}` with the current token.
+
+If CI is red, go back to Step 6.5. **Never merge on red CI** — no exceptions, regardless of urgency, diff size, or how confident you are the failure is unrelated. If the merge skill reports exit 10 or 11 from `alfred-review check`, follow its message (review required or changes requested); do not look for another way to merge.
 
 Then clean up:
 
@@ -194,13 +226,40 @@ git checkout main && git pull
 git branch -d feature/issue-{N}-{short-description}
 ```
 
+## PRs already in flight
+
+There is no bulk migration. A PR opened before this rule is handled here, before it merges. `alfred-review check` names which of the two cases applies.
+
+**The PR author is the review identity** (the PR was opened with the `build` role). GitHub forbids self-approval, so it can never be approved. Close it and recreate it with the lead role from the same branch. The empty commit gives a new head with the lead as last pusher (pushing the same SHA would change nothing). Multi-role devbox, lead role throughout:
+
+```bash
+switch-role lead
+gh pr close {old} --comment "Recreated as lead-authored PR"
+git checkout {branch} && git pull
+git commit --allow-empty -m "<CODE>-<n>: lead re-push for review"
+git push
+gh pr create --title "{same title}" --body "{same body}
+
+Replaces #{old}."
+gh pr comment {old} --body "Recreated as #{new}"
+```
+
+**Only the last push was made by `build`.** The PR keeps its author. The lead role adds the empty commit and pushes; the review then runs on the new head:
+
+```bash
+switch-role lead
+git checkout {branch} && git pull
+git commit --allow-empty -m "<CODE>-<n>: lead re-push for review"
+git push
+```
+
 ## Rules
 
 - **Every feature needs tests.** No exceptions. If you can't figure out how to test it, ask.
 - **Tests run before PR.** Don't create a PR with failing tests.
 - **Build must pass.** `npm run build` clean before PR.
 - **One issue per PR.** Keep changes focused and reviewable.
-- **Build role creates, lead role merges (multi-role devboxes only).** In devboxes where `switch-role` is installed, never merge with the same role that created the PR. In single-role devboxes, use the same token throughout — this rule does not apply.
+- **The lead role pushes, creates the PR and merges; the review identity reviews (multi-role devboxes only).** Workers may commit with any author, but every push uses the lead role, because the reviewer must differ from the PR's author and from its last pusher. In single-role devboxes, use the same token throughout — this rule does not apply.
 - **Token expired?** In multi-role devboxes, run `switch-role build` (or `lead`) to refresh. Try this first when git auth fails. In single-role devboxes, re-authenticate via the platform's normal token refresh path.
 - **CI status is queried, never inferred.** ALWAYS run `gh pr checks {PR}` before claiming a PR is merge-ready. NEVER reason from diff size, change complexity, or author intuition to CI outcome.
 - **Red CI blocks merge-ready.** FAILURE / CANCELLED / TIMED_OUT on any required check means the PR is NOT ready to merge — regardless of merge-conflict status or diff size. Either fix the root cause or escalate.

@@ -527,6 +527,122 @@ alfred-workitem deviations                # unmarked sessions: local record, plu
   written into a repository.
 - Marker and read formats: `tests/fixtures/workitem/` (`marker-*.json`, `workitems*.json`).
 
+## Review gate (`bin/alfred-review`)
+
+The review flow posts a real GitHub review at the head that was reviewed, with the `review` token. The
+merge skill asks GitHub for its own verdict and merges pinned to that head. This is what lets the
+`lead-review` ruleset (AP-1230) run on a repo without blocking its lead. `bin/alfred-review` is bash,
+`gh` and `jq`, with no model call.
+
+```bash
+alfred-review post <owner>/<repo>#<n> --sha <40-hex> --verdict approve|request-changes --body-file <file>
+alfred-review check <owner>/<repo>#<n>
+```
+
+- **`post`** sends `commit_id` (always the reviewed SHA), the event and the body, through `gh-as review`
+  only. It never uses the lead token or another role. A moved head posts nothing (exit 3). The first body
+  line is `Reviewed by: <agent_id> (alfred-agent:review)`. A body over 65,000 characters is cut to fit,
+  with a note, and the verdict is still posted. A timeout on the POST is not retried blindly: it lists the
+  reviews first and does not post twice.
+- **`check`** reads GitHub's verdict (`reviewDecision`, `headRefOid`, `mergeStateStatus`, the PR author)
+  with the active role and recounts nothing. Its output separates GitHub's verdict from the plugin's
+  policy:
+
+  ```
+  decision: approved|not-required|review-required|changes-requested|blocked|error
+  github-verdict: APPROVED|REVIEW_REQUIRED|CHANGES_REQUESTED|none
+  plugin-policy: ok|change-request-blocks|merge-state-blocked
+  head: <40-hex>      (the merge skill merges with --match-head-commit of this value)
+  merge-state: <mergeStateStatus>
+  ```
+
+  `UNKNOWN` merge state (right after a push) is retried 3 times. `BEHIND`, `DIRTY` and `DRAFT` pass with
+  guidance; `BLOCKED` with an approval exits 10; any value it does not know fails closed (6).
+
+### Exit codes
+
+Both commands. Transient errors (HTTP 5xx, rate limit, timeout, connection failure) are retried 3 times
+(1, 2, 4 s) before exit 6.
+
+| Code | Meaning |
+|---|---|
+| 0 | ok: posted, or approved, or approval not required |
+| 2 | argument or environment error (malformed reference, SHA not 40 hex, unknown verdict, missing or empty body file, `GH_TOKEN` set) |
+| 3 | head moved (`post`): reviewed one SHA, the PR is at another; review again |
+| 4 | no review token file on this devbox (`post`), and only then |
+| 5 | access: 404 or 403 (`post` prints the widen ask; `check`: no read access to the PR) |
+| 6 | API failure: transient error after retries, bad JSON, unexpected value, 401, 422 |
+| 10 | not approved, or approved but BLOCKED (`check`) |
+| 11 | a change request is outstanding (`check`) |
+
+### Identities and tokens
+
+- `build`, `spec` and `review` come from one app, `alfred-worker-agent`, so on GitHub they are one login,
+  `alfred-worker-agent[bot]`, on every devbox. `lead` and `gitops-lead` come from `alfred-lead-agent`.
+- GitHub counts no approval from the PR's author or its last pusher. So **the lead role pushes, creates
+  the PR and merges; the review identity reviews**. Workers only commit, with any author. A push made
+  with `build` makes the reviewer the last pusher, and then no approval counts. `develop` switches to the
+  lead role before every `git push` and `gh pr create`.
+- The `review` token is `/var/run/secrets/gh-review/token` (`ALFRED_SECRETS_DIR`), used through `gh-as
+  review`. It reaches the lead's own repos by default. `post` tests for that file itself, because on a
+  single-role devbox `gh-as` would silently fall back to a read-only token. `gh-as` refuses to run with
+  `GH_TOKEN` set; `post` reports that (exit 2) and never works around it.
+- **Another lead's review is observability.** That lead reviews from its own devbox and posts with the
+  same command, but on GitHub it is the same login as any other lead's review, so any lead's review token
+  can supersede a change request left by another. The body's `Reviewed by:` line is how people tell them
+  apart, and `check` warns (stderr, never the exit code) when an approval by one agent supersedes a change
+  request by another. The shared-login risk is accepted on AP-1230; a dedicated review app is the remedy.
+- **Widen ask.** When `post` reports no access (exit 5), message `hub` with the subject
+  `[review-access] <reviewing-lead> -> <owner/repo>`, the reviewing lead, the target repo, the PR URL or
+  reason, and whether the access is standing or for this PR only. The new token takes effect after the
+  ESO refresh, so access is not immediate.
+
+### Change requests
+
+A reviewer's no means no, even where GitHub requires no review. `check` exits 11 when the latest decisive
+review (APPROVED, CHANGES_REQUESTED or DISMISSED) by any reviewer is CHANGES_REQUESTED, whether
+`reviewDecision` is CHANGES_REQUESTED or `null`; the output then says that the plugin, not GitHub, blocks
+when GitHub requires nothing. The reviews list is read to decide only in those two cases (and, as a
+warning-only check, when the decision is approved). A change request is cleared by its author
+re-reviewing at the new head. Nothing in the plugin dismisses a review: the hub does, with a written
+reason.
+
+### Merge and the hub
+
+`/alfred-agent:merge` runs `alfred-review check` between the CI gate and the label gate, stops on any
+non-zero exit, and merges with `--match-head-commit`. It refuses `alfred-platform-manager` ("the hub
+merges with platform-gh, not this skill"); `alfred-project-manager` merges its own PRs through it like
+any lead. The hub merges a PR labelled `requires-elevated-merge` outside the skill.
+
+### Runbook
+
+| Exit | Symptom | Cause | Remedy |
+|---|---|---|---|
+| 4 | "no review token on this devbox" | no `gh-review/token` file (for example a single-role devbox) | where `check` says approval is not required, continue without a post; otherwise ask the hub for a review token |
+| 5 | "the review token has no access to <repo>" (`post`), or "no read access" (`check`) | the token's repo list does not include the repo | send the widen ask (above) and wait for the ESO refresh; meanwhile use the lead's own review sub-agent |
+| 6 | API failure after 3 retries, bad JSON, 401, 422 | GitHub or network trouble, or a rejected request | wait and run again; if it persists, report the failing service and do not work around it |
+| 10 | `review-required` | no approval at the head; the PR author is the review identity (recreate the PR with the lead role); the last pusher may be the review identity (push the final commit with the lead role); too few approvals | review at the current head and post; for the author and last-pusher cases follow `develop`, section "PRs already in flight". BLOCKED (decision `blocked`): GitHub reports the review as approved but another rule is unmet (a required check or an unresolved conversation); see `gh pr view` |
+| 11 | `changes-requested` | a reviewer's latest decisive review is CHANGES_REQUESTED | fix, push with the lead role, and ask the lead who requested the changes to re-review; if they are gone or do not respond, ask the hub, which dismisses the review with a written reason |
+
+`APPROVED` with a persistent `UNKNOWN` passes on `reviewDecision`, and GitHub's merge still enforces the rule.
+
+### Local log and measures
+
+Each run appends one JSON line `{ts, cmd, repo, pr, exit, reason, decision, warning}` to
+`${CLAUDE_CONFIG_DIR:-~/.claude}/alfred-review/runs.jsonl` (never a token or a body; it is not rotated).
+`reason` is `ok`, `argument`, `head-moved`, `no-token`, `access` or `api`. Weekly counts of exits 2, 4, 5,
+6, 10 and 11 by `reason` show API trouble (6), token scope gaps (5) and merges attempted unreviewed (10,
+11). The measure the hub reads is GitHub refusals of a merge for the review rule after rollout (target
+0); refusals for other reasons, such as failing checks or conflicts, do not count.
+
+### Rollout (hub-owned)
+
+Staged: canary (`ccplugin-alfred-agent-workflow`), then one multi-lead repo, then wider. Before a repo's
+`lead-review` ruleset goes on it needs no open PR authored by the review identity, a review token on the
+lead's devbox, and this plugin version installed. Turning the repo's ruleset off is the rollback.
+`Screenfields/ccplugin-alfred-content` already has `lead-review` (ruleset 25678306) live, with manual
+`review` approvals until this version ships.
+
 ## Specialists (`agents/`)
 
 Ten specialist definitions (ccplugin#128, AP-ADR0030, AP-ADR0031). A lead starts a specialist by
