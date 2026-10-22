@@ -90,7 +90,9 @@ AR=$(command -v alfred-review || echo "${CLAUDE_PLUGIN_ROOT}/bin/alfred-review")
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 CHECK=$("$AR" check "$REPO#{N}"); RC=$?
 printf '%s\n' "$CHECK"
-HEAD=$(printf '%s\n' "$CHECK" | sed -n 's/^head: //p')
+echo "alfred-review exit: $RC"
+[ "$RC" -eq 0 ] || exit "$RC"
+echo "head: $(printf '%s\n' "$CHECK" | sed -n 's/^head: //p')"
 ```
 
 **Stop on any non-zero exit** and show the check's message. Do not merge, and never work around it with `--admin` or a direct `gh pr merge`:
@@ -103,7 +105,7 @@ HEAD=$(printf '%s\n' "$CHECK" | sed -n 's/^head: //p')
 | 6 | GitHub API failure | wait and run the step again; then report the failing service |
 | 2 | argument or environment error | fix the cause named in the message |
 
-On exit 0, keep `HEAD`, the `head:` value: Step 7 merges pinned to it. Where the repo's rules require no review, the check says "approval not required by this repo's rules" and the merge continues, unless a reviewer has requested changes, which blocks there too (the message then says the plugin, not GitHub, blocks).
+On exit 0, note the `head:` line the block printed: its 40-hex SHA is the checked head, and Step 7 merges pinned to it. Shell variables do not persist between tool calls, so carry the literal SHA into Step 7 yourself. Where the repo's rules require no review, the check says "approval not required by this repo's rules" and the merge continues, unless a reviewer has requested changes, which blocks there too (the message then says the plugin, not GitHub, blocks).
 
 ## Step 6 — Label gate (role-authorization)
 
@@ -127,7 +129,11 @@ Stop. Do not proceed.
 
 ## Step 7 — Merge
 
+Put the literal 40-hex SHA from Step 5's `head:` line in `HEAD` below. If Step 5 gave you no `head:` line, you have no checked head: refuse to merge and go back to Step 5.
+
 ```bash
+HEAD=<the 40-hex head: value from Step 5>
+[[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "no checked head; refusing"; exit 2; }
 gh pr merge {N} --squash --match-head-commit "$HEAD"
 ```
 

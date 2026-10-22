@@ -91,7 +91,7 @@ BOT='alfred-worker-agent[bot]'
   # exactly two calls: the head read and the POST; no GET of the reviews afterwards
   [ "$(ncalls)" -eq 2 ]
   [ "$(calls | grep -c -- '-X POST')" -eq 1 ]
-  ! calls | grep -q 'paginate'
+  if calls | grep -q 'paginate'; then false; fi
 }
 
 @test "post refuses a response that is not at the reviewed sha" {
@@ -136,6 +136,9 @@ BOT='alfred-worker-agent[bot]'
   run "$AR" post "$REF" --sha "$SHA" --verdict request-changes --body-file "$BATS_TEST_TMPDIR/empty.md"; [ "$status" -eq 2 ]
   run "$AR" post "$REF" --sha "$SHA" --verdict approve --body-file "$b" --extra x; [ "$status" -eq 2 ]
   run "$AR" check "acme/widget"; [ "$status" -eq 2 ]
+  run "$AR" check "acme/.#7"; [ "$status" -eq 2 ]
+  run "$AR" check "acme/..#7"; [ "$status" -eq 2 ]
+  run "$AR" post "acme/..#7" --sha "$SHA" --verdict approve --body-file "$b"; [ "$status" -eq 2 ]
   run "$AR" check; [ "$status" -eq 2 ]
   run "$AR" bogus; [ "$status" -eq 2 ]
   # nothing was posted and no GitHub call was made
@@ -209,13 +212,13 @@ BOT='alfred-worker-agent[bot]'
   run "$AR" check "$REF"; all+="$output"
   [[ "$all" != *"$TOKEN"* ]]
   [[ "$all" != *"FAKEPLANTED"* ]]
-  ! grep -q "FAKEPLANTED" "$LOGF"
+  if grep -q "FAKEPLANTED" "$LOGF"; then false; fi
   [ -s "$LOGF" ]
 }
 
 @test "no reference to gh-readonly" {
-  ! grep -q 'gh-readonly' "$AR"
-  ! grep -q 'gh-token' "$AR"
+  if grep -q 'gh-readonly' "$AR"; then false; fi
+  if grep -q 'gh-token' "$AR"; then false; fi
 }
 
 @test "post without review token exits 4 and calls nothing" {
@@ -375,10 +378,53 @@ BOT='alfred-worker-agent[bot]'
 
 @test "post timeout without a record retries the post" {
   rm "$STUB_DIR"/reviews-page*.json
+  echo '[]' > "$STUB_DIR/reviews-page1.json"
   echo "timeout 1" > "$STUB_DIR/fail-post"
   run post approve
   [ "$status" -eq 0 ]
   [ "$(count_of post.count)" -eq 2 ]
+}
+
+@test "post names the failed POST after the final retry" {
+  rm "$STUB_DIR"/reviews-page*.json
+  echo '[]' > "$STUB_DIR/reviews-page1.json"
+  echo "500" > "$STUB_DIR/fail-post"
+  run post approve
+  [ "$status" -eq 6 ]
+  [[ "$output" == *"posting the review failed (HTTP 500)"* ]]
+  [[ "$output" == *"(after 3 retries)"* ]]
+  [[ "$output" != *"no review id"* ]]
+  [ "$(count_of post.count)" -eq 4 ]
+}
+
+@test "a matching review without submitted_at or from long ago is not this post" {
+  echo '[{"id": 50, "user": {"login": "alfred-worker-agent[bot]"}, "state": "APPROVED", "commit_id": "'$SHA'", "body": "x"},
+         {"id": 60, "user": {"login": "alfred-worker-agent[bot]"}, "state": "APPROVED", "commit_id": "'$SHA'", "body": "x", "submitted_at": "2020-01-01T00:00:00Z"}]' > "$STUB_DIR/reviews-page1.json"
+  rm "$STUB_DIR/reviews-page2.json"
+  echo "timeout 1" > "$STUB_DIR/fail-post"
+  run post approve
+  [ "$status" -eq 0 ]
+  [ "$(count_of post.count)" -eq 2 ]
+}
+
+@test "an empty reviews read is an api failure" {
+  gql null CLEAN
+  : > "$STUB_DIR/reviews-page1.json"; rm "$STUB_DIR/reviews-page2.json"
+  run "$AR" check "$REF"
+  [ "$status" -eq 6 ]
+}
+
+@test "a graphql empty object exits 6" {
+  echo '{}' > "$STUB_DIR/graphql.json"
+  run "$AR" check "$REF"
+  [ "$status" -eq 6 ]
+}
+
+@test "the warning-only reviews read makes one attempt" {
+  echo "502" > "$STUB_DIR/fail-reviews"
+  run "$AR" check "$REF"
+  [ "$status" -eq 0 ]
+  [ "$(count_of fail-reviews.count)" -eq 1 ]
 }
 
 @test "post gives up when it cannot tell whether the review landed" {
@@ -498,9 +544,9 @@ BOT='alfred-worker-agent[bot]'
 @test "check reads only the graphql verdict and reviews" {
   gql null CLEAN
   run "$AR" check "$REF"
-  ! calls | grep -q 'rules/branches'
-  ! calls | grep -q 'events'
-  ! calls | grep -q -- '-X POST'
+  if calls | grep -q 'rules/branches'; then false; fi
+  if calls | grep -q 'events'; then false; fi
+  if calls | grep -q -- '-X POST'; then false; fi
   [ "$(calls | grep -vc -E 'api graphql|/pulls/7/reviews')" -eq 0 ]
 }
 
@@ -552,8 +598,8 @@ BOT='alfred-worker-agent[bot]'
   cp "$FIX/graphql-changes-requested.json" "$STUB_DIR/graphql.json"
   run "$AR" check "$REF"
   run post request-changes
-  ! calls | grep -q 'dismissals'
-  ! grep -rqi 'dismissals' "$AR" "$ROOT/skills" "$ROOT/agents" "$ROOT/commands"
+  if calls | grep -q 'dismissals'; then false; fi
+  if grep -rqi 'dismissals' "$AR" "$ROOT/skills" "$ROOT/agents" "$ROOT/commands"; then false; fi
 }
 
 @test "unknown merge state is retried" {
@@ -668,7 +714,7 @@ BOT='alfred-worker-agent[bot]'
   cp "$FIX/graphql-S4-build-push-unknown.json" "$STUB_DIR/graphql.json"
   run "$AR" check "$REF"
   [[ "$output" == *"the last pusher may be the review identity (push the final commit with the lead role)"* ]]
-  ! calls | grep -q 'events'
+  if calls | grep -q 'events'; then false; fi
 }
 
 @test "warns when a different agent supersedes a change request" {
@@ -717,8 +763,8 @@ BOT='alfred-worker-agent[bot]'
 @test "check has no identity branch" {
   body=$(sed -n '/^cmd_check()/,/^# --- main/p' "$AR")
   [ -n "$body" ]
-  ! grep -qE 'agent_id|platform-manager|project-manager' <<<"$body"
-  ! grep -qE 'platform-manager|project-manager' "$AR"
+  if grep -qE 'agent_id|platform-manager|project-manager' <<<"$body"; then false; fi
+  if grep -qE 'platform-manager|project-manager' "$AR"; then false; fi
 }
 
 # =============================================================================
@@ -769,9 +815,9 @@ BOT='alfred-worker-agent[bot]'
   run "$AR" check "$REF"
   echo 422 > "$STUB_DIR/fail-post"
   run post approve
-  ! grep -q "$TOKEN" "$LOGF"
-  ! grep -q 'Warning: the retry' "$LOGF"
-  ! grep -q 'Reviewed by' "$LOGF"
+  if grep -q "$TOKEN" "$LOGF"; then false; fi
+  if grep -q 'Warning: the retry' "$LOGF"; then false; fi
+  if grep -q 'Reviewed by' "$LOGF"; then false; fi
 }
 
 # =============================================================================
@@ -835,6 +881,27 @@ line_of() { grep -n -m1 -- "$1" "$2" | cut -d: -f1; }
   [ "$(grep -c 'gh pr merge {N}' "$f")" -eq 1 ]
 }
 
+@test "merge skill prints the check exit and exits on non-zero" {
+  f=$(MERGE)
+  grep -qF 'echo "alfred-review exit: $RC"' "$f"
+  grep -qF '[ "$RC" -eq 0 ] || exit "$RC"' "$f"
+}
+
+@test "merge skill guards the literal head sha before merging" {
+  f=$(MERGE)
+  grep -qF '[[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "no checked head; refusing"; exit 2; }' "$f"
+  grep -q 'refuse to merge' "$f"
+  grep -q 'Shell variables do not persist between tool calls' "$f"
+  g=$(line_of '\[\[ "\$HEAD" =~' "$f"); m=$(line_of 'gh pr merge {N}' "$f")
+  [ "$g" -lt "$m" ]
+}
+
+@test "develop CI-fix push switches to lead" {
+  f=$(DEV)
+  sec=$(sed -n '/^## Step 6.5/,/^### Before patching/p' "$f")
+  grep -q 'switch-role lead' <<<"$sec"
+}
+
 @test "merge skill refuses alfred-platform-manager" {
   f=$(MERGE)
   grep -q 'the hub merges with platform-gh, not this skill' "$f"
@@ -846,7 +913,7 @@ line_of() { grep -n -m1 -- "$1" "$2" | cut -d: -f1; }
   # the refusal line names only the hub; project-manager is described as merging here
   grep 'the hub merges with platform-gh, not this skill' "$f" | grep -vq 'project-manager'
   grep -q '`alfred-project-manager` is a lead like the others' "$f"
-  ! grep -qE 'stop.*alfred-project-manager' "$f"
+  if grep -qE 'stop.*alfred-project-manager' "$f"; then false; fi
 }
 
 @test "review skill posts in interactive mode only" {
@@ -862,7 +929,7 @@ line_of() { grep -n -m1 -- "$1" "$2" | cut -d: -f1; }
   # everything from the headless output heading to the Step 4 heading
   sec=$(sed -n '/^### Headless mode output/,/^## Step 4/p' "$f")
   [ -n "$sec" ]
-  ! grep -q 'alfred-review' <<<"$sec"
+  if grep -q 'alfred-review' <<<"$sec"; then false; fi
   grep -q 'headless mode never calls `alfred-review post`' "$f"
   grep -q 'Do not post the PR comment yourself in headless mode' "$f"
 }
@@ -873,14 +940,14 @@ line_of() { grep -n -m1 -- "$1" "$2" | cut -d: -f1; }
   grep -q '^\*\*Head SHA' "$f"
   grep -q 'Reviewed at:' "$f"
   grep -q 'Never forward raw worker text' "$f"
-  ! grep -q 'Post synthesized findings as a PR review comment' "$f"
+  if grep -q 'Post synthesized findings as a PR review comment' "$f"; then false; fi
 }
 
 @test "develop calls alfred-review post and merges through the merge skill" {
   f=$(DEV)
   grep -q 'alfred-review post' "$f"
   grep -q '/alfred-agent:merge' "$f"
-  ! grep -q 'gh pr merge' "$f"
+  if grep -q 'gh pr merge' "$f"; then false; fi
 }
 
 @test "develop switches to lead before every git push" {
@@ -924,8 +991,8 @@ line_of() { grep -n -m1 -- "$1" "$2" | cut -d: -f1; }
 
 @test "develop old build-creates rule is gone" {
   f=$(DEV)
-  ! grep -q 'never merge with the same role that created the PR' "$f"
-  ! grep -q 'Build role creates, lead role merges' "$f"
+  if grep -q 'never merge with the same role that created the PR' "$f"; then false; fi
+  if grep -q 'Build role creates, lead role merges' "$f"; then false; fi
 }
 
 @test "develop states the lead-pushes rule" {
@@ -962,8 +1029,8 @@ line_of() { grep -n -m1 -- "$1" "$2" | cut -d: -f1; }
   f="$ROOT/agents/code-reviewer.md"
   grep -q 'Reviewed at: <sha>' "$f"
   grep -q 'Read-only by instruction' "$f"
-  ! grep -q 'gh pr review' "$f"
-  ! grep -q 'alfred-review post' "$f"
+  if grep -q 'gh pr review' "$f"; then false; fi
+  if grep -q 'alfred-review post' "$f"; then false; fi
 }
 
 @test "review-panel has the another-lead section" {
@@ -977,8 +1044,7 @@ line_of() { grep -n -m1 -- "$1" "$2" | cut -d: -f1; }
 }
 
 @test "no text calls another lead a distinct github reviewer" {
-  ! grep -rniE 'distinct (github )?reviewer|separate (github )?(login|reviewer)|different github (login|reviewer)' \
-    "$ROOT/skills" "$ROOT/agents" "$ROOT/README.md" "$AR"
+  if grep -rniE 'distinct (github )?reviewer|separate (github )?(login|reviewer)|different github (login|reviewer)' "$ROOT/skills" "$ROOT/agents" "$ROOT/README.md" "$AR"; then false; fi
 }
 
 @test "readme says the hub merges elevated prs outside the skill" {
@@ -1033,7 +1099,7 @@ awk_check() { # <file> <pattern>: every site has switch-role lead before it in i
   listed=$(grep -v '^#' "$list" | awk -F'|' '{print $1"|"$2"|"$3}' | sort)
   [ "$found" = "$listed" ]
   # every entry has a class and a reason
-  ! grep -v '^#' "$list" | awk -F'|' '($4 != "lead" && $4 != "other") || $5 == ""' | grep -q .
+  if grep -v '^#' "$list" | awk -F'|' '($4 != "lead" && $4 != "other") || $5 == ""' | grep -q .; then false; fi
 }
 
 @test "lead-role sites switch to lead first" {

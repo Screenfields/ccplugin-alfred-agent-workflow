@@ -175,12 +175,15 @@ gh_fail() {
 }
 
 parse_ref() {
-  if [[ "$1" =~ $REF_RE ]]; then OWNER="${BASH_REMATCH[1]}"; REPO="${BASH_REMATCH[2]}"; NUM="${BASH_REMATCH[3]}"; return 0; fi
+  if [[ "$1" =~ $REF_RE ]] && [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ]; then
+    OWNER="${BASH_REMATCH[1]}"; REPO="${BASH_REMATCH[2]}"; NUM="${BASH_REMATCH[3]}"; return 0
+  fi
   return 1
 }
 need_tools() {
   command -v jq >/dev/null 2>&1 || die 2 "jq not found"
   command -v gh >/dev/null 2>&1 || die 2 "gh not found"
+  command -v timeout >/dev/null 2>&1 || die 2 "timeout not found"
 }
 
 # --- post ---------------------------------------------------------------------
@@ -198,17 +201,17 @@ post_access() { widen_ask "$(why "$1")"; }
 # verify_posted: after a transient POST failure, did the review land anyway?
 # shellcheck disable=SC2317  # runs as PRE_RETRY, by name
 verify_posted() {
-  local keep_out="$TMPD/post-out" keep_err="$TMPD/post-err" keep_rc="$G_RC" keep_code="$G_CODE" keep_in="$G_IN" since found
+  local keep_out="$TMPD/post-out" keep_err="$TMPD/post-err" keep_rc="$G_RC" keep_code="$G_CODE" keep_in="$G_IN" keep_class="$G_CLASS" since found
   cp "$G_OUT" "$keep_out"; cp "$G_ERR" "$keep_err"
   G_IN=""
   gh_once review api --paginate "repos/$OWNER/$REPO/pulls/$NUM/reviews?per_page=100"
-  if [ "$G_CLASS" != ok ]; then return 2; fi
+  if [ "$G_CLASS" != ok ] || [ ! -s "$G_OUT" ]; then return 2; fi
   since=$(date -u -d "@$(( $(date +%s) - 120 ))" +%Y-%m-%dT%H:%M:%SZ)
   found=$(jq -s --arg sha "$SHA" --arg st "$WANT_STATE" --arg l "$REVIEW_LOGIN" --arg since "$since" \
-    'add // [] | map(select((.user.login | sub("\\[bot\\]$"; "")) == $l and .commit_id == $sha and .state == $st
-        and ((.submitted_at // "9999") >= $since))) | max_by(.id) // empty' "$G_OUT" 2>/dev/null)
+    'add // [] | map(select((.user.login | sub("\\[bot\\]$"; "")) == $l and .commit_id == $sha and .state == $st))
+      | max_by(.id) | select(. != null and ((.submitted_at // "") >= $since) and (.submitted_at // "") != "")' "$G_OUT" 2>/dev/null)
   if [ -n "$found" ]; then printf '%s' "$found" > "$TMPD/found.json"; return 1; fi
-  cp "$keep_out" "$G_OUT"; cp "$keep_err" "$G_ERR"; G_RC=$keep_rc; G_CODE=$keep_code; G_IN=$keep_in
+  cp "$keep_out" "$G_OUT"; cp "$keep_err" "$G_ERR"; G_RC=$keep_rc; G_CODE=$keep_code; G_IN=$keep_in; G_CLASS=$keep_class
   return 0
 }
 
@@ -286,9 +289,13 @@ check_access() { die 5 "no read access to $OWNER/$REPO#$NUM"; }
 
 # fetch_reviews: all reviews of the PR across pages, in $TMPD/reviews.json, ordered by id.
 # Returns 0 ok, 5 access, 6 other failure (nothing printed).
+# With "once" it makes one attempt and no retries (the warning-only read).
 fetch_reviews() {
+  local RETRIES=$RETRIES
+  [ "${1:-}" = once ] && RETRIES=0
   call_retry plain api --paginate "repos/$OWNER/$REPO/pulls/$NUM/reviews?per_page=100"
   [ "$G_CLASS" = ok ] || { [ "$G_CLASS" = access ] && return 5; return 6; }
+  [ -s "$G_OUT" ] || return 6
   jq -s 'add // [] | if type == "array" then sort_by(.id) else error("not a list") end' "$G_OUT" > "$TMPD/reviews.json" 2>/dev/null || return 6
   jq -e 'type == "array"' "$TMPD/reviews.json" >/dev/null 2>&1 || return 6
   return 0
@@ -309,8 +316,7 @@ cmd_check() {
         | if . == null then error("no pull request")
           else [(.reviewDecision // "null"), (.headRefOid // ""), (.mergeStateStatus // ""), (.author.login // "")] | join("|") end' \
         "$G_OUT" 2>/dev/null) || {
-      if jq -e '[.errors[]?.type] | index("NOT_FOUND")' "$G_OUT" >/dev/null 2>&1 \
-        || jq -e '.data.repository.pullRequest == null and ((.errors // []) | length == 0)' "$G_OUT" >/dev/null 2>&1; then
+      if jq -e '[.errors[]?.type] | index("NOT_FOUND")' "$G_OUT" >/dev/null 2>&1; then
         check_access
       fi
       die 6 "the GraphQL answer is not usable (bad JSON or errors)"
@@ -395,7 +401,7 @@ cmd_check() {
 
   # Shared-login warning: one GitHub login serves every lead's review identity.
   if [ "$code" -eq 0 ] && { [ "$decision" = APPROVED ] || [ "$decision" = null ]; }; then
-    [ "$have_reviews" -eq 1 ] || { fetch_reviews && have_reviews=1; }
+    [ "$have_reviews" -eq 1 ] || { fetch_reviews once && have_reviews=1; }
     if [ "$have_reviews" -eq 1 ]; then
       local a_by c_by a_agent c_agent
       a_by=$(jq -r '[.[] | select(.state == "APPROVED")] | max_by(.id) | .body // empty' "$TMPD/reviews.json" 2>/dev/null)

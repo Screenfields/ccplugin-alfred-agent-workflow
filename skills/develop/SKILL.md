@@ -131,6 +131,19 @@ Your options when CI is red:
 
 Never merge on red CI. Never declare the PR ready to merge while CI is red.
 
+The fix for a red check is a push, and a push is the lead's. Commit the fix, then push with the lead role (the new head needs a new review):
+
+**If multi-role devbox:**
+```bash
+switch-role lead
+git push
+```
+
+**If single-role devbox:**
+```bash
+git push
+```
+
 ### Before patching a scaffold-generated or platform-owned file
 
 Scaffold-generated files (`.github/workflows/*.yaml`, `k8s/base/*.yaml`, `Dockerfile`, files with a `.hbs` template origin) encode intent that isn't obvious from a single failing line. Before editing, you MUST:
