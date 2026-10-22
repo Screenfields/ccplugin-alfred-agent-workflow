@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "codes": [
+    {
+      "code": "AM",
+      "repo": "screenfields/alfred-agent-messaging",
+      "project": "alfred-agent-messaging",
+      "role": "main",
+      "mainCode": "AM",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": null,
+      "aliasOf": null
+    },
+    {
+      "code": "AP",
+      "repo": "screenfields/alfred-platform",
+      "project": "alfred-platform",
+      "role": "main",
+      "mainCode": "AP",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": null,
+      "aliasOf": null
+    },
+    {
+      "code": "APD",
+      "repo": "screenfields/alfred-platform-docs",
+      "project": "alfred-platform-docs",
+      "role": "secondary",
+      "mainCode": "AP",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": null,
+      "aliasOf": null
+    },
+    {
+      "code": "CC",
+      "repo": "screenfields/alfred-cc-tools",
+      "project": "alfred-cc-tools",
+      "role": "main",
+      "mainCode": "CC",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": null,
+      "aliasOf": null
+    },
+    {
+      "code": "CCW",
+      "repo": "screenfields/ccplugin-alfred-agent-workflow",
+      "project": "ccplugin-alfred-agent-workflow",
+      "role": "secondary",
+      "mainCode": "CC",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": null,
+      "aliasOf": null
+    },
+    {
+      "code": "CCC",
+      "repo": "screenfields/ccplugin-alfred-content",
+      "project": "ccplugin-alfred-content",
+      "role": "secondary",
+      "mainCode": "CC",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": null,
+      "aliasOf": null
+    },
+    {
+      "code": "BK",
+      "repo": "screenfields/oldrepo",
+      "project": "oldrepo",
+      "role": "main",
+      "mainCode": "BK",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": "2026-06-01T00:00:00.899Z",
+      "aliasOf": null
+    },
+    {
+      "code": "BX",
+      "repo": "screenfields/oldrepo",
+      "project": "oldrepo",
+      "role": "main",
+      "mainCode": "BX",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": null,
+      "aliasOf": "BK"
+    },
+    {
+      "code": "CA",
+      "repo": "screenfields/chain",
+      "project": "chain",
+      "role": "main",
+      "mainCode": "CA",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": "2026-03-01T00:00:00.100Z",
+      "aliasOf": null
+    },
+    {
+      "code": "CB",
+      "repo": "screenfields/chain",
+      "project": "chain",
+      "role": "main",
+      "mainCode": "CB",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": "2026-06-01T00:00:00.200Z",
+      "aliasOf": "CA"
+    },
+    {
+      "code": "CD",
+      "repo": "screenfields/chain",
+      "project": "chain",
+      "role": "main",
+      "mainCode": "CD",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": null,
+      "aliasOf": "CB"
+    },
+    {
+      "code": "GN",
+      "repo": "screenfields/gone",
+      "project": "gone",
+      "role": "main",
+      "mainCode": "GN",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": "2026-05-01T00:00:00.899Z",
+      "aliasOf": null
+    },
+    {
+      "code": "LA",
+      "repo": "screenfields/loop",
+      "project": "loop",
+      "role": "main",
+      "mainCode": "LA",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": "2026-05-01T00:00:00.899Z",
+      "aliasOf": "LB"
+    },
+    {
+      "code": "LB",
+      "repo": "screenfields/loop",
+      "project": "loop",
+      "role": "main",
+      "mainCode": "LB",
+      "assignedAt": "2026-10-22T16:14:03.899Z",
+      "retiredAt": "2026-05-01T00:00:00.899Z",
+      "aliasOf": "LA"
+    }
+  ]
+}

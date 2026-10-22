@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Test double for curl, for alfred-title-check: answers GET /api/codes/export.
+# Reads $REG_DIR:
+#   registry.json   the body to serve (a codes-export fixture)
+#   mode            ok (default) | unreachable | slow | 401 | 403 | 5xx | garbage
+#   slow            seconds to sleep first (mode slow, or any mode when present)
+# Logs every call to $REG_DIR/calls.log as "<start-epoch-ms> <url> auth=yes|no"
+# (never the token itself). -K <file> is read the way curl would.
+out="" cfg="" url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -K) cfg="$2"; shift 2 ;;
+    -w|-m) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+auth=no
+if [ -n "$cfg" ] && grep -q '^header = "Authorization: Bearer ' "$cfg" 2>/dev/null; then auth=yes; fi
+echo "$(date +%s%3N) $url auth=$auth" >> "$REG_DIR/calls.log"
+[ -f "$REG_DIR/slow" ] && sleep "$(cat "$REG_DIR/slow")"
+mode=$(cat "$REG_DIR/mode" 2>/dev/null || echo ok)
+put() { [ -n "$out" ] && printf '%s' "$1" > "$out"; }
+case "$mode" in
+  unreachable) exit 7 ;;
+  401) put '{"error":"unauthorized"}'; printf 401 ;;
+  403) put '{"error":"forbidden"}'; printf 403 ;;
+  5xx) put 'upstream error'; printf 503 ;;
+  garbage) put '<html>not json</html>'; printf 200 ;;
+  *) [ -n "$out" ] && cp "$REG_DIR/registry.json" "$out"; printf 200 ;;
+esac
