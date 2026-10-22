@@ -485,6 +485,37 @@ with the Stop hook JSON on stdin; it prints Stop hook JSON or nothing and always
 `--hook` it prints `{items, direct_unread, warnings}`. Combine it with another Stop check the way
 `hooks/stop.sh` does: one stdin copy per part, one JSON object out, children killed in a trap.
 
+## Title check after `gh issue|pr create|edit` (PostToolUse hook)
+
+`bin/alfred-title-check hook` runs after every Bash call and acts only on `gh` or `gh-as <role>`
+followed by `issue|pr create` or `issue|pr edit --title`. It takes the item URL from the last line of
+`tool_response.stdout` that is exactly `https://github.com/<o>/<r>/(issues|pull)/<n>`, reads the real
+title with `gh view` (only that URL is passed) and compares it with the live project-manager registry
+(`GET $PROJECT_MANAGER_URL/api/codes/export`, default `https://project-manager.screenfields.net`,
+bearer `PM_TOKEN_RO` when set). A title with no code, another repo's code, the wrong number, a retired
+code on a new issue, or (for a PR) the PR's own number gets one line in `additionalContext` that names
+the expected prefix and the fix command. A repo without a registry row is silent.
+
+- **Warn only.** No `permissionDecision`, no block, always exit 0; the hint never repeats the title
+  (it is untrusted text). `ALFRED_TITLE_CHECK=0` switches it off. Registry or `gh` failures are silent,
+  except one notice per session when the registry cannot be read (or needs `PM_TOKEN_RO`).
+- **Retired codes** (registry semantics from project-manager): a retired code stays valid on items
+  created before its `retiredAt` and on any PR; on a new issue the hint names the successor, found by
+  following `aliasOf` (at most 10 steps), or says "repo retired; no current code".
+- **Measure.** Each warning appends one line (`ts`, `session_id`, `repo`, `item`, `number`, `reason`,
+  `title`) to `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-title-check/warnings.jsonl`. The file is **per
+  devbox**, not collected centrally. A warning counts as fixed when the title is valid at the next
+  read. The lead re-measures by running `alfred-title-check check <url>` over its own logged items:
+
+  ```bash
+  jq -r '"https://github.com/\(.repo)/\(if .item == "pr" then "pull" else "issues" end)/\(.number)"' \
+    "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-title-check/warnings.jsonl" | sort -u |
+    xargs -n1 alfred-title-check check
+  ```
+
+  `check` also accepts `owner/repo#n` and prints `ok: <ref>`, the warning, or `skip: <why>`.
+- **Required binaries:** `jq`, `gh`, `curl`, `timeout`; any missing means silence.
+
 ## Tokens per work item (`bin/alfred-workitem`)
 
 Every action links to a work item (AP-ADR0017). The central agent-run store counts the tokens;

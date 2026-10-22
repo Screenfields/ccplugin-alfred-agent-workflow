@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# alfred-title-check — warn-only PostToolUse hook: after `gh issue|pr create|edit`
+# it reads the item's real title and, if it lacks a valid repo code, injects a
+# one-line hint (CCW-140, AP-1232 scope item 2). It never blocks anything.
+#
+#   alfred-title-check hook               PostToolUse (Bash) hook: stdin is the
+#                                         hook JSON; stdout is
+#                                         {"hookSpecificOutput":{"hookEventName":
+#                                         "PostToolUse","additionalContext":...}}
+#                                         or nothing. Always exit 0.
+#   alfred-title-check check <url|o/r#n>  the same check by hand: prints
+#                                         "ok: <ref>", the warning, or
+#                                         "skip: <why>". Exit 0; 2 on usage.
+#
+# The hook acts only on `gh` or `gh-as <role>` followed by (issue|pr)
+# (create|edit); edit only with --title/-t. The item URL is the last line of
+# tool_response.stdout that is exactly https://github.com/<o>/<r>/(issues|pull)/<n>;
+# only that URL goes to `gh view`. The title is read live from GitHub and is
+# never echoed into a hint (it is untrusted); warnings.jsonl keeps it locally.
+#
+# Rules (registry: GET $PROJECT_MANAGER_URL/api/codes/export):
+#  issue  title starts with <CODE>-<n> of the repo, n = issue number. A live
+#         code matches; a retired code only when the issue was created before
+#         its retiredAt, else warn and name the successor (aliasOf chain,
+#         depth <= 10) or "repo retired; no current code".
+#  pr     title starts with <CODE>-<n> of any registered code; warn on no code,
+#         an unregistered code, or the PR's own number under this repo's code.
+#         In alfred-cc-tools a title starting "<plugin>: bump pin" (kebab-case)
+#         warns with "cache-only pin bump without an item; accepted per CCW-122"
+#         (reason cache-only-bump) instead of the generic hint.
+#  A repo with no registry row is silent.
+#
+# Hook mode: no `set -e`, no `set -u`, every path ends in `exit 0` (CI audits
+# this with the loop-check pattern); children run as `cmd & wait`.
+# Kill switch ALFRED_TITLE_CHECK=0. Environment: PROJECT_MANAGER_URL,
+# PM_TOKEN_RO (optional bearer), CLAUDE_CONFIG_DIR.
+# State, under ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-title-check/:
+#   <session>.json   once-per-session notice mark (pruned after 1 day)
+#   warnings.jsonl   one line per warning (ts, session_id, repo, item, number,
+#                    reason, title); per devbox, never pruned
+
+REGISTRY_DEFAULT="https://project-manager.screenfields.net"
+STATE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-title-check"
+TOUT=4
+P1="" P2=""
+W=""
+
+have_all() {
+  local b
+  for b in jq gh curl timeout; do command -v "$b" >/dev/null 2>&1 || return 1; done
+  return 0
+}
+
+setup_work() {
+  W=$(mktemp -d 2>/dev/null) || return 1
+  trap 'rm -rf "$W"' EXIT
+  trap 'kill $P1 $P2 2>/dev/null; exit 0' TERM INT HUP
+  return 0
+}
+
+# fetch_both <issue|pr> <gh view args...>: registry and item in parallel.
+fetch_both() {
+  local kind="$1" base tok
+  shift
+  base="${PROJECT_MANAGER_URL:-$REGISTRY_DEFAULT}"
+  base="${base%/}"
+  local -a kargs=()
+  tok="${PM_TOKEN_RO//[^A-Za-z0-9._~+\/=-]/}"
+  if [ -n "$tok" ]; then
+    # The token goes through a 0600 curl config file, never argv.
+    printf 'header = "Authorization: Bearer %s"\n' "$tok" > "$W/cfg"
+    kargs=(-K "$W/cfg")
+  fi
+  : > "$W/reg.code"; : > "$W/reg.body"; : > "$W/item.json"
+  timeout -k 1 "$TOUT" curl -sS -m "$TOUT" "${kargs[@]}" -o "$W/reg.body" \
+    -w '%{http_code}' "$base/api/codes/export" > "$W/reg.code" 2>/dev/null < /dev/null &
+  P1=$!
+  timeout -k 1 "$TOUT" gh "$kind" view "$@" --json number,title,createdAt \
+    > "$W/item.json" 2>/dev/null < /dev/null &
+  P2=$!
+  wait "$P1" "$P2" 2>/dev/null
+  return 0
+}
+
+# reg_state: REG = ok | auth | fail
+reg_state() {
+  local code
+  code=$(cat "$W/reg.code" 2>/dev/null)
+  case "$code" in
+    200) if jq -e '(.codes | type) == "array"' "$W/reg.body" >/dev/null 2>&1; then REG=ok; else REG=fail; fi ;;
+    401|403) REG=auth ;;
+    *) REG=fail ;;
+  esac
+  return 0
+}
+
+# shellcheck disable=SC2016  # jq program, not shell
+JQ_VERDICT='
+def epoch: sub("\\.[0-9]+"; "") | fromdateiso8601;
+def chain($rows; $x; $d):
+  if $d >= 10 then null
+  else ([$rows[] | select(.aliasOf == $x)] | .[0]) as $s
+    | if $s == null then null
+      elif $s.retiredAt == null then $s.code
+      else chain($rows; $s.code; $d + 1) end
+  end;
+def warn($r; $e): {v: "warn", reason: $r, expected: $e};
+($reg[0].codes // []) as $all
+| $it[0] as $i
+| ($i.createdAt // "") as $created
+| ($i.title // "") as $title
+| $i.number as $num
+| ([$all[] | select(((.repo // "") | ascii_downcase) == $repo)]) as $mine
+| ([$mine[] | select(.retiredAt == null)] | .[0].code) as $live
+| ([$title | capture("^(?<c>[A-Z][A-Z0-9]*)-(?<n>[0-9]+)[: ]")] | .[0]) as $t
+| if ($mine | length) == 0 then {v: "silent", why: "repo has no code in the registry"}
+  elif ($num | type) != "number" or $created == "" then {v: "silent", why: "item unreadable"}
+  elif $kind == "issue" then
+    if $t == null then warn("nocode"; $live)
+    else ($mine | map(select(.code == $t.c)) | .[0]) as $row
+      | if $row == null then
+          (if ($all | map(.code) | index($t.c)) != null then warn("othercode"; $live) else warn("unregistered"; $live) end)
+        elif $row.retiredAt == null or ($created | fromdateiso8601) < ($row.retiredAt | epoch) then
+          (if ($t.n | tonumber) == $num then {v: "ok"} else warn("wrongnum"; $row.code) end)
+        else warn("retired"; chain($mine; $row.code; 0))
+        end
+    end
+  else
+    if $t == null then
+      (if $repo == "screenfields/alfred-cc-tools" and ($title | test("^[a-z][a-z0-9-]*: bump pin")) then warn("cache-only-bump"; $live) else warn("nocode"; $live) end)
+    elif ($all | map(.code) | index($t.c)) == null then warn("unregistered"; $live)
+    elif ($mine | map(.code) | index($t.c)) != null and ($t.n | tonumber) == $num then warn("ownnumber"; $live)
+    else {v: "ok"} end
+  end'
+
+# evaluate <issue|pr> <owner/repo, lowercase> -> VERDICT (JSON, empty = silent)
+evaluate() {
+  VERDICT=$(jq -nc --slurpfile reg "$W/reg.body" --slurpfile it "$W/item.json" \
+    --arg kind "$1" --arg repo "$2" "$JQ_VERDICT" 2>/dev/null)
+  [ -n "$VERDICT" ] || VERDICT='{"v":"silent","why":"item unreadable"}'
+  return 0
+}
+
+# hint_text <issue|pr> <owner/repo> <number>: from VERDICT; never uses the title.
+hint_text() {
+  local kind="$1" repo="$2" n="$3" reason exp succ ref what fix cmd_n placeholder
+  reason=$(jq -r '.reason' <<< "$VERDICT")
+  exp=$(jq -r '.expected // ""' <<< "$VERDICT")
+  ref="$repo#$n"
+  if [ "$kind" = pr ]; then
+    placeholder="${exp:-<CODE>}-<issue number>"
+    cmd_n="gh-as lead pr edit $n --title \"$placeholder: <title>\""
+    what="PR $ref"
+  else
+    placeholder="${exp:-<CODE>}-$n"
+    cmd_n="gh-as lead issue edit $n --title \"$placeholder: <title>\""
+    what="issue $ref"
+  fi
+  fix="Fix: $cmd_n (gh-as refuses when GH_TOKEN is set; unset it for that call)."
+  case "$reason" in
+    nocode)
+      if [ "$kind" = pr ]; then
+        HINT="Title of $what has no issue code; expected prefix $placeholder. $fix"
+      elif [ -n "$exp" ]; then
+        HINT="Title of $what has no code of this repo ($exp); expected prefix $placeholder. $fix"
+      else
+        HINT="Title of $what has no code, and this repo has no current code (repo retired; no current code)."
+      fi ;;
+    othercode) HINT="Title of $what starts with a code of another repo; expected prefix $placeholder. $fix" ;;
+    unregistered) HINT="Title of $what starts with a code that is not in the registry; expected prefix $placeholder. $fix" ;;
+    wrongnum) HINT="Title of $what carries the wrong number; expected prefix $placeholder. $fix" ;;
+    cache-only-bump) HINT="Title of $what: cache-only pin bump without an item; accepted per CCW-122." ;;
+    ownnumber) HINT="Title of $what uses the PR's own number, which names no issue; expected prefix $placeholder. $fix" ;;
+    retired)
+      succ="$exp"
+      if [ -n "$succ" ]; then
+        HINT="Title of $what uses a retired code; expected prefix $placeholder (successor $succ). $fix"
+      else
+        HINT="Title of $what uses a retired code (repo retired; no current code)."
+      fi ;;
+    *) HINT="" ;;
+  esac
+  return 0
+}
+
+emit() {
+  jq -nc --arg c "$1" '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $c}}' 2>/dev/null
+  return 0
+}
+
+notice_once() {
+  local sid="${1:-nosession}" f
+  f="$STATE_DIR/${sid//[^A-Za-z0-9._-]/_}.json"
+  [ -f "$f" ] && return 1
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 1
+  printf '{"notified":true}\n' > "$f" 2>/dev/null || return 1
+  return 0
+}
+
+log_warning() { # sid repo item number reason
+  local title
+  title=$(jq -r '.title // ""' "$W/item.json" 2>/dev/null | head -c 300)
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg sid "$1" --arg repo "$2" \
+    --arg item "$3" --argjson n "$4" --arg reason "$5" --arg title "$title" \
+    '{ts: $ts, session_id: $sid, repo: $repo, item: $item, number: $n, reason: $reason, title: $title}' \
+    >> "$STATE_DIR/warnings.jsonl" 2>/dev/null
+  return 0
+}
+
+hook_main() {
+  [ "${ALFRED_TITLE_CHECK:-1}" = 0 ] && return 0
+  have_all || return 0
+  local input cmd sid out url owner_repo seg n kind
+  input=$(cat 2>/dev/null)
+  [ -n "$input" ] || return 0
+  cmd=$(jq -r '.tool_input.command // ""' <<< "$input" 2>/dev/null) || return 0
+  [ -n "$cmd" ] || return 0
+  local nl=$'\n'
+  local re_cmd="(^|[;&|(${nl}])[[:space:]]*(gh|gh-as[[:space:]]+[^[:space:]]+)[[:space:]]+(issue|pr)[[:space:]]+(create|edit)([[:space:]]|\$)"
+  [[ $cmd =~ $re_cmd ]] || return 0
+  if [ "${BASH_REMATCH[4]}" = edit ]; then
+    [[ $cmd =~ (^|[[:space:]])(--title|-t)([[:space:]=]|$) ]] || return 0
+  fi
+  sid=$(jq -r '.session_id // ""' <<< "$input" 2>/dev/null)
+  out=$(jq -r '.tool_response.stdout // ""' <<< "$input" 2>/dev/null)
+  url=$(printf '%s\n' "$out" | tr -d '\r' | grep -E '^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/(issues|pull)/[0-9]+$' | tail -n 1)
+  [ -n "$url" ] || return 0
+  [[ $url =~ ^https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/(issues|pull)/([0-9]+)$ ]] || return 0
+  owner_repo="${BASH_REMATCH[1]}"
+  seg="${BASH_REMATCH[2]}"
+  n="${BASH_REMATCH[3]}"
+  kind=issue
+  [ "$seg" = pull ] && kind="pr"
+  [ -d "$STATE_DIR" ] && find "$STATE_DIR" -maxdepth 1 -type f -name '*.json' -mtime +0 -delete 2>/dev/null
+  setup_work || return 0
+  fetch_both "$kind" "$url"
+  reg_state
+  local parts=() lc
+  lc="${owner_repo,,}"
+  case "$REG" in
+    auth)
+      if [ -z "$PM_TOKEN_RO" ]; then
+        notice_once "$sid" && parts+=("alfred-title-check: the registry now requires PM_TOKEN_RO; ask the hub.")
+      else
+        notice_once "$sid" && parts+=("alfred-title-check: the project-manager registry refused PM_TOKEN_RO; titles are not checked. Ask the hub.")
+      fi ;;
+    fail)
+      notice_once "$sid" && parts+=("alfred-title-check: the project-manager registry could not be read; titles are not checked this session.") ;;
+    ok)
+      evaluate "$kind" "$lc"
+      if [ "$(jq -r '.v' <<< "$VERDICT" 2>/dev/null)" = warn ]; then
+        hint_text "$kind" "$owner_repo" "$n"
+        if [ -n "$HINT" ]; then
+          parts+=("$HINT")
+          log_warning "$sid" "$owner_repo" "$kind" "$n" "$(jq -r '.reason' <<< "$VERDICT")"
+        fi
+      fi ;;
+  esac
+  [ "${#parts[@]}" -gt 0 ] && emit "${parts[*]}"
+  return 0
+}
+
+check_main() {
+  local arg="$1" kind owner_repo n seg lc
+  have_all || { echo "skip: needs jq, gh, curl and timeout"; return 0; }
+  setup_work || { echo "skip: no temp dir"; return 0; }
+  if [[ $arg =~ ^https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/(issues|pull)/([0-9]+)$ ]]; then
+    owner_repo="${BASH_REMATCH[1]}"; seg="${BASH_REMATCH[2]}"; n="${BASH_REMATCH[3]}"
+    kind=issue; [ "$seg" = pull ] && kind="pr"
+    fetch_both "$kind" "$arg"
+  elif [[ $arg =~ ^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#([0-9]+)$ ]]; then
+    owner_repo="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[2]}"
+    if timeout -k 1 "$TOUT" gh pr view "$n" -R "$owner_repo" --json number >/dev/null 2>&1 < /dev/null; then kind="pr"; else kind=issue; fi
+    fetch_both "$kind" "$n" -R "$owner_repo"
+  else
+    echo "usage: alfred-title-check check <https://github.com/o/r/(issues|pull)/n | owner/repo#n>" >&2
+    exit 2 # cli-only
+  fi
+  reg_state
+  if [ "$REG" != ok ]; then echo "skip: registry unavailable ($owner_repo#$n)"; return 0; fi
+  lc="${owner_repo,,}"
+  evaluate "$kind" "$lc"
+  case "$(jq -r '.v' <<< "$VERDICT" 2>/dev/null)" in
+    ok) echo "ok: $owner_repo#$n" ;;
+    warn) hint_text "$kind" "$owner_repo" "$n"; echo "$HINT" ;;
+    *) echo "skip: $(jq -r '.why // "unknown"' <<< "$VERDICT") ($owner_repo#$n)" ;;
+  esac
+  return 0
+}
+
+case "${1:-}" in
+  hook) hook_main; exit 0 ;;
+  check)
+    if [ -z "${2:-}" ]; then
+      echo "usage: alfred-title-check check <url|owner/repo#n>" >&2
+      exit 2 # cli-only
+    fi
+    check_main "$2"; exit 0 ;;
+  *)
+    echo "usage: alfred-title-check hook | check <url|owner/repo#n>" >&2
+    exit 2 # cli-only
+    ;;
+esac

@@ -113,6 +113,18 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/alfred-title-check\" hook",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

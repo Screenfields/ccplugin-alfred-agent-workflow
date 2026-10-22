@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Test double for gh, for alfred-title-check: answers `gh issue|pr view ... --json`.
+# Reads $GH_STUB_DIR:
+#   view.json   the JSON to answer {number,title,createdAt}
+#   mode        ok (default) | fail | slow | garbage
+#   slow        seconds to sleep first
+# Logs every call's arguments to $GH_STUB_DIR/calls.log.
+echo "$*" >> "$GH_STUB_DIR/calls.log"
+[ -f "$GH_STUB_DIR/slow" ] && sleep "$(cat "$GH_STUB_DIR/slow")"
+case "$(cat "$GH_STUB_DIR/mode" 2>/dev/null || echo ok)" in
+  fail) echo "gh: HTTP 401: Bad credentials" >&2; exit 1 ;;
+  garbage) echo "<html>not json</html>" ;;
+  *) cat "$GH_STUB_DIR/view.json" ;;
+esac
