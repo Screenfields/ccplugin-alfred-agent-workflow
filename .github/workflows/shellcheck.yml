@@ -12,6 +12,9 @@ on:
     paths:
       - 'bin/**'
       - 'hooks/**'
+      - 'config/**'
+      - 'agreement/**'
+      - 'rules/**'
       - 'themes/**'
       - '.claude-plugin/**'
       - 'tests/**'
@@ -21,6 +24,9 @@ on:
     paths:
       - 'bin/**'
       - 'hooks/**'
+      - 'config/**'
+      - 'agreement/**'
+      - 'rules/**'
       - 'themes/**'
       - '.claude-plugin/**'
       - 'tests/**'
@@ -41,11 +47,32 @@ jobs:
       - name: Lint shipped scripts and test helpers
         run: shellcheck bin/* hooks/*.sh tests/stub/*
 
+      # A syntax error in a hook exits 2, which Claude Code reads as a block,
+      # so every shipped script and hook is parsed here, not only linted.
       - name: Syntax check
         run: |
-          for f in bin/*; do
+          for f in bin/* hooks/*.sh; do
             bash -n "$f"
           done
+
+      # Hook-mode scripts must fail open: no `set -e`/`set -u`, and no exit
+      # code other than 0 outside the lines marked `# cli-only` (an exit 2
+      # from a Stop hook blocks the stop). ccplugin#127.
+      - name: Hook exit-code audit
+        run: |
+          status=0
+          for f in hooks/stop.sh bin/alfred-loop-check; do
+            if grep -nE '^\s*set\s+-[a-z]*[eu]' "$f"; then
+              echo "::error file=$f::hook-mode script must not use set -e or set -u"
+              status=1
+            fi
+            bad=$(grep -nE '\bexit +[1-9]' "$f" | grep -v 'cli-only' || true)
+            if [ -n "$bad" ]; then
+              echo "::error file=$f::non-zero exit outside a cli-only line: $bad"
+              status=1
+            fi
+          done
+          exit $status
 
       - name: Plugin JSON parses (manifest, hooks, themes)
         run: |

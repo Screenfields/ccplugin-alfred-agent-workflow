@@ -1,0 +1,493 @@
+#!/usr/bin/env bash
+# alfred-loop-check — Stop-hook check that keeps a lead working while it has
+# actionable items or unread direct messages (ccplugin#127, AP-ADR0031 item 12).
+#
+# Deterministic bash + gh + jq; no model call anywhere. At the end of a turn it
+# lists the actionable set and decides: block the stop once with an instruction
+# that names the items and the two ways on (continue, or park the item with the
+# waiting label and its question), or allow. It never loops and always fails
+# open: any error, timeout or missing input allows the stop with a warning.
+#
+#   alfred-loop-check [--level lead|hub|alfred] [--config PATH]
+#                     [--thresholds PATH] [--hook]
+#   alfred-loop-check note-turn      UserPromptSubmit hook: record whether the
+#                                    turn started with the owner (soft note
+#                                    instead of a block) or a machine
+#
+#   --config      JSON {agent_id, repos}. Default <cwd>/.alfred/config.json.
+#                 `repos` is a list of owner/name; without it the cwd's origin
+#                 remote is used.
+#   --thresholds  Default <script dir>/../config/thresholds.json. The hub and
+#                 Alfred pass their own explicitly.
+#   --level       Default lead. Recorded in friction lines; it does not change
+#                 the computation. Without it, a hub or alfred agent_id is
+#                 silent (the plugin entry is for leads); passed explicitly,
+#                 the check runs for that level.
+#   --hook        stdin is the Stop hook JSON (session_id, stop_hook_active,
+#                 cwd); stdout is Stop hook JSON ({decision:"block",reason},
+#                 {systemMessage} or nothing). Always exit 0.
+#   (no --hook)   prints {items, direct_unread, warnings} as JSON; exit 0, or
+#                 2 on a usage error.
+#
+# Actionable set: open issues in `repos` that carry a label in workable-states
+# and not the waiting-label. When the not-ready ones number at least
+# wip-limit, only those count; otherwise the ready ones count too. An unread
+# direct message in the agent-messaging inbox counts as one more input
+# (`alfred-wake unread --direct`; topic posts never count).
+#
+# Progress is a change in the signature: the sorted actionable items with
+# their labels plus the unread direct count. One block per unchanged
+# signature per chase-interval-minutes; inside a chain (stop_hook_active) a
+# block needs a stored state with a different signature. Per item, at
+# chase-max-tries blocks without a change the reason tells the lead to
+# escalate to the hub. At most loop-check-max-blocks-per-hour blocks per
+# session. Kill switch: ALFRED_LOOP_CHECK=0 or loop-check-enabled false.
+#
+# Hook mode: no `set -e`, no `set -u`, every path ends in `exit 0`, the work
+# runs in a function, and children run as `cmd & wait` so a TERM, INT or HUP
+# trap fires at once and kills them (CI audits for any other hook-mode exit).
+#
+# Environment: ALFRED_LOOP_WAKE_BIN (alfred-wake path), ALFRED_LOOP_NOW
+# (epoch seconds, tests), CLAUDE_CONFIG_DIR, ALFRED_ROLE=worker (silent).
+# Local state, under ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-loop/:
+#   <session_id>.json   {ts, signature, items, blocks, last_turn}
+#   friction.jsonl      one line per stop allowed without progress (local only)
+# Nothing is ever written into a repository.
+
+VERSION="1.0.0"
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+HERE=$(dirname "$SELF")
+STATE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-loop"
+
+WARNINGS=()
+CHILD_PIDS=()
+WORK=""
+HOOK=0
+LEVEL=lead
+LEVEL_GIVEN=0
+CONFIG=""
+THRESHOLDS="$HERE/../config/thresholds.json"
+WAKE="${ALFRED_LOOP_WAKE_BIN:-$HERE/alfred-wake}"
+
+# is_obj <json text>: true for one JSON object (jq -e alone passes empty input).
+is_obj() { [ "$(jq -r type 2>/dev/null <<< "$1")" = object ]; }
+
+now() { echo "${ALFRED_LOOP_NOW:-$(date +%s)}"; }
+
+# warn <text>: stderr now, and kept for the JSON/systemMessage output.
+warn() {
+  WARNINGS+=("$1")
+  echo "alfred-loop-check: $1" >&2
+}
+
+# shellcheck disable=SC2317  # runs from the traps in main
+cleanup() {
+  local p
+  for p in "${CHILD_PIDS[@]}"; do kill "$p" 2>/dev/null; done
+  [ -n "$WORK" ] && rm -rf "$WORK"
+}
+
+# out_msg <text>: a lone systemMessage, using jq when there is one.
+out_msg() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -cn --arg m "$1" '{systemMessage: $m}'
+  else
+    printf '{"systemMessage":"%s"}\n' "$1"
+  fi
+}
+
+usage() {
+  echo "usage: alfred-loop-check [--level lead|hub|alfred] [--config PATH] [--thresholds PATH] [--hook] | note-turn" >&2
+  [ "$HOOK" -eq 1 ] && exit 0
+  exit 2 # cli-only
+}
+
+# --- state -------------------------------------------------------------------
+
+state_file() { echo "$STATE_DIR/${SID//[^A-Za-z0-9._-]/_}.json"; }
+
+# read_state: the stored state as JSON, {} when absent or unreadable.
+read_state() {
+  local f
+  f=$(state_file)
+  if [ -f "$f" ] && is_obj "$(cat "$f" 2>/dev/null)"; then
+    cat "$f"
+  else
+    echo '{}'
+  fi
+}
+
+# write_state <json>: temp file, then mv, so a reader never sees half a file.
+write_state() {
+  local f
+  f=$(state_file)
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 1
+  if ! { printf '%s\n' "$1" > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"; } 2>/dev/null; then
+    rm -f "$f.tmp.$$"
+    return 1
+  fi
+}
+
+friction() { # friction <kind> <signature>
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  jq -cn --argjson ts "$(now)" --arg sid "$SID" --arg id "$AGENT_ID" --arg lv "$LEVEL" --arg k "$1" --arg sig "$2" \
+    '{ts: $ts, session_id: $sid, agent_id: $id, level: $lv, kind: $k, signature: $sig}' >> "$STATE_DIR/friction.jsonl" 2>/dev/null
+  return 0
+}
+
+prune_state() {
+  [ -d "$STATE_DIR" ] && find "$STATE_DIR" -maxdepth 1 -name '*.json' -mtime +0 -delete 2>/dev/null
+  return 0
+}
+
+# --- inputs ------------------------------------------------------------------
+
+# load_thresholds: sets T_* from the thresholds file; returns 1 when the file
+# is missing or malformed. Only the three core keys are required.
+load_thresholds() {
+  local line
+  line=$(jq -r '
+    select(type == "object"
+      and (.["waiting-label"] | type == "string")
+      and (.["workable-states"] | type == "array")
+      and (.["wip-limit"] | type == "number"))
+    | [.["waiting-label"], (.["workable-states"] | tojson), (.["wip-limit"] | floor),
+       (.["ready-state"] // "status:ready"),
+       (.["loop-check-timeout-seconds"] // 5 | floor),
+       (.["chase-interval-minutes"] // 10 | floor),
+       (.["chase-max-tries"] // 3 | floor),
+       (.["loop-check-max-blocks-per-hour"] // 6 | floor),
+       (if .["loop-check-enabled"] == false then "off" else "on" end)]
+    | @tsv' "$THRESHOLDS" 2>/dev/null) || return 1
+  [ -n "$line" ] || return 1
+  IFS=$'\t' read -r T_WAIT T_WORKABLE T_WIP T_READY T_TIMEOUT T_CHASE T_TRIES T_MAXBLOCKS T_ENABLED <<< "$line"
+  case "$T_TIMEOUT$T_CHASE$T_TRIES$T_MAXBLOCKS$T_WIP" in *[!0-9]*) return 1 ;; esac
+  return 0
+}
+
+# repos_list: owner/name per line, from the config or the origin remote.
+repos_list() {
+  local r
+  r=$(jq -r '(.repos // []) | if type == "array" then .[] | strings else empty end' "$CONFIG" 2>/dev/null)
+  if [ -z "$r" ]; then
+    r=$(git -C "$CWD" remote get-url origin 2>/dev/null \
+      | sed -nE 's#^(git@github\.com:|https?://([^@/]*@)?github\.com/|ssh://git@github\.com/)([^/]+/[^/]+)$#\3#p' \
+      | sed -E 's#\.git$##')
+  fi
+  printf '%s\n' "$r" | grep -E '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
+  return 0
+}
+
+# fetch_sources: one gh call per repo and one inbox call, all in parallel, each
+# under its own timeout and its own temp file. Sets ITEMS_ALL (JSON array),
+# DIRECT, N_SRC, N_FAIL.
+fetch_sources() {
+  local repos repo i=0 p rc inbox_pid=""
+  local -a rpids=() rnames=()
+  repos=$(repos_list)
+  for repo in $repos; do
+    i=$((i + 1))
+    timeout -k 1 "$T_TIMEOUT" gh issue list -R "$repo" --state open --limit 500 --search "sort:created-asc" \
+      --json number,title,url,labels > "$WORK/gh.$i" 2> "$WORK/gh.$i.err" &
+    rpids+=("$!")
+    rnames+=("$repo")
+    CHILD_PIDS+=("$!")
+  done
+  N_SRC=$i
+  [ "$i" -eq 0 ] && warn "no repos to check (no repos key in the config, no origin remote)"
+  if [ -x "$WAKE" ]; then
+    timeout -k 1 "$T_TIMEOUT" "$WAKE" unread --direct > "$WORK/inbox.out" 2> "$WORK/inbox.err" &
+    inbox_pid=$!
+    CHILD_PIDS+=("$!")
+  fi
+  N_SRC=$((N_SRC + 1))
+  N_FAIL=0
+  ITEMS_ALL='[]'
+  local k=0
+  for p in "${rpids[@]}"; do
+    k=$((k + 1))
+    repo="${rnames[$((k - 1))]}"
+    wait "$p"; rc=$?
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      warn "$repo: gh timed out"; N_FAIL=$((N_FAIL + 1)); continue
+    elif [ "$rc" -ne 0 ]; then
+      warn "$repo: gh failed (exit $rc): $(head -c 200 "$WORK/gh.$k.err" | tr '\n' ' ')"; N_FAIL=$((N_FAIL + 1)); continue
+    fi
+    if ! jq -e 'type == "array"' "$WORK/gh.$k" >/dev/null 2>&1; then
+      warn "$repo: gh output is not a JSON list"; N_FAIL=$((N_FAIL + 1)); continue
+    fi
+    jq -c --arg r "$repo" '[.[] | {repo: $r, number, title, url, labels: [.labels[]?.name]}]' "$WORK/gh.$k" > "$WORK/items.$k"
+    if [ "$(jq 'length' "$WORK/items.$k")" -ge 500 ]; then
+      warn "$repo: 500 open items, later ones are not seen"
+    fi
+    if jq -e --arg w "$T_WAIT" --argjson wf "$T_WORKABLE" \
+         'length > 0 and ([.[].labels[] | select(. == $w or IN($wf[]))] | length) == 0' "$WORK/items.$k" >/dev/null 2>&1; then
+      warn "no status labels in $repo"
+    fi
+  done
+  if ls "$WORK"/items.* >/dev/null 2>&1; then
+    ITEMS_ALL=$(jq -s -c 'add // []' "$WORK"/items.*)
+  fi
+  DIRECT=0
+  if [ -z "$inbox_pid" ]; then
+    warn "inbox unreachable (alfred-wake not found at $WAKE)"; N_FAIL=$((N_FAIL + 1))
+  else
+    wait "$inbox_pid"; rc=$?
+    local n
+    n=$(head -1 "$WORK/inbox.out" 2>/dev/null)
+    if [ "$rc" -eq 0 ] && [[ "$n" =~ ^[0-9]+$ ]]; then
+      DIRECT="$n"
+    else
+      if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then warn "inbox unreachable (timed out)"; else warn "inbox unreachable (exit $rc)"; fi
+      N_FAIL=$((N_FAIL + 1))
+    fi
+    if grep -q '^alfred-wake: inbox scan partial' "$WORK/inbox.err" 2>/dev/null; then
+      warn "inbox scan partial: a direct message behind many topic posts can be missed"
+    fi
+  fi
+}
+
+# actionable <items-json>: the actionable subset, sorted by repo and number.
+actionable() {
+  jq -c --arg w "$T_WAIT" --argjson wf "$T_WORKABLE" --arg ready "$T_READY" --argjson wip "$T_WIP" '
+    [.[] | select(([.labels[] | select(. == $w)] | length) == 0)
+         | select([.labels[] | select(. as $l | $wf | index($l))] | length > 0)] as $work
+    | [$work[] | select([.labels[] | select(. == $ready)] | length == 0)] as $busy
+    | (if ($busy | length) >= $wip then $busy else $work end)
+    | sort_by(.repo, .number)' <<< "$1"
+}
+
+# --- decision ----------------------------------------------------------------
+
+# reason_text <act-json> <tries-json> <direct>: the block reason.
+reason_text() {
+  jq -r --argjson tries "$2" --argjson d "$3" --arg w "$T_WAIT" --argjson max "$T_TRIES" '
+    ( [.[] | "- \(.repo)#\(.number) \"\(.title)\" \(.url)"
+        + (if (($tries["\(.repo)#\(.number)"].tries // 0) >= $max)
+           then " [unchanged for \($tries["\(.repo)#\(.number)"].tries) checks: escalate to the hub and record the escalation on the item]"
+           else "" end)] ) as $lines
+    | (if ($d > 0) then "You have \($d) unread direct message(s): read and handle the inbox first.\n" else "" end)
+      + (if ($lines | length) > 0
+         then "These work items are still actionable:\n" + ($lines | join("\n"))
+              + "\nContinue with the next one in this turn, or, if one waits on the owner, park it: add the label `\($w)` and comment the question on it. You may stop once no item is actionable and no direct message is unread."
+         else "You may stop once the inbox is handled." end)' <<< "$1"
+}
+
+# Decision results.
+D_KIND=allow   # allow | block
+D_REASON=""
+D_MSG=""
+
+decide() {
+  # Globals in: ITEMS_ALL DIRECT N_SRC N_FAIL AGENT_ID SID AGAIN
+  local act sig prev prev_sig ts age stale=1 have_state=0 chase_s blocks_n prev_items tries nowt
+  nowt=$(now)
+  act=$(actionable "$ITEMS_ALL")
+  sig=$(jq -r --argjson d "$DIRECT" '([.[] | "\(.repo)#\(.number):\(.labels | sort | join(","))"] | sort | join("\n")) + "\ndirect=\($d)"' <<< "$act")
+  prev=$(read_state)
+  prev_sig=$(jq -r '.signature // empty' <<< "$prev")
+  ts=$(jq -r '.ts // 0' <<< "$prev")
+  chase_s=$((T_CHASE * 60))
+  if [ -n "$prev_sig" ]; then
+    have_state=1
+    age=$((nowt - ts))
+    [ "$age" -le "$chase_s" ] && stale=0
+  fi
+
+  local empty=0
+  [ "$(jq 'length' <<< "$act")" -eq 0 ] && [ "$DIRECT" -eq 0 ] && empty=1
+
+  if [ "$N_FAIL" -ge "$N_SRC" ]; then
+    warn "all sources failed, stop allowed"; D_MSG="alfred-loop-check: all sources failed, stop allowed"; return
+  fi
+  if [ "$empty" -eq 1 ] && [ "$N_FAIL" -eq 0 ]; then
+    rm -f "$(state_file)"
+    return
+  fi
+  if [ "$N_FAIL" -gt 0 ] && [ "$have_state" -eq 1 ] && [ "$stale" -eq 0 ]; then
+    warn "some sources failed, stop allowed"; D_MSG="alfred-loop-check: some sources failed, stop allowed"; return
+  fi
+  [ "$empty" -eq 1 ] && return
+
+  # Owner present: a soft note, never a block (owner decision O1).
+  if [ "$(jq -r '.last_turn // "machine"' <<< "$prev")" = "owner" ]; then
+    D_MSG="alfred-loop-check (not blocking, this turn started with you): $(jq -r --argjson d "$DIRECT" '([.[] | "\(.repo)#\(.number)"] | join(", ")) as $i | "open work: " + (if $i == "" then "none" else $i end) + (if $d > 0 then "; \($d) unread direct message(s)" else "" end)' <<< "$act")"
+    return
+  fi
+
+  # Session cap on blocks.
+  blocks_n=$(jq -r --argjson n "$nowt" '[(.blocks // [])[] | select(. > $n - 3600)] | length' <<< "$prev")
+  if [ "$blocks_n" -ge "$T_MAXBLOCKS" ]; then
+    friction loop-check-cap "$sig"
+    warn "block cap reached, stop allowed"; D_MSG="alfred-loop-check: block cap reached for this session, stop allowed"; return
+  fi
+
+  local block=0
+  if [ "$AGAIN" = "true" ]; then
+    if [ "$have_state" -eq 0 ] || [ "$stale" -eq 1 ]; then
+      warn "no state for this chain, stop allowed"; D_MSG="alfred-loop-check: no stored state for this chain, stop allowed"; return
+    fi
+    if [ "$sig" != "$prev_sig" ]; then block=1; fi
+  else
+    if [ "$have_state" -eq 0 ] || [ "$stale" -eq 1 ] || [ "$sig" != "$prev_sig" ]; then block=1; fi
+  fi
+
+  if [ "$block" -eq 0 ]; then
+    friction loop-check-no-progress "$sig"
+    warn "no progress since the last block, stop allowed"
+    D_MSG="alfred-loop-check: no progress since the last block, stop allowed. Actionable work remains: $(jq -r '[.[] | "\(.repo)#\(.number)"] | join(", ")' <<< "$act")"
+    return
+  fi
+
+  prev_items=$(jq -c '.items // {}' <<< "$prev")
+  tries=$(jq -cn --argjson prev "$prev_items" --argjson act "$act" '
+    reduce $act[] as $i ({};
+      ("\($i.repo)#\($i.number)") as $k
+      | ($i.labels | sort | join(",")) as $l
+      | . + {($k): {labels: $l, tries: (if ($prev[$k].labels == $l) then (($prev[$k].tries // 0) + 1) else 1 end)}})')
+  D_REASON=$(reason_text "$act" "$tries" "$DIRECT")
+  D_KIND=block
+  write_state "$(jq -cn --argjson prev "$prev" --argjson n "$nowt" --arg sig "$sig" --argjson tries "$tries" \
+    '{ts: $n, signature: $sig, items: $tries,
+      blocks: ([($prev.blocks // [])[] | select(. > $n - 3600)] + [$n])}
+     + (if $prev.last_turn then {last_turn: $prev.last_turn} else {} end)')" \
+    || warn "state not written"
+}
+
+# --- entry points ------------------------------------------------------------
+
+# preflight: every binary the check relies on, else allow with a warning.
+preflight() {
+  local b
+  for b in jq gh timeout; do
+    command -v "$b" >/dev/null 2>&1 || { out_msg "alfred-loop-check: skipped, missing binary: $b"; echo "alfred-loop-check: skipped, missing binary: $b" >&2; return 1; }
+  done
+  [ -x "$WAKE" ] || { out_msg "alfred-loop-check: skipped, missing binary: alfred-wake"; echo "alfred-loop-check: skipped, missing binary: alfred-wake" >&2; return 1; }
+  return 0
+}
+
+# common_setup: config, level and thresholds checks shared by both modes.
+# Returns 0 to go on, 1 when the caller should stop (output already given).
+common_setup() {
+  if [ ! -f "$CONFIG" ]; then return 1; fi
+  if ! is_obj "$(cat "$CONFIG" 2>/dev/null)"; then
+    warn "config malformed ($CONFIG), stop allowed"
+    if [ "$HOOK" -eq 1 ]; then out_msg "alfred-loop-check: config malformed, stop allowed"; fi
+    return 1
+  fi
+  AGENT_ID=$(jq -r '.agent_id // empty' "$CONFIG")
+  [ -n "$AGENT_ID" ] || return 1
+  if [ "$LEVEL_GIVEN" -eq 0 ]; then
+    case "$AGENT_ID" in hub|alfred) return 1 ;; esac
+  fi
+  if ! load_thresholds; then
+    warn "thresholds file missing or malformed ($THRESHOLDS), stop allowed"
+    if [ "$HOOK" -eq 1 ]; then out_msg "alfred-loop-check: thresholds missing or malformed, stop allowed"; fi
+    return 1
+  fi
+  [ "$T_ENABLED" = "on" ] || return 1
+  return 0
+}
+
+hook_main() {
+  local input
+  [ "${ALFRED_LOOP_CHECK:-1}" = "0" ] && return
+  [ "${ALFRED_ROLE:-}" = "worker" ] && return
+  preflight || return
+  input=$(cat)
+  if ! is_obj "$input"; then
+    warn "bad hook input, stop allowed"; out_msg "alfred-loop-check: bad hook input, stop allowed"; return
+  fi
+  SID=$(jq -r '.session_id // empty' <<< "$input")
+  [ -n "$SID" ] || SID="${CLAUDE_CODE_SESSION_ID:-}"
+  AGAIN=$(jq -r '.stop_hook_active // false' <<< "$input")
+  CWD=$(jq -r '.cwd // empty' <<< "$input")
+  [ -n "$CWD" ] || CWD="$PWD"
+  [ -n "$CONFIG" ] || CONFIG="$CWD/.alfred/config.json"
+  common_setup || return
+  if [ -z "$SID" ]; then
+    warn "no session_id in the hook input, stop allowed"; out_msg "alfred-loop-check: no session_id, stop allowed"; return
+  fi
+  WORK=$(mktemp -d) || { warn "no temp dir, stop allowed"; return; }
+  prune_state
+  fetch_sources
+  decide
+  if [ "$D_KIND" = "block" ]; then
+    jq -cn --arg r "$D_REASON" '{decision: "block", reason: $r}'
+  elif [ -n "$D_MSG" ]; then
+    out_msg "$D_MSG"
+  fi
+}
+
+cli_main() {
+  CWD="$PWD"
+  [ -n "$CONFIG" ] || CONFIG="$CWD/.alfred/config.json"
+  command -v jq >/dev/null 2>&1 || { echo "alfred-loop-check: requires jq" >&2; exit 2; } # cli-only
+  [ -f "$CONFIG" ] || { echo "alfred-loop-check: no config at $CONFIG" >&2; exit 2; } # cli-only
+  common_setup || { echo "alfred-loop-check: config or thresholds unusable" >&2; exit 2; } # cli-only
+  SID=cli
+  WORK=$(mktemp -d) || exit 2 # cli-only
+  fetch_sources
+  jq -cn --argjson items "$(actionable "$ITEMS_ALL")" --argjson d "$DIRECT" --argjson w "$(printf '%s\n' "${WARNINGS[@]}" | jq -R . | jq -sc 'map(select(. != ""))')" \
+    '{items: $items, direct_unread: $d, warnings: $w}'
+}
+
+# note-turn: UserPromptSubmit. Records whether the turn started with the owner
+# (an interactive session and a prompt without a machine prefix) or a machine.
+# Unknown is treated as machine, so the check falls back to blocking.
+note_turn_main() {
+  local input sid cwd prompt kind ep prev
+  command -v jq >/dev/null 2>&1 || return
+  [ "${ALFRED_LOOP_CHECK:-1}" = "0" ] && return
+  [ "${ALFRED_ROLE:-}" = "worker" ] && return
+  input=$(cat)
+  sid=$(jq -r '.session_id // empty' <<< "$input" 2>/dev/null)
+  cwd=$(jq -r '.cwd // empty' <<< "$input" 2>/dev/null)
+  [ -n "$sid" ] || return
+  [ -n "$cwd" ] || cwd="$PWD"
+  [ -f "$cwd/.alfred/config.json" ] || return
+  prompt=$(jq -r '.prompt // empty' <<< "$input" 2>/dev/null)
+  prompt="${prompt#"${prompt%%[![:space:]]*}"}"
+  kind=owner
+  ep="${CLAUDE_CODE_ENTRYPOINT:-}"
+  case "$ep" in sdk-*|"") kind=machine ;; esac
+  case "$prompt" in
+    "<task-notification>"*|"<cross-session-message"*|"[substrate wake]"*|"<scheduled-task"*|"[scheduled-task"*|"") kind=machine ;;
+  esac
+  SID="$sid"
+  prev=$(read_state)
+  write_state "$(jq -c --arg k "$kind" '. + {last_turn: $k}' <<< "$prev")"
+}
+
+main() {
+  local sub="" a
+  for a in "$@"; do [ "$a" = "--hook" ] && HOOK=1; done
+  if [ "${1:-}" = "note-turn" ]; then sub=note-turn; shift; fi
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --hook) shift ;;
+      --level) [ $# -ge 2 ] || usage; LEVEL="$2"; LEVEL_GIVEN=1; shift 2 ;;
+      --config) [ $# -ge 2 ] || usage; CONFIG="$2"; shift 2 ;;
+      --thresholds) [ $# -ge 2 ] || usage; THRESHOLDS="$2"; shift 2 ;;
+      --version) echo "alfred-loop-check $VERSION"; exit 0 ;;
+      -h|--help) usage ;;
+      *) [ "$sub" = note-turn ] && { shift; continue; }; usage ;;
+    esac
+  done
+  case "$LEVEL" in lead|hub|alfred) ;; *) usage ;; esac
+  [ "$sub" = note-turn ] && HOOK=1
+  trap 'cleanup; exit 0' TERM INT HUP
+  trap cleanup EXIT
+  if [ "$sub" = note-turn ]; then
+    note_turn_main
+    exit 0
+  elif [ "$HOOK" -eq 1 ]; then
+    hook_main
+    exit 0
+  else
+    cli_main
+    exit 0
+  fi
+}
+
+main "$@"

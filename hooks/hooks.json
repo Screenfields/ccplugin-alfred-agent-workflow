@@ -48,6 +48,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/alfred-loop-check\" note-turn",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/alfred-workitem\" hook",
             "timeout": 5
           }
@@ -71,7 +76,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/bridge-check.sh\""
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh\"",
+            "timeout": 20
           },
           {
             "type": "command",

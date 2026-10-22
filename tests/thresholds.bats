@@ -113,3 +113,11 @@ names_in() {
   done
   grep -q 'failed-review-max' "$ROOT/rules/routed/work-and-review-in-pairs.md"
 }
+
+@test "the waiting walkthrough reads the status name from the config and records the decision (AC 9)" {
+  f="$ROOT/commands/waiting.md"
+  grep -q 'alfred-config get waiting-label' "$f"
+  grep -q -- '--remove-label' "$f"
+  grep -q 'post the decision as a comment' "$f"
+  grep -q 'action:jochem' "$f"
+}
