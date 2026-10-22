@@ -120,4 +120,7 @@ names_in() {
   grep -q -- '--remove-label' "$f"
   grep -q 'post the decision as a comment' "$f"
   grep -q 'action:jochem' "$f"
+  grep -q 'alfred-config get' "$f"
+  grep -q -- '--add-label "<ready-state>"' "$f"
+  grep -q 'no label from `workable-states`' "$f"
 }

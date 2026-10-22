@@ -207,6 +207,11 @@ answer.
    `gh issue edit <n> -R <owner/name> --remove-label "<waiting-label>"`, in that order, so the
    decision is on record before the lead sees the item as actionable again. If the owner skips or
    defers it, leave the label in place.
+   Then check the item still carries a state label: read `workable-states` and `ready-state` with
+   `alfred-config get`, and if the item has no label from `workable-states`, add the `ready-state`
+   label with `gh issue edit <n> -R <owner/name> --add-label "<ready-state>"`. Parking is meant to
+   keep the state label, but an item that lost it has no workable label once the waiting label is
+   gone, and the lead's loop would never see it again.
 5. Never widen scope on the back of an answer: a "yes" to one item is not a "yes" to the chain it
    implies. New work that surfaces becomes a new item or a new issue.
 

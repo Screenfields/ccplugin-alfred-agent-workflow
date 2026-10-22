@@ -92,6 +92,7 @@ state_of() { jq -r "$1" "$STATEDIR/s1.json"; }
   [[ "$reason" == *"o/a#7"* && "$reason" == *"Fix the thing"* && "$reason" == *"https://github.com/o/a/issues/7"* ]]
   [[ "$reason" == *"Continue with the next one"* ]]
   [[ "$reason" == *"status:waiting-on-owner"* && "$reason" == *"comment the question"* ]]
+  [[ "$reason" == *"keep its state label (it holds the place of the item)"* ]]
 }
 
 @test "the same item parked as waiting on owner, and none other, is allowed" {
@@ -868,4 +869,29 @@ one_object() { [ "$(jq -s length <<< "$output")" -le 1 ]; }
   not blocked
   [[ "$stderr" == *"state not written"* ]]
   [[ "$(jq -r .systemMessage <<< "$output")" == *"state not written"* ]]
+}
+
+@test "an allow with the inbox unreachable shows the failure in a systemMessage, not only on stderr" {
+  touch "$STUB_DIR/fail"
+  issues o/a
+  lc
+  [ "$status" -eq 0 ]
+  not blocked
+  [[ "$(jq -r .systemMessage <<< "$output")" == *"inbox unreachable"* ]]
+  [[ "$stderr" == *"inbox unreachable"* ]]
+}
+
+@test "a block with the inbox unreachable names the failure in the reason" {
+  touch "$STUB_DIR/fail"
+  issues o/a "7:Fix:status:ready"
+  lc
+  blocked
+  reason=$(jq -r .reason <<< "$output")
+  [[ "$reason" == *"o/a#7"* && "$reason" == *"a source failed"* && "$reason" == *"inbox unreachable"* ]]
+}
+
+@test "a failed gh repo with no state is visible in the message too" {
+  touch "$GH_STUB_DIR/fail-o__a"
+  lc
+  [[ "$(jq -r .systemMessage <<< "$output")" == *"o/a: gh failed"* ]]
 }
