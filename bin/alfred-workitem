@@ -52,6 +52,11 @@ GH_TIMEOUT=5
 STALE_DAYS=90
 
 warn() { echo "alfred-workitem: $*" >&2; }
+# The curl config holds secrets: removed on any exit, signals included.
+CFG_TMP=""
+trap 'rm -f "$CFG_TMP"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT HUP
 # ALFRED_WORKITEM_NOW (RFC 3339 UTC) pins the clock; the tests use it for exact bodies.
 now_iso() { if [ -n "${ALFRED_WORKITEM_NOW:-}" ]; then echo "$ALFRED_WORKITEM_NOW"; else date -u +%Y-%m-%dT%H:%M:%SZ; fi; }
 now_nano() { if [ -n "${ALFRED_WORKITEM_NOW:-}" ]; then echo "$(date -u -d "$ALFRED_WORKITEM_NOW" +%s)000000000"; else date +%s%N; fi; }
@@ -74,13 +79,18 @@ touch_session() {
 
 cfg_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
-# header_lines <"Name: value, Name: value">: curl config `header` lines.
+# header_lines <list>: curl config `header` lines. The list is comma-separated,
+# each entry either `Name: value` or the OTLP form `key=value`. An entry is
+# OTLP when its first `=` comes before any `:`.
 header_lines() {
   local raw="$1" h
   while IFS= read -r h; do
     h="${h#"${h%%[![:space:]]*}"}"
     h="${h%"${h##*[![:space:]]}"}"
     [ -n "$h" ] || continue
+    if [[ "$h" =~ ^([^:=]+)=(.*)$ ]]; then
+      h="${BASH_REMATCH[1]}: ${BASH_REMATCH[2]}"
+    fi
     printf 'header = "%s"\n' "$(cfg_escape "$h")"
   done < <(printf '%s\n' "$raw" | tr ',' '\n')
 }
@@ -93,6 +103,7 @@ post_json() {
     return 1
   fi
   cfg=$(mktemp) || return 1
+  CFG_TMP="$cfg"
   { echo 'header = "Content-Type: application/json"'; header_lines "${AGENT_RUNS_OTLP_HEADERS:-}"; } > "$cfg"
   code=$(printf '%s' "$body" | curl -sS -o /dev/null -w '%{http_code}' --max-time "$t" \
     -X POST -K "$cfg" --data-binary @- "$AGENT_RUNS_OTLP_LOGS_ENDPOINT" 2>/dev/null) || code=000
@@ -110,6 +121,7 @@ http_get() {
   local url="$1" cfg out code
   HTTP_BODY=""
   cfg=$(mktemp) || return 1
+  CFG_TMP="$cfg"
   printf 'header = "Authorization: Bearer %s"\n' "$(cfg_escape "${AGENT_RUNS_TOKEN:-}")" > "$cfg"
   out=$(curl -sS --max-time "$READ_TIMEOUT" -w '\n%{http_code}' -K "$cfg" "$url" 2>/dev/null) || out=$'\n000'
   rm -f "$cfg"
@@ -373,9 +385,20 @@ cmd_guard() {
 
 REMINDER='No work item is marked for this session, so its token usage is recorded as an unmarked deviation. Mark it: alfred-workitem mark <owner>/<repo>#<n> (operational work without its own item goes on the standing item of objective 1; see the alfred-agent README), or alfred-workitem mark none.'
 
-record_deviation() { # <sid> <cwd>
-  local sid="$1" cwd="$2" old first="" notified="" now tmp
+# with_dev_lock <cmd...>: run under an flock on deviations.jsonl (2 s); on a
+# timeout or an unusable lock file, warn and skip: failing open.
+with_dev_lock() {
   ensure_dir || return 0
+  (
+    flock -w 2 9 || { warn "deviations.jsonl is locked; skipped"; exit 0; }
+    "$@"
+  ) 9>"$DEV_FILE.lock" || true
+}
+
+record_deviation() { with_dev_lock record_deviation_locked "$@"; }
+
+record_deviation_locked() { # <sid> <cwd>
+  local sid="$1" cwd="$2" old first="" notified="" now tmp
   now=$(now_iso)
   old=$(jq -c --arg s "$sid" 'select(.session_id == $s)' "$DEV_FILE" 2>/dev/null | head -1)
   if [ -n "$old" ]; then
@@ -469,14 +492,16 @@ cmd_check_session() {
   fi
   body="Session $sid had no work item mark from $first to $last (project dir: $(jq -r '.cwd' <<<"$rec")). ${amounts:-Store amounts unavailable.} Tracked, nothing was stopped."
   if timeout "$NOTIFY_TIMEOUT" "$WAKE_BIN" notify hub "[deviation] $sid" "$body" >/dev/null 2>&1; then
-    tmp="$DEV_FILE.tmp.$$"
-    {
-      jq -c --arg s "$sid" 'select(.session_id != $s)' "$DEV_FILE" 2>/dev/null
-      jq -c --arg l "$last" '.notified_at = $l' <<<"$rec"
-    } > "$tmp" && mv "$tmp" "$DEV_FILE"
-    rm -f "$tmp"
+    with_dev_lock mark_notified "$sid" "$last"
   fi
   exit 0
+}
+
+mark_notified() { # <sid> <last_seen_at that was reported>
+  local tmp="$DEV_FILE.tmp.$$"
+  jq -c --arg s "$1" --arg l "$2" 'if .session_id == $s then .notified_at = $l else . end' "$DEV_FILE" > "$tmp" \
+    && mv "$tmp" "$DEV_FILE"
+  rm -f "$tmp"
 }
 
 # resend_new_overrides: before reading, send the request ids a briefed
@@ -501,7 +526,8 @@ resend_new_overrides() {
 
 cmd_check() {
   local est s
-  parse_item_opts "$@" || exit "$?"
+  # A report never fails: a usage error is a warning too.
+  parse_item_opts "$@" || { warn "usage error; nothing checked"; exit 0; }
   resend_new_overrides
   est=$(estimate_for "$ITEM" "$EST_OPT")
   if ! summary_of "$ITEM"; then

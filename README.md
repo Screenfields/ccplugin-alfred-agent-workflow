@@ -198,7 +198,7 @@ Only these shapes are ever printed to stdout. Anything else there is a bug.
 | `WAKE am unread=<n> from=<a,b> cursor-reset` | The server no longer knew the stored cursor: it was reseated without replaying history; `n` is what is unread now |
 | `WAKE am unread=<n> from=<a,b> pending-at-start` | `wait` only: the inbox already had unread mail when the cursors were first seeded |
 | `WAKE buzz <label> new=<n> from=<…> last=<HH:MM TZ>` | New non-self posts in that Buzz channel |
-| `… no-mark` (suffix on any `WAKE am`/`WAKE buzz` line) | The current session has no work item mark: run `alfred-workitem mark <owner>/<repo>#<n>` (see [Tokens per work item](#tokens-per-work-item-binalfred-workitem)) |
+| `… no-mark` (suffix on any `WAKE am`/`WAKE buzz` line; `wait` mode only, not the legacy `run` loop) | The current session has no work item mark: run `alfred-workitem mark <owner>/<repo>#<n>` (see [Tokens per work item](#tokens-per-work-item-binalfred-workitem)) |
 | `WAKE-INIT …` | Legacy `run` only, first ever run: cursors seeded, history deliberately not replayed |
 | `WAKE-ERROR <source>: <reason>` | A source failed 5 consecutive passes (repeats at most hourly) |
 | `WAKE-RECOVERED <source>` | A previously-failing source succeeded again |
@@ -375,7 +375,7 @@ alfred-workitem deviations                # unmarked sessions: local record, plu
 - **Operational work** without its own item goes on the standing item of objective 1 (AP-ADR0028).
   The hub names its number; it is not recorded here yet.
 - **Store env** (set by the hub in gitops): `AGENT_RUNS_OTLP_LOGS_ENDPOINT`, `AGENT_RUNS_OTLP_HEADERS`
-  (`Name: value`, comma-separated), `AGENT_RUNS_READER_URL`, `AGENT_RUNS_TOKEN`. Hooks cannot see
+  (comma-separated, each `Name: value` or the OTLP form `key=value`), `AGENT_RUNS_READER_URL`, `AGENT_RUNS_TOKEN`. Hooks cannot see
   `OTEL_*` (Claude Code strips it). **Every command fails open**: a missing env, an unreachable store
   or bad JSON gives a stderr warning, exit 0 and "unknown" in the output.
 - **Local state** is under `${CLAUDE_CONFIG_DIR:-~/.claude}/alfred-workitem/`: one mark file per

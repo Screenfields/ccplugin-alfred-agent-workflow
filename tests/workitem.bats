@@ -72,6 +72,59 @@ mark_item() { jq -r '.item' "$DIR/sess-main.json"; }
   grep -q 'Authorization: Bearer otlp-secret' "$STUB_DIR/headers.log"
 }
 
+@test "AGENT_RUNS_OTLP_HEADERS accepts the Name: value form (a value may hold = and :)" {
+  export AGENT_RUNS_OTLP_HEADERS="X-Scope-OrgID: acme, Authorization: Basic YWJj==, X-Url: http://a/b?c=d"
+  run "$WI" mark acme/widgets#7
+  [ "$status" -eq 0 ]
+  grep -qx 'header = "X-Scope-OrgID: acme"' "$STUB_DIR/headers.log"
+  grep -qx 'header = "Authorization: Basic YWJj=="' "$STUB_DIR/headers.log"
+  grep -qx 'header = "X-Url: http://a/b?c=d"' "$STUB_DIR/headers.log"
+}
+
+@test "AGENT_RUNS_OTLP_HEADERS accepts the OTLP key=value form" {
+  export AGENT_RUNS_OTLP_HEADERS="x-scope-orgid=acme,authorization=Bearer abc=="
+  run "$WI" mark acme/widgets#7
+  [ "$status" -eq 0 ]
+  grep -qx 'header = "x-scope-orgid: acme"' "$STUB_DIR/headers.log"
+  grep -qx 'header = "authorization: Bearer abc=="' "$STUB_DIR/headers.log"
+}
+
+@test "the curl config with the secrets is removed after every call, failed or not" {
+  export TMPDIR="$BATS_TEST_TMPDIR/tmp"
+  mkdir -p "$TMPDIR"
+  "$WI" mark acme/widgets#7
+  touch "$STUB_DIR/fail"
+  "$WI" mark acme/widgets#7
+  "$WI" check acme/widgets#7
+  echo 6 > "$STUB_DIR/slow"; rm "$STUB_DIR/fail"
+  timeout -s TERM 1 "$WI" line acme/widgets#7 || true
+  sleep 0.5
+  [ -z "$(ls -A "$TMPDIR")" ]
+}
+
+@test "check exits 0 even on a usage error, with a warning" {
+  run "$WI" check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"usage error; nothing checked"* ]]
+  run "$WI" check not-an-item
+  [ "$status" -eq 0 ]
+}
+
+@test "a held deviations lock times out and fails open: the Stop hook exits 0, nothing written" {
+  mkdir -p "$DIR"
+  ( flock 9; sleep 5 ) 9>"$DIR/deviations.jsonl.lock" &
+  holder=$!
+  sleep 0.3
+  start=$SECONDS
+  run hook_in "$(ev Stop sess-unmarked)"
+  [ "$status" -eq 0 ]
+  [ $((SECONDS - start)) -lt 4 ]
+  [[ "$output" == *"locked"* ]]
+  [ ! -e "$DIR/deviations.jsonl" ]
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+}
+
 @test "the marker bodies equal the shared fixtures exactly (session marker, and with request_ids)" {
   export ALFRED_WORKITEM_NOW=2026-10-22T08:00:00Z
   export CLAUDE_CODE_SESSION_ID=11111111-1111-4111-8111-111111111111

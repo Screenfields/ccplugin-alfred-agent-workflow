@@ -21,10 +21,10 @@ ccplugin-alfred-agent-workflow/
 │   └── alfred-workitem      # Work-item marks + token report from the agent-run store (tracked, not gated; fails open)
 ├── hooks/
 │   ├── hooks.json           # SessionStart → owner-communication.sh; alfred-workitem hook/guard entries
-├── tests/
-│   ├── alfred-wake.bats, workitem.bats  # bats suites; stubs in tests/stub/, fixtures in tests/fixtures/workitem/
 │   ├── owner-communication.sh  # Emits the rules below as additionalContext
 │   └── owner-communication.md  # Owner-communication rules (timestamp line, local time, links)
+├── tests/
+│   └── alfred-wake.bats, workitem.bats  # bats suites; stubs in tests/stub/, fixtures in tests/fixtures/workitem/
 ├── skills/
 │   └── messaging/
 │       └── SKILL.md         # General messaging context
