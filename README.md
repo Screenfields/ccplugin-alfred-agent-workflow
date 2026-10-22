@@ -393,17 +393,24 @@ whether to block the stop once. Items waiting on the owner never hold the loop o
   warning and counts as empty.
 - **Block, at most once per unchanged set.** The signature is the sorted actionable items with their
   labels plus the unread direct count. The same signature does not block again inside
-  `chase-interval-minutes`; inside a chain (`stop_hook_active`) a block needs a stored state with a
-  different signature, so an expired, missing or fail-open state can never cause a second block.
+  `chase-interval-minutes`. Inside a chain (`stop_hook_active`) the stored state is the guard
+  whatever its age: a different signature blocks, the same one is allowed with friction, and a
+  missing state is allowed, so expiry or a fail-open stop can never cause a second block. Only
+  outside a chain does an old state (past the chase interval) let the same set block again.
+  Issue titles in the block reason are untrusted: control characters, backticks and quotes are
+  removed and each is cut to about 100 characters, and the list is labelled as data.
+  If the state cannot be written, the stop is allowed with a warning.
   A stop that is allowed because nothing changed prints a warning and appends one line to
   `${CLAUDE_CONFIG_DIR:-~/.claude}/alfred-loop/friction.jsonl` (local only).
 - **Chase, then escalate:** an item that is still unchanged after `chase-max-tries` blocks makes
   the block reason say to escalate to the hub and record it on the item. The count resets when the
   item's labels change.
 - **Owner present:** `bin/alfred-loop-check note-turn` (UserPromptSubmit) records whether the turn
-  started with the owner. In an interactive session, a prompt without a machine prefix
+  started with the owner. In an interactive session (`CLAUDE_CODE_ENTRYPOINT` is `cli`, `claude-vscode` or
+  `claude-desktop`; anything else, or unset, is a machine), a prompt without a machine prefix
   (`<task-notification>`, `<cross-session-message`, `[substrate wake]`, `<scheduled-task`) is an
-  owner turn, and the check then only adds a one-line note. Unknown counts as a machine turn.
+  owner turn. The next stop then only adds a one-line note and consumes the marker, so a later
+  stop without a new prompt blocks normally. Unknown counts as a machine turn.
 - **Cap:** at most `loop-check-max-blocks-per-hour` blocks per session.
 - **Kill switch:** `ALFRED_LOOP_CHECK=0` or `"loop-check-enabled": false` in the thresholds.
 - **Silent** without `.alfred/config.json`, for the `hub` and `alfred` ids under the plugin entry,

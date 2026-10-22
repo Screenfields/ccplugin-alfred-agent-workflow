@@ -1,7 +1,7 @@
 ---
 type: doctrine
 status: active
-updated: 2026-05-23
+updated: 2026-10-20
 description: "Workers do execution, the lead keeps synthesis: a brief is worker-fit only if writable in 3-5 sentences with a known output shape and interpretation of findings stays with the lead."
 read_when: "When writing a worker brief or deciding whether a task is delegable."
 ---
@@ -11,6 +11,8 @@ read_when: "When writing a worker brief or deciding whether a task is delegable.
 ## Rule
 
 Workers do **execution**; the lead keeps **synthesis**. A brief is worker-fit when (a) it's writable in 3–5 sentences with a known output shape, AND (b) synthesis of the worker's output stays with the lead. If either fails, do the work inline.
+
+> **Amended 2026-10-20 by AP-ADR0031:** for leads, building is always delegated, the light path included. When a build brief is not worker-fit, the lead does the synthesis until it is, then delegates; inline work is judgment and single actions with the content in hand.
 
 This refines doctrine 06 by naming the *boundary* of what gets delegated. "Lead/worker pattern" is the right model; the refinement is that "delegate exploration" can be misread as "delegate decisions." It is not. The lead delegates **mechanical execution** of a well-shaped task. The lead does **not** delegate the decision of what the worker's findings mean, or what fix should follow from them.
 

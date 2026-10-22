@@ -1,7 +1,7 @@
 # Doctrines (plugin copy)
 
 The 22 cross-project doctrines, copied **verbatim** from their owner,
-`Screenfields/alfred-platform` `docs/doctrines/` (at c41b1b4, alfred-platform#1137), so every
+`Screenfields/alfred-platform` `docs/doctrines/` (at c41b1b4, alfred-platform#1137; doctrine 10 refreshed from main @ 03bcfaa for #127), so every
 lead with the alfred-agent plugin has them without read access to a docs repo
 (ccplugin-alfred-agent-workflow#121, AP-ADR0021).
 
