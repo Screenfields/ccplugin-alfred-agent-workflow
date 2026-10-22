@@ -46,6 +46,13 @@ transcript() {
   done
 }
 
+# long_unmarked <sid> — Stop hook, then backdate the unmarked window to 5 minutes.
+long_unmarked() {
+  hook_in "$(ev Stop "$1" "${2:-{\}}")"
+  jq -c --arg f "$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" '.first_unmarked_at = $f' "$DIR/deviations.jsonl" > "$DIR/dev.tmp" \
+    && mv "$DIR/dev.tmp" "$DIR/deviations.jsonl"
+}
+
 posts() { cat "$STUB_DIR/posts.jsonl" 2>/dev/null; }
 attr() { jq -r --arg k "$1" '.resourceLogs[0].scopeLogs[0].logRecords[0].attributes[] | select(.key == $k) | .value.stringValue'; }
 nposts() { posts | wc -l | tr -d ' '; }
@@ -523,6 +530,7 @@ JSON
 }
 
 @test "UserPromptSubmit reminds an unmarked session via additionalContext, a marked one not" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
   run hook_in "$(ev UserPromptSubmit sess-main '{"prompt":"hi"}')"
   [ "$status" -eq 0 ]
   [ "$(jq -r '.hookSpecificOutput.hookEventName' <<<"$output")" = "UserPromptSubmit" ]
@@ -564,7 +572,29 @@ JSON
   [ "$(posts | tail -1 | attr work_item)" = "" ]
 }
 
+@test "no unmarked reminder for a non-interactive entrypoint (sdk-cli)" {
+  export CLAUDE_CODE_ENTRYPOINT=sdk-cli
+  run hook_in "$(ev UserPromptSubmit sess-main '{"prompt":"hi"}')"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "no unmarked reminder for ALFRED_ROLE=worker" {
+  export CLAUDE_CODE_ENTRYPOINT=cli ALFRED_ROLE=worker
+  run hook_in "$(ev UserPromptSubmit sess-main '{"prompt":"hi"}')"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "the unmarked reminder still comes with the cli entrypoint and no role" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  unset ALFRED_ROLE
+  run hook_in "$(ev UserPromptSubmit sess-main '{"prompt":"hi"}')"
+  [[ "$output" == *additionalContext* ]]
+}
+
 @test "the unmarked reminder comes on the 1st prompt and then every 5th" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
   got=""
   for i in 1 2 3 4 5 6 7; do
     out=$(hook_in "$(ev UserPromptSubmit sess-main '{"prompt":"hi"}')")
@@ -578,7 +608,8 @@ JSON
 # --- SessionEnd -----------------------------------------------------------------------------------
 
 @test "SessionEnd returns at once and the detached run sends one [deviation] notice to the hub" {
-  hook_in "$(ev Stop sess-unmarked)"
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  long_unmarked sess-unmarked
   start=$SECONDS
   run hook_in "$(ev SessionEnd sess-unmarked '{"reason":"other"}')"
   [ "$status" -eq 0 ]
@@ -609,7 +640,8 @@ JSON
 }
 
 @test "check-session still notifies when the store is down" {
-  hook_in "$(ev Stop sess-unmarked)"
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  long_unmarked sess-unmarked
   touch "$STUB_DIR/fail"
   run "$WI" check-session sess-unmarked
   [ "$status" -eq 0 ]
@@ -617,7 +649,8 @@ JSON
 }
 
 @test "a second SessionEnd for the same session starts no second detached run" {
-  hook_in "$(ev Stop sess-unmarked)"
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  long_unmarked sess-unmarked
   echo 2 > "$STUB_DIR/notify-slow"
   hook_in "$(ev SessionEnd sess-unmarked '{"reason":"other"}')"
   hook_in "$(ev SessionEnd sess-unmarked '{"reason":"other"}')"
@@ -637,12 +670,148 @@ JSON
 }
 
 @test "a stale SessionEnd lock (older than the run's time limit) is cleared" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
   mkdir -p "$DIR/sess-unmarked.check.lock"
   touch -d '5 minutes ago' "$DIR/sess-unmarked.check.lock"
-  hook_in "$(ev Stop sess-unmarked)"
+  long_unmarked sess-unmarked
   hook_in "$(ev SessionEnd sess-unmarked '{"reason":"other"}')"
   for _ in $(seq 1 50); do [ -s "$STUB_DIR/notify.jsonl" ] && break; sleep 0.1; done
   [ -s "$STUB_DIR/notify.jsonl" ]
+}
+
+# --- suppressed deviations (ccplugin#132) ------------------------------------------------------
+
+# suppressed <sid> <reason> — nothing was sent, but the deviation is recorded.
+suppressed() {
+  [ ! -e "$STUB_DIR/notify.jsonl" ]
+  [ "$(jq -r --arg s "$1" 'select(.session_id == $s) | .notified' "$DIR/deviations.jsonl")" = "suppressed:$2" ]
+}
+
+# dev_rec <sid> <first-ago-s> <last-ago-s> [transcript] — a deviation record with those ages.
+dev_rec() {
+  jq -cn --arg s "$1" --arg f "$(date -u -d "$2 seconds ago" +%Y-%m-%dT%H:%M:%SZ)" --arg l "$(date -u -d "$3 seconds ago" +%Y-%m-%dT%H:%M:%SZ)" --arg t "${4:-}" \
+    '{session_id: $s, first_unmarked_at: $f, last_seen_at: $l, cwd: "/x"} + (if $t == "" then {} else {transcript: $t} end)' > "$DIR/deviations.jsonl"
+}
+
+# ts_transcript <file> <started-ago-s> <tool-calls> — a transcript whose first entry has that age.
+ts_transcript() {
+  local i
+  jq -cn --arg t "$(date -u -d "$2 seconds ago" +%Y-%m-%dT%H:%M:%SZ)" '{type: "user", timestamp: $t, message: {role: "user", content: "hi"}}' > "$1"
+  jq -cn '{type: "assistant", message: {role: "assistant", content: [{type: "text", text: "x"}]}}' >> "$1"
+  for ((i = 0; i < $3; i++)); do
+    jq -cn '{type: "assistant", message: {role: "assistant", content: [{type: "tool_use", id: "t", name: "Bash", input: {}}]}}' >> "$1"
+  done
+}
+
+@test "a zero-length window sends nothing but is recorded" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  mkdir -p "$DIR"
+  dev_rec sess-zero 0 0
+  "$WI" check-session sess-zero
+  suppressed sess-zero short-window
+}
+
+@test "a 30 s window sends nothing but is recorded" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  mkdir -p "$DIR"
+  dev_rec sess-short 30 0
+  "$WI" check-session sess-short
+  suppressed sess-short short-window
+}
+
+@test "a non-interactive entrypoint (sdk-cli) sends nothing but is recorded" {
+  export CLAUDE_CODE_ENTRYPOINT=sdk-cli
+  long_unmarked sess-unmarked
+  "$WI" check-session sess-unmarked
+  suppressed sess-unmarked non-interactive
+}
+
+@test "an unset entrypoint counts as non-interactive" {
+  unset CLAUDE_CODE_ENTRYPOINT
+  long_unmarked sess-unmarked
+  "$WI" check-session sess-unmarked
+  suppressed sess-unmarked non-interactive
+}
+
+@test "the SessionEnd hook passes the entrypoint it saw to the detached run" {
+  long_unmarked sess-unmarked
+  CLAUDE_CODE_ENTRYPOINT=sdk-cli hook_in "$(ev SessionEnd sess-unmarked '{"reason":"other"}')"
+  for _ in $(seq 1 50); do [ -n "$(jq -r '.notified // empty' "$DIR/deviations.jsonl")" ] && break; sleep 0.1; done
+  suppressed sess-unmarked non-interactive
+}
+
+@test "no store amounts and no tool calls sends nothing but is recorded" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  jq -cn '{type: "user", message: {role: "user", content: "hi"}}' > "$BATS_TEST_TMPDIR/t.jsonl"
+  jq -cn '{type: "assistant", requestId: "r", message: {role: "assistant", content: [{type: "text", text: "hello"}]}}' >> "$BATS_TEST_TMPDIR/t.jsonl"
+  long_unmarked sess-unmarked "$(jq -cn --arg t "$BATS_TEST_TMPDIR/t.jsonl" '{transcript_path: $t}')"
+  touch "$STUB_DIR/fail"
+  "$WI" check-session sess-unmarked
+  suppressed sess-unmarked no-activity
+}
+
+@test "no store amounts but tool calls in the transcript still sends" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  transcript "$BATS_TEST_TMPDIR/t.jsonl" hi 1
+  long_unmarked sess-unmarked "$(jq -cn --arg t "$BATS_TEST_TMPDIR/t.jsonl" '{transcript_path: $t}')"
+  touch "$STUB_DIR/fail"
+  "$WI" check-session sess-unmarked
+  [ "$(jq -r '.subject' "$STUB_DIR/notify.jsonl")" = "[deviation] sess-unmarked" ]
+  [ "$(jq -r '.notified' "$DIR/deviations.jsonl")" = "sent" ]
+}
+
+@test "a long interactive unmarked session still sends" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  long_unmarked sess-unmarked
+  "$WI" check-session sess-unmarked
+  [ "$(jq -r '.subject' "$STUB_DIR/notify.jsonl")" = "[deviation] sess-unmarked" ]
+}
+
+@test "one prompt then long unmarked work with many tool calls sends (window 0 s between Stops)" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  mkdir -p "$DIR"
+  ts_transcript "$BATS_TEST_TMPDIR/t.jsonl" 3600 12
+  dev_rec sess-unmarked 0 0 "$BATS_TEST_TMPDIR/t.jsonl"
+  touch "$STUB_DIR/fail"
+  "$WI" check-session sess-unmarked
+  [ "$(jq -r '.subject' "$STUB_DIR/notify.jsonl")" = "[deviation] sess-unmarked" ]
+}
+
+@test "tool calls without any transcript timestamps are never suppressed as short-window" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  mkdir -p "$DIR"
+  transcript "$BATS_TEST_TMPDIR/t.jsonl" hi 5
+  dev_rec sess-unmarked 0 0 "$BATS_TEST_TMPDIR/t.jsonl"
+  touch "$STUB_DIR/fail"
+  "$WI" check-session sess-unmarked
+  [ -s "$STUB_DIR/notify.jsonl" ]
+}
+
+@test "a two-turn session with Stops 30 s apart, a transcript from 1 h ago and tool calls sends" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  mkdir -p "$DIR"
+  ts_transcript "$BATS_TEST_TMPDIR/t.jsonl" 3600 4
+  dev_rec sess-unmarked 30 0 "$BATS_TEST_TMPDIR/t.jsonl"
+  "$WI" check-session sess-unmarked
+  [ -s "$STUB_DIR/notify.jsonl" ]
+}
+
+@test "a true 10 s scratch session without tool calls is still suppressed" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  mkdir -p "$DIR"
+  ts_transcript "$BATS_TEST_TMPDIR/t.jsonl" 10 0
+  dev_rec sess-unmarked 10 0 "$BATS_TEST_TMPDIR/t.jsonl"
+  "$WI" check-session sess-unmarked
+  suppressed sess-unmarked short-window
+}
+
+@test "a later Stop of a resumed session keeps the suppressed tag" {
+  export CLAUDE_CODE_ENTRYPOINT=sdk-cli
+  long_unmarked sess-unmarked
+  "$WI" check-session sess-unmarked
+  hook_in "$(ev Stop sess-unmarked)"
+  [ "$(jq -r '.notified' "$DIR/deviations.jsonl")" = "suppressed:non-interactive" ]
+  [ -n "$(jq -r '.notified_at // empty' "$DIR/deviations.jsonl")" ]
 }
 
 @test "the detached SessionEnd run is time-limited" {

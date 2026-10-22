@@ -404,20 +404,23 @@ with_dev_lock() {
 
 record_deviation() { with_dev_lock record_deviation_locked "$@"; }
 
-record_deviation_locked() { # <sid> <cwd>
-  local sid="$1" cwd="$2" old first="" notified="" now tmp
+record_deviation_locked() { # <sid> <cwd> [transcript path]
+  local sid="$1" cwd="$2" tpath="${3:-}" old first="" notified="" tag="" now tmp
   now=$(now_iso)
   old=$(jq -c --arg s "$sid" 'select(.session_id == $s)' "$DEV_FILE" 2>/dev/null | head -1)
   if [ -n "$old" ]; then
     first=$(jq -r '.first_unmarked_at' <<<"$old")
     notified=$(jq -r '.notified_at // empty' <<<"$old")
+    tag=$(jq -r '.notified // empty' <<<"$old")
   fi
   tmp="$DEV_FILE.tmp.$$"
   {
     jq -c --arg s "$sid" 'select(.session_id != $s)' "$DEV_FILE" 2>/dev/null
-    jq -cn --arg s "$sid" --arg first "${first:-$now}" --arg last "$now" --arg cwd "$cwd" --arg n "$notified" \
+    jq -cn --arg s "$sid" --arg first "${first:-$now}" --arg last "$now" --arg cwd "$cwd" --arg n "$notified" --arg g "$tag" --arg t "$tpath" \
       '{session_id: $s, first_unmarked_at: $first, last_seen_at: $last, cwd: $cwd}
-       + (if $n == "" then {} else {notified_at: $n} end)'
+       + (if $t == "" then {} else {transcript: $t} end)
+       + (if $n == "" then {} else {notified_at: $n} end)
+       + (if $g == "" then {} else {notified: $g} end)'
   } | tail -n "$DEV_KEEP" > "$tmp" && mv "$tmp" "$DEV_FILE"
   rm -f "$tmp"
 }
@@ -460,6 +463,9 @@ resend_session_mark() {
   send_marker "$sid" "$item" || true
 }
 
+# interactive_entrypoint <entrypoint>: same allow-list as bin/alfred-loop-check.
+interactive_entrypoint() { case "$1" in cli|claude-vscode|claude-desktop) return 0 ;; *) return 1 ;; esac; }
+
 # remind_due <sid>: 0 on the 1st, then every REMIND_EVERY-th prompt of an
 # unmarked session; without a usable state dir, every prompt.
 remind_due() {
@@ -473,11 +479,12 @@ remind_due() {
 }
 
 cmd_hook() {
-  local input event sid cwd lock
+  local input event sid cwd lock tpath
   input=$(cat)
   event=$(jq -r '.hook_event_name // empty' <<<"$input" 2>/dev/null) || exit 0
   sid=$(jq -r '.session_id // empty' <<<"$input")
   cwd=$(jq -r '.cwd // empty' <<<"$input")
+  tpath=$(jq -r '.transcript_path // empty' <<<"$input")
   { [ -n "$sid" ] && valid_sid "$sid"; } || exit 0
   touch_session "$sid"
   case "$event" in
@@ -488,12 +495,15 @@ cmd_hook() {
       fi ;;
     UserPromptSubmit)
       # Rides on a prompt that is already happening: forces no extra turn.
-      if [ ! -e "$(mark_file "$sid")" ] && remind_due "$sid"; then
+      # Not for non-interactive sessions (same allow-list as alfred-loop-check)
+      # or read-only workers: they cannot mark a work item.
+      if interactive_entrypoint "${CLAUDE_CODE_ENTRYPOINT:-}" && [ "${ALFRED_ROLE:-}" != worker ] \
+         && [ ! -e "$(mark_file "$sid")" ] && remind_due "$sid"; then
         jq -cn --arg c "$REMINDER" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit", additionalContext:$c}}'
       fi ;;
     Stop)
       # Detection only: no output, never blocks or continues.
-      if [ ! -e "$(mark_file "$sid")" ]; then record_deviation "$sid" "$cwd"; fi ;;
+      if [ ! -e "$(mark_file "$sid")" ]; then record_deviation "$sid" "$cwd" "$tpath"; fi ;;
     SubagentStop) hook_subagent_stop "$input" "$sid" ;;
     SessionEnd)
       # Fully detached, all three streams redirected: the hook runner must not
@@ -505,7 +515,8 @@ cmd_hook() {
         find "$STATE_DIR" -maxdepth 1 -type d -name "$sid.check.lock" -mmin +1 -exec rmdir {} + 2>/dev/null
         if mkdir "$lock" 2>/dev/null; then
           # shellcheck disable=SC2016  # the script text is meant for the inner bash
-          setsid bash -c 'timeout "$3" "$0" check-session "$1"; rmdir "$2"' "$SELF" "$sid" "$lock" "$CHECK_TIMEOUT" \
+          # The entrypoint is captured here, at hook time, and passed on explicitly.
+          setsid bash -c 'timeout "$3" "$0" check-session "$1" "$4"; rmdir "$2"' "$SELF" "$sid" "$lock" "$CHECK_TIMEOUT" "${CLAUDE_CODE_ENTRYPOINT:-}" \
             </dev/null >/dev/null 2>&1 &
         fi
       fi
@@ -514,10 +525,43 @@ cmd_hook() {
   exit 0
 }
 
-# check-session <sid>: the detached SessionEnd run. One [deviation] notice to
-# the hub when the session had unmarked time and it was not reported yet.
+# deviation_min_seconds: the shortest unmarked window worth a hub notice.
+deviation_min_seconds() {
+  local v
+  v=$("$(dirname "$SELF")/alfred-config" get deviation-min-seconds 2>/dev/null) || v=""
+  [[ "$v" =~ ^[0-9]+$ ]] || v=60
+  echo "$v"
+}
+
+# suppress_reason <first stop> <entrypoint> <amounts> <transcript>: prints why a
+# deviation is recorded but not sent to the hub; nothing when it should be sent.
+# The window runs from the transcript's first entry (else the first Stop) to now,
+# the SessionEnd time. A session with any tool call is never short-window.
+suppress_reason() {
+  local first="$1" ep="$2" amounts="$3" tpath="$4" n="" t0="" start win
+  tpath="${tpath/#\~/$HOME}"
+  if [ -n "$tpath" ] && [ -r "$tpath" ]; then
+    n=$(jq -rn '[inputs | select(.type == "assistant") | .message.content[]? | select(.type? == "tool_use")] | length' "$tpath" 2>/dev/null)
+    t0=$(jq -rn 'first(inputs | .timestamp? | strings) // empty' "$tpath" 2>/dev/null)
+  fi
+  start=""
+  [ -n "$t0" ] && start=$(date -u -d "$t0" +%s 2>/dev/null)
+  [ -n "$start" ] || start=$(date -u -d "$first" +%s 2>/dev/null) || start=""
+  if [ -n "$start" ] && [ "${n:-0}" = 0 ]; then
+    win=$(($(date +%s) - start))
+    if [ "$win" -lt "$(deviation_min_seconds)" ]; then echo short-window; return; fi
+  fi
+  # same allow-list as bin/alfred-loop-check
+  interactive_entrypoint "$ep" || { echo non-interactive; return; }
+  if [ -z "$amounts" ] && [ "$n" = 0 ]; then echo no-activity; fi
+}
+
+# check-session <sid> [entrypoint]: the detached SessionEnd run. One [deviation]
+# notice to the hub when the session had unmarked time and it was not reported
+# yet. Empty or short sessions are recorded as suppressed, not sent.
 cmd_check_session() {
-  local sid="${1:-}" rec first last notified body amounts="" tmp
+  local sid="${1:-}" rec first last notified body amounts="" tmp reason ep
+  ep="${2-${CLAUDE_CODE_ENTRYPOINT:-}}"
   { [ -n "$sid" ] && valid_sid "$sid"; } || exit 0
   rec=$(jq -c --arg s "$sid" 'select(.session_id == $s)' "$DEV_FILE" 2>/dev/null | head -1)
   [ -n "$rec" ] || exit 0
@@ -532,16 +576,21 @@ cmd_check_session() {
       [.deviations[]? | select(.session_id == $s)] | first // empty
       | "Store: requests \((.requests // 0) + 0), tokens \((.tokens // {}) | ((.input // 0) + (.output // 0) + (.cache_read // 0) + (.cache_write // 0))) (all types), cost_usd \((.cost_usd // 0) + 0)."' 2>/dev/null)
   fi
+  reason=$(suppress_reason "$first" "$ep" "$amounts" "$(jq -r '.transcript // empty' <<<"$rec")")
+  if [ -n "$reason" ]; then
+    with_dev_lock mark_notified "$sid" "$last" "suppressed:$reason"
+    exit 0
+  fi
   body="Session $sid had no work item mark from $first to $last (project dir: $(jq -r '.cwd' <<<"$rec")). ${amounts:-Store amounts unavailable.} Tracked, nothing was stopped."
   if timeout "$NOTIFY_TIMEOUT" "$WAKE_BIN" notify hub "[deviation] $sid" "$body" >/dev/null 2>&1; then
-    with_dev_lock mark_notified "$sid" "$last"
+    with_dev_lock mark_notified "$sid" "$last" sent
   fi
   exit 0
 }
 
-mark_notified() { # <sid> <last_seen_at that was reported>
+mark_notified() { # <sid> <last_seen_at that was reported> <sent|suppressed:reason>
   local tmp="$DEV_FILE.tmp.$$"
-  jq -c --arg s "$1" --arg l "$2" 'if .session_id == $s then .notified_at = $l else . end' "$DEV_FILE" > "$tmp" \
+  jq -c --arg s "$1" --arg l "$2" --arg h "$3" 'if .session_id == $s then .notified_at = $l | .notified = $h else . end' "$DEV_FILE" > "$tmp" \
     && mv "$tmp" "$DEV_FILE"
   rm -f "$tmp"
 }
