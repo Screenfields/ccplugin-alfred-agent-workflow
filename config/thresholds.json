@@ -1,0 +1,36 @@
+{
+  "overrun-pct": 50,
+  "wip-limit": 2,
+  "worker-limit": 4,
+  "failed-review-max": 2,
+  "recovery-inform-minutes": 30,
+  "unread-flag-minutes": 30,
+  "inactive-flag-days": 7,
+  "several-leads-min": 2,
+  "model-setting-per-role": {
+    "lead": {"tier": "default", "effort": "default"},
+    "hub": {"tier": "default", "effort": "default"},
+    "alfred": {"tier": "default", "effort": "default"},
+    "builder": {"tier": "medium", "effort": "medium"},
+    "technical-writer": {"tier": "medium", "effort": "medium"},
+    "reviewer": {"tier": "medium", "effort": "high"},
+    "analyst": {"tier": "medium", "effort": "high"},
+    "investigator": {"tier": "light", "effort": "low"},
+    "incident-reviewer": {"tier": "strong", "effort": "highest"}
+  },
+  "waiting-label": "status:waiting-on-owner",
+  "ready-state": "status:ready",
+  "workable-states": [
+    "status:ready",
+    "status:in-progress",
+    "status:in-review",
+    "status:needs-platform-review",
+    "status:blocked"
+  ],
+  "loop-check-enabled": true,
+  "loop-check-timeout-seconds": 5,
+  "loop-check-deadline-seconds": 10,
+  "chase-interval-minutes": 10,
+  "chase-max-tries": 3,
+  "loop-check-max-blocks-per-hour": 6
+}
