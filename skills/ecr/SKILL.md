@@ -207,8 +207,8 @@ LiteLLM proxy is reachable via the `LITELLM_URL` env var. Default if unset: `htt
 
 Available top-tier models:
 ```
-gpt-5.4          OpenAI
-gemini-3.1-pro   Google
+gpt-5.4              OpenAI
+gemini-3.1-pro       Google
 glm-5.3              Fireworks (Zhipu)
 kimi-k3              Fireworks (Moonshot)
 deepseek-v4.1-flash  Fireworks (DeepSeek)

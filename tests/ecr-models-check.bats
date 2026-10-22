@@ -124,3 +124,76 @@ models_json() { # ids... -> {"data":[{"id":..}]}
 @test "plugin version is 2.30.0" {
   [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = 2.30.0 ]
 }
+
+# --- parser strictness: a reworded table must fail loudly, never drop models ---
+
+mutate() { # sed-expr -> $BATS_TEST_TMPDIR/mut.md
+  sed "$1" "$SKILL" > "$BATS_TEST_TMPDIR/mut.md"
+}
+
+@test "renamed alternatives heading: exit 2" {
+  mutate 's/^### Alternative External Models/### Other Models/'
+  run "$CHK" --list --skill "$BATS_TEST_TMPDIR/mut.md"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"heading not found"* ]]
+}
+
+@test "renamed panel heading: exit 2" {
+  mutate 's/^### External Panel.*/### The Panel/'
+  run "$CHK" --list --skill "$BATS_TEST_TMPDIR/mut.md"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"heading not found"* ]]
+}
+
+@test "a section with zero ids: exit 2" {
+  mutate '/^| `\(kimi-k3\|deepseek-v4.1-flash\|o3\)`/d'
+  run "$CHK" --list --skill "$BATS_TEST_TMPDIR/mut.md"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no model ids"* ]]
+}
+
+@test "a row with no backticked id: exit 2" {
+  mutate 's/^| `o3` |/| o3 |/'
+  run "$CHK" --list --skill "$BATS_TEST_TMPDIR/mut.md"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unparsable row"* ]]
+}
+
+@test "a bolded id is still parsed" {
+  mutate 's/^| `o3` |/| **`o3`** |/'
+  run "$CHK" --list --skill "$BATS_TEST_TMPDIR/mut.md"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '%s\n' $EXPECTED)" ]
+}
+
+@test "a missing space after the pipe is still parsed" {
+  mutate 's/^| `o3` |/|`o3` |/'
+  run "$CHK" --list --skill "$BATS_TEST_TMPDIR/mut.md"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '%s\n' $EXPECTED)" ]
+}
+
+# --- fetch failures and cleanup ---
+
+@test "curl failure (code 000): exits 2" {
+  models_json o3
+  printf 000 > "$STUB_DIR/code"
+  run "$CHK"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"HTTP 000"* ]]
+}
+
+@test "non-JSON body: exits 2" {
+  echo '<html>gateway</html>' > "$STUB_DIR/models.json"
+  run "$CHK"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no models in response"* ]]
+}
+
+@test "the header file is deleted when the run fails" {
+  echo 'not json' > "$STUB_DIR/models.json"
+  export TMPDIR="$BATS_TEST_TMPDIR/tmp"; mkdir -p "$TMPDIR"
+  run "$CHK"
+  [ "$status" -eq 2 ]
+  [ -z "$(ls -A "$TMPDIR")" ]
+}

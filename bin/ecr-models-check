@@ -26,11 +26,42 @@ while [ $# -gt 0 ]; do
 done
 [ -f "$skill" ] || { echo "ecr-models-check: skill not found: $skill" >&2; exit 2; }
 
-# First-column backticked ids of table rows under the two model-table headings.
+# First-column backticked ids of the table rows under the two model-table
+# headings. Tolerates a leading ** and missing spaces around the pipe. Exit 2
+# (nothing trusted) when a heading is missing, a section yields no id, or a
+# table row (not the header or separator) yields no id.
 wanted=$(awk '
-  /^#/            { on = ($0 ~ /^### (External Panel|Alternative External Models)/) }
-  on && /^\| `/   { s = $0; sub(/^\| `/, "", s); sub(/`.*/, "", s); print s }
-' "$skill")
+  function flush(   s) {
+    if (pend == "") return
+    if (pend ~ /^\|[ \t]*(\*\*)?[ \t]*`[^`]+`/) {
+      s = pend; sub(/^\|[ \t]*(\*\*)?[ \t]*`/, "", s); sub(/`.*/, "", s)
+      print s; n[sec]++
+    } else {
+      printf "ecr-models-check: unparsable row under %s: %s\n", name[sec], pend > "/dev/stderr"; bad = 1
+    }
+    pend = ""
+  }
+  BEGIN { name[1] = "External Panel"; name[2] = "Alternative External Models" }
+  /^#/ {
+    flush(); sec = 0
+    if ($0 ~ /^### External Panel/) { sec = 1; seen[1] = 1 }
+    else if ($0 ~ /^### Alternative External Models/) { sec = 2; seen[2] = 1 }
+    next
+  }
+  sec && /^\|/ {
+    if ($0 ~ /^\|[ \t:|-]+$/) { pend = ""; next }   # separator: the pending row was the header
+    flush(); pend = $0; next
+  }
+  { flush() }
+  END {
+    flush()
+    for (i = 1; i <= 2; i++) {
+      if (!seen[i]) { printf "ecr-models-check: heading not found: ### %s\n", name[i] > "/dev/stderr"; bad = 1 }
+      else if (!n[i]) { printf "ecr-models-check: no model ids under: ### %s\n", name[i] > "/dev/stderr"; bad = 1 }
+    }
+    exit bad ? 2 : 0
+  }
+' "$skill") || { echo "ecr-models-check: cannot parse the model tables in $skill" >&2; exit 2; }
 [ -n "$wanted" ] || { echo "ecr-models-check: no models found in $skill" >&2; exit 2; }
 
 if [ "$list_only" = 1 ]; then printf '%s\n' "$wanted"; exit 0; fi
