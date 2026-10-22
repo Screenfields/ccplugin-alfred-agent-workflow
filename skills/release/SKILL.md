@@ -215,6 +215,8 @@ Where `{pr-number}` is the merged PR number found in Step 1, or `upstream merged
 
 ```bash
 cd "$CATALOG_DIR"
+# The lead role pushes and opens the PR (the review identity must not be the author or last pusher).
+command -v switch-role >/dev/null 2>&1 && switch-role lead
 git push -u origin "$BRANCH"
 
 gh pr create \
@@ -263,12 +265,13 @@ Investigate with: gh run view {run-id} --log-failed --repo Screenfields/alfred-c
 
 Do NOT merge on red CI. No exceptions.
 
-When CI is green, use `alfred-agent:merge` to merge:
+When CI is green, review the PR at its head and post the review with `alfred-review post`
+(`/alfred-agent:review-panel`, Step 4), then merge with the merge skill, run from inside
+`$CATALOG_DIR`. The merge skill checks CI, GitHub's review verdict and the label gate, and merges
+pinned to the reviewed head. Never run `gh pr merge` directly here.
 
 ```bash
-# Merge via the merge skill (enforces CI gate + label gate)
 # /alfred-agent:merge {PR_NUMBER}
-gh pr merge "$PR_NUMBER" --repo Screenfields/alfred-cc-tools --squash
 ```
 
 After merge:

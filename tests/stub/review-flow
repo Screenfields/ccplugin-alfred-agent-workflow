@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# The skills' documented sequence when posting a review (skills/review-panel, Step 4),
+# as a small driver for the tests: post; on exit 4 (no review token), run check.
+#   not-required  -> continue without a post          (exit 0, prints "continue: ...")
+#   anything else -> stop with the message            (exit 1, prints "stop: ...")
+# On exit 5 the widen ask is passed on, and it is not reported as "no review token".
+# Usage: review-flow <owner>/<repo>#<n> <sha> <approve|request-changes> <body-file>
+bin="$(dirname "$0")/../../bin/alfred-review"
+ref="$1"; sha="$2"; verdict="$3"; body="$4"
+out=$("$bin" post "$ref" --sha "$sha" --verdict "$verdict" --body-file "$body" 2>&1); rc=$?
+case "$rc" in
+  0) echo "posted: $out"; exit 0 ;;
+  4)
+    chk=$("$bin" check "$ref" 2>/dev/null); crc=$?
+    if [ "$crc" -eq 0 ] && grep -q '^decision: not-required$' <<<"$chk"; then
+      echo "continue: no review token on this devbox, and a review is not required on ${ref%%#*}; no post"
+      exit 0
+    fi
+    echo "stop: no review token on this devbox, and a review is required on ${ref%%#*}: ask the hub"
+    exit 1 ;;
+  5) echo "stop: the review token has no access; pass on the widen ask"; echo "$out"; exit 1 ;;
+  *) echo "stop: alfred-review post exited $rc: $out"; exit 1 ;;
+esac

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Test double for the real `gh-as` on a single-role devbox: alfred-gh's token_path maps a
+# missing gh-review token to gh-readonly, which cannot write reviews. If alfred-review
+# ever calls this when gh-review/token is absent, the call is logged as "fallback-used".
+echo "gh-as-fallback $*" >> "${STUB_DIR:?STUB_DIR not set}/calls.log"
+if [ ! -s "${ALFRED_SECRETS_DIR:?}/gh-review/token" ]; then
+  echo "fallback-used" >> "$STUB_DIR/calls.log"
+fi
+echo "gh-as: stub fallback does not serve requests" >&2
+exit 1

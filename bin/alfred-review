@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+# alfred-review — the review gate, plugin side (CCW-145, AP-1230).
+#
+# Deterministic bash + gh + jq; no model call. Two commands:
+#
+#   alfred-review post <owner>/<repo>#<n> --sha <40-hex> --verdict approve|request-changes
+#                      --body-file <file>
+#       Post a real GitHub review by the `review` identity at the SHA that was
+#       reviewed. Every GitHub call goes through `gh-as review`; it never falls
+#       back to another role.
+#   alfred-review check <owner>/<repo>#<n>
+#       Ask GitHub for its own verdict (GraphQL reviewDecision) with the active
+#       role, and map it to an exit code. It recounts nothing.
+#
+# Exit codes, both commands:
+#    0 ok                       10 not approved, or blocked (check)
+#    2 argument or environment  11 change request outstanding (check)
+#    3 head moved (post)
+#    4 no review token file (post)
+#    5 access: 404 or 403 (the widen ask for post)
+#    6 API failure: transient error after retries, bad JSON, unexpected value, 401, 422
+#
+# Environment:
+#   ALFRED_SECRETS_DIR      secrets mount (default /var/run/secrets); post needs gh-review/token
+#   ALFRED_REVIEW_LOGIN     the review identity's login (default alfred-worker-agent)
+#   ALFRED_REVIEW_BACKOFF   base retry delay in seconds (default 1; 1, 2, 4 s); 0 for tests
+#   ALFRED_REVIEW_TIMEOUT   per-call timeout in seconds (default 30)
+# Local log: ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-review/runs.jsonl, one JSON line per
+# run {ts, cmd, repo, pr, exit, reason, decision, warning}. Never a token or a body.
+set -u
+
+REVIEW_LOGIN="${ALFRED_REVIEW_LOGIN:-alfred-worker-agent}"
+SECRETS_DIR="${ALFRED_SECRETS_DIR:-/var/run/secrets}"
+BACKOFF="${ALFRED_REVIEW_BACKOFF:-1}"
+CALL_TIMEOUT="${ALFRED_REVIEW_TIMEOUT:-30}"
+MAX_BODY=65000          # GitHub's limit is 65,536 characters
+RETRIES=3
+LOG_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-review/runs.jsonl"
+REF_RE='^([A-Za-z0-9-]+)/([A-Za-z0-9_.-]+)#([1-9][0-9]*)$'
+[[ "$BACKOFF" =~ ^[0-9]+$ ]] || BACKOFF=1
+[[ "$CALL_TIMEOUT" =~ ^[0-9]+$ ]] || CALL_TIMEOUT=30
+
+CMD=""; OWNER=""; REPO=""; NUM=""
+LOG_DECISION=""; LOG_WARNING=""
+TMPD=$(mktemp -d 2>/dev/null) || TMPD=""
+G_OUT="$TMPD/out"; G_ERR="$TMPD/err"; G_IN=""
+G_RC=0; G_CODE=""; G_CLASS=""
+
+# shellcheck disable=SC2317  # runs from the EXIT trap
+cleanup() { [ -n "$TMPD" ] && rm -rf "$TMPD"; }
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT HUP
+
+# --- output, with anything token-shaped removed -------------------------------
+scrub() {
+  local s tok f="$SECRETS_DIR/gh-review/token"
+  s=$(cat)
+  if [ -s "$f" ]; then
+    tok=$(head -c 512 "$f" 2>/dev/null | tr -d '\r\n')
+    [ -n "$tok" ] && s=${s//"$tok"/[redacted]}
+  fi
+  printf '%s\n' "$s" | sed -E 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/[redacted]/g'
+}
+say() { printf '%s\n' "$*" | scrub; }
+warn() { printf '%s\n' "$*" | scrub >&2; }
+
+# --- the local log ------------------------------------------------------------
+reason_for() {
+  case "$1" in
+    0|10|11) echo ok ;;
+    2) echo argument ;;
+    3) echo head-moved ;;
+    4) echo no-token ;;
+    5) echo access ;;
+    *) echo api ;;
+  esac
+}
+emit_log() {
+  local rc="$1" ts
+  [ -n "$CMD" ] || return 0
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || return 0
+  jq -cn --arg ts "$ts" --arg cmd "$CMD" --arg repo "${OWNER:+$OWNER/$REPO}" --arg pr "$NUM" \
+    --argjson exit "$rc" --arg reason "$(reason_for "$rc")" --arg decision "$LOG_DECISION" \
+    --arg warning "$LOG_WARNING" \
+    '{ts: $ts, cmd: $cmd, repo: $repo, pr: (if $pr == "" then null else ($pr | tonumber) end),
+      exit: $exit, reason: $reason, decision: $decision, warning: $warning}' \
+    >> "$LOG_FILE" 2>/dev/null || true
+}
+finish() { emit_log "$1"; exit "$1"; }
+die() {
+  local code="$1"; shift
+  if [ "$CMD" = check ] && { [ "$code" = 5 ] || [ "$code" = 6 ]; }; then
+    LOG_DECISION=error
+    say "decision: error"
+  fi
+  warn "alfred-review: $*"
+  finish "$code"
+}
+
+# --- identity -----------------------------------------------------------------
+agent_id() {
+  local f id=""
+  for f in "$PWD/.alfred/config.json" "$(git rev-parse --show-toplevel 2>/dev/null)/.alfred/config.json"; do
+    if [ -f "$f" ]; then id=$(jq -r '.agent_id // empty' "$f" 2>/dev/null); [ -n "$id" ] && break; fi
+  done
+  [[ "$id" =~ ^[A-Za-z0-9._@-]+$ ]] || id=unknown
+  printf '%s' "$id"
+}
+norm_login() { local l="${1%\[bot\]}"; printf '%s' "$l"; }
+
+# --- GitHub calls: one attempt, classification, retry -------------------------
+# gh_once <review|plain> <gh args...>; stdin from $G_IN (a file) when set.
+gh_once() {
+  local mode="$1"; shift
+  local in="${G_IN:-/dev/null}"
+  if [ "$mode" = review ]; then
+    timeout "$CALL_TIMEOUT" gh-as review "$@" >"$G_OUT" 2>"$G_ERR" <"$in"
+  else
+    timeout "$CALL_TIMEOUT" gh "$@" >"$G_OUT" 2>"$G_ERR" <"$in"
+  fi
+  G_RC=$?
+  G_CODE=$(grep -oE 'HTTP [0-9]{3}' "$G_ERR" | head -1 | grep -oE '[0-9]{3}')
+  classify
+}
+# classify: G_CLASS = ok | transient | access | fatal
+classify() {
+  if [ "$G_RC" -eq 0 ]; then G_CLASS=ok; return; fi
+  if [ "$G_RC" -eq 124 ]; then G_CLASS=transient; return; fi
+  if jq -e '[.errors[]?.type] | index("NOT_FOUND")' "$G_OUT" >/dev/null 2>&1; then G_CLASS=access; return; fi
+  case "$G_CODE" in
+    5??|429) G_CLASS=transient ;;
+    403)
+      if grep -qiE 'rate limit' "$G_ERR" "$G_OUT" 2>/dev/null; then G_CLASS=transient; else G_CLASS=access; fi ;;
+    404) G_CLASS=access ;;
+    4??) G_CLASS=fatal ;;
+    *) G_CLASS=transient ;;
+  esac
+}
+# call_retry <mode> <args...>: retries transient errors RETRIES times with backoff.
+# PRE_RETRY (a function name), when set, runs after each transient failure:
+# 0 = go ahead, 1 = the work is already done (G_CLASS=found), 2 = cannot tell (G_CLASS=unverified).
+call_retry() {
+  local i=0 h
+  while :; do
+    gh_once "$@"
+    if [ "$G_CLASS" != transient ]; then return 0; fi
+    if [ -n "${PRE_RETRY:-}" ]; then
+      "$PRE_RETRY"; h=$?
+      if [ "$h" -eq 1 ]; then G_CLASS=found; return 0; fi
+      if [ "$h" -eq 2 ]; then G_CLASS=unverified; return 0; fi
+    fi
+    [ "$i" -lt "$RETRIES" ] || return 0
+    sleep $((BACKOFF * (1 << i)))
+    i=$((i + 1))
+  done
+}
+# why <what>: a one-line reason from the last failed call (GitHub's message, no token).
+why() {
+  local m
+  m=$(jq -r '.message // empty' "$G_OUT" 2>/dev/null | head -c 300)
+  [ -n "$m" ] || m=$(head -c 300 "$G_ERR" | tr '\n' ' ')
+  if [ "$G_RC" -eq 124 ]; then m="timed out after ${CALL_TIMEOUT}s"; fi
+  printf '%s failed%s: %s' "$1" "${G_CODE:+ (HTTP $G_CODE)}" "${m:-no detail}"
+}
+# gh_fail <what> <access-handler>: map the last failed call to an exit.
+gh_fail() {
+  case "$G_CLASS" in
+    access) "$2" "$1" ;;
+    transient) die 6 "$(why "$1") (after $RETRIES retries)" ;;
+    unverified) die 6 "$1 failed and the review could not be checked: look at the PR's reviews before posting again" ;;
+    *) die 6 "$(why "$1")" ;;
+  esac
+}
+
+parse_ref() {
+  if [[ "$1" =~ $REF_RE ]] && [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ]; then
+    OWNER="${BASH_REMATCH[1]}"; REPO="${BASH_REMATCH[2]}"; NUM="${BASH_REMATCH[3]}"; return 0
+  fi
+  return 1
+}
+need_tools() {
+  command -v jq >/dev/null 2>&1 || die 2 "jq not found"
+  command -v gh >/dev/null 2>&1 || die 2 "gh not found"
+  command -v timeout >/dev/null 2>&1 || die 2 "timeout not found"
+}
+
+# --- post ---------------------------------------------------------------------
+# shellcheck disable=SC2317  # reached through gh_fail, by name
+widen_ask() {
+  local lead
+  lead=$(agent_id); [ "$lead" = unknown ] && lead="<reviewing-lead>"
+  warn "alfred-review: the review token has no access to $OWNER/$REPO ($1)."
+  warn "Widen ask: message the hub with the subject \"[review-access] $lead -> $OWNER/$REPO\" and give the reviewing lead, the target repo, the PR URL or the reason, and whether the access is standing or for this PR only. The hub's worker adds the repo to the reviewing lead's review token generator (never build); the new token takes effect after the ESO refresh, so access is not immediate."
+  finish 5
+}
+# shellcheck disable=SC2317  # reached through gh_fail, by name
+post_access() { widen_ask "$(why "$1")"; }
+
+# verify_posted: after a transient POST failure, did the review land anyway?
+# shellcheck disable=SC2317  # runs as PRE_RETRY, by name
+verify_posted() {
+  local keep_out="$TMPD/post-out" keep_err="$TMPD/post-err" keep_rc="$G_RC" keep_code="$G_CODE" keep_in="$G_IN" keep_class="$G_CLASS" since found
+  cp "$G_OUT" "$keep_out"; cp "$G_ERR" "$keep_err"
+  G_IN=""
+  gh_once review api --paginate "repos/$OWNER/$REPO/pulls/$NUM/reviews?per_page=100"
+  if [ "$G_CLASS" != ok ] || [ ! -s "$G_OUT" ]; then return 2; fi
+  since=$(date -u -d "@$(( $(date +%s) - 120 ))" +%Y-%m-%dT%H:%M:%SZ)
+  found=$(jq -s --arg sha "$SHA" --arg st "$WANT_STATE" --arg l "$REVIEW_LOGIN" --arg since "$since" \
+    'add // [] | map(select((.user.login | sub("\\[bot\\]$"; "")) == $l and .commit_id == $sha and .state == $st))
+      | max_by(.id) | select(. != null and ((.submitted_at // "") >= $since) and (.submitted_at // "") != "")' "$G_OUT" 2>/dev/null)
+  if [ -n "$found" ]; then printf '%s' "$found" > "$TMPD/found.json"; return 1; fi
+  cp "$keep_out" "$G_OUT"; cp "$keep_err" "$G_ERR"; G_RC=$keep_rc; G_CODE=$keep_code; G_IN=$keep_in; G_CLASS=$keep_class
+  return 0
+}
+
+cmd_post() {
+  local ref="" SHA="" verdict="" bodyfile="" a
+  [ $# -ge 1 ] || die 2 "usage: alfred-review post <owner>/<repo>#<n> --sha <40-hex> --verdict approve|request-changes --body-file <file>"
+  ref="$1"; shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --sha) [ $# -ge 2 ] || die 2 "--sha needs a value"; SHA="$2"; shift 2 ;;
+      --verdict) [ $# -ge 2 ] || die 2 "--verdict needs a value"; verdict="$2"; shift 2 ;;
+      --body-file) [ $# -ge 2 ] || die 2 "--body-file needs a value"; bodyfile="$2"; shift 2 ;;
+      *) die 2 "unknown argument: $1" ;;
+    esac
+  done
+  parse_ref "$ref" || die 2 "malformed PR reference '$ref': expected <owner>/<repo>#<n>"
+  [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die 2 "--sha must be 40 lowercase hex characters"
+  case "$verdict" in
+    approve) a=APPROVE; WANT_STATE=APPROVED ;;
+    request-changes) a=REQUEST_CHANGES; WANT_STATE=CHANGES_REQUESTED ;;
+    *) die 2 "--verdict must be approve or request-changes" ;;
+  esac
+  if [ -z "$bodyfile" ] || [ ! -f "$bodyfile" ]; then die 2 "--body-file must name an existing file"; fi
+  grep -q '[^[:space:]]' "$bodyfile" || die 2 "the body file is empty: a review needs its findings or its reasons"
+  need_tools
+  [ -z "${GH_TOKEN:-}" ] || die 2 "GH_TOKEN is set, and gh-as refuses to run with it. Unset it (a normal lead session has none); alfred-review does not work around this."
+  [ -s "$SECRETS_DIR/gh-review/token" ] || die 4 "no review token on this devbox ($SECRETS_DIR/gh-review/token is absent or empty). alfred-review never falls back to another role."
+  command -v gh-as >/dev/null 2>&1 || die 2 "gh-as not found"
+
+  # The body: a Reviewed-by line, then the file; cut to the limit, counting characters.
+  local built="$TMPD/body.json" omitted payload="$TMPD/payload.json"
+  jq -n --rawfile b "$bodyfile" --arg id "$(agent_id)" --argjson max "$MAX_BODY" '
+    def note($n): "\n\n[truncated by alfred-review: \($n) characters omitted]";
+    ("Reviewed by: \($id) (alfred-agent:review)\n\n" + $b) as $full
+    | ($full | length) as $t
+    | if $t <= $max then {body: $full, omitted: 0}
+      else (reduce range(0; 4) as $i (($t - $max); ($t - $max + (note(.) | length)))) as $n
+        | {body: ($full[0:($t - $n)] + note($n)), omitted: $n} end' > "$built" || die 2 "cannot read the body file"
+  omitted=$(jq -r '.omitted' "$built")
+  [ "$omitted" = 0 ] || warn "alfred-review: the body is over $MAX_BODY characters; $omitted characters were cut and a note was added. The verdict is still posted."
+  jq -c --arg sha "$SHA" --arg ev "$a" '{commit_id: $sha, event: $ev, body: .body}' "$built" > "$payload"
+
+  call_retry review api "repos/$OWNER/$REPO/pulls/$NUM"
+  [ "$G_CLASS" = ok ] || gh_fail "reading the PR" post_access
+  local head
+  head=$(jq -r '.head.sha // empty' "$G_OUT" 2>/dev/null)
+  [[ "$head" =~ ^[0-9a-f]{40}$ ]] || die 6 "the PR read returned no usable head SHA"
+  [ "$head" = "$SHA" ] || die 3 "head moved: reviewed $SHA, now $head; review again"
+
+  G_IN="$payload"
+  PRE_RETRY=verify_posted
+  call_retry review api -X POST "repos/$OWNER/$REPO/pulls/$NUM/reviews" --input -
+  PRE_RETRY=""; G_IN=""
+  local resp
+  if [ "$G_CLASS" = found ]; then resp=$(cat "$TMPD/found.json")
+  elif [ "$G_CLASS" = ok ]; then resp=$(cat "$G_OUT")
+  else gh_fail "posting the review" post_access; fi
+  local id state cid
+  id=$(jq -r '.id // empty' <<<"$resp" 2>/dev/null) || id=""
+  state=$(jq -r '.state // empty' <<<"$resp" 2>/dev/null) || state=""
+  cid=$(jq -r '.commit_id // empty' <<<"$resp" 2>/dev/null) || cid=""
+  [[ "$id" =~ ^[0-9]+$ ]] || die 6 "the review response has no review id"
+  [ "$cid" = "$SHA" ] || die 6 "review $id was posted at $cid, not at $SHA: look at the PR before relying on it"
+  { [ "$state" = APPROVED ] || [ "$state" = CHANGES_REQUESTED ]; } \
+    || die 6 "review $id came back in state '$state', expected APPROVED or CHANGES_REQUESTED"
+  say "posted review $id $state at $SHA"
+  finish 0
+}
+
+# --- check --------------------------------------------------------------------
+# shellcheck disable=SC2016  # GraphQL variables, not shell ones
+GQL='query($o: String!, $r: String!, $n: Int!) { repository(owner: $o, name: $r) { pullRequest(number: $n) { reviewDecision headRefOid mergeStateStatus author { login } } } }'
+
+check_access() { die 5 "no read access to $OWNER/$REPO#$NUM"; }
+
+# fetch_reviews: all reviews of the PR across pages, in $TMPD/reviews.json, ordered by id.
+# Returns 0 ok, 5 access, 6 other failure (nothing printed).
+# With "once" it makes one attempt and no retries (the warning-only read).
+fetch_reviews() {
+  local RETRIES=$RETRIES
+  [ "${1:-}" = once ] && RETRIES=0
+  call_retry plain api --paginate "repos/$OWNER/$REPO/pulls/$NUM/reviews?per_page=100"
+  [ "$G_CLASS" = ok ] || { [ "$G_CLASS" = access ] && return 5; return 6; }
+  [ -s "$G_OUT" ] || return 6
+  jq -s 'add // [] | if type == "array" then sort_by(.id) else error("not a list") end' "$G_OUT" > "$TMPD/reviews.json" 2>/dev/null || return 6
+  jq -e 'type == "array"' "$TMPD/reviews.json" >/dev/null 2>&1 || return 6
+  return 0
+}
+# agent_of: the agent named on the first "Reviewed by:" line of a body on stdin, or nothing.
+agent_of() { sed -nE 's/^Reviewed by: ([^ ]+).*/\1/p' | head -1; }
+
+cmd_check() {
+  [ $# -eq 1 ] || die 2 "usage: alfred-review check <owner>/<repo>#<n>"
+  parse_ref "$1" || die 2 "malformed PR reference '$1': expected <owner>/<repo>#<n>"
+  need_tools
+
+  local tries=0 decision head ms author fields
+  while :; do
+    call_retry plain api graphql -f query="$GQL" -f o="$OWNER" -f r="$REPO" -F n="$NUM"
+    [ "$G_CLASS" = ok ] || gh_fail "reading the review verdict" check_access
+    fields=$(jq -r '.data.repository.pullRequest
+        | if . == null then error("no pull request")
+          else [(.reviewDecision // "null"), (.headRefOid // ""), (.mergeStateStatus // ""), (.author.login // "")] | join("|") end' \
+        "$G_OUT" 2>/dev/null) || {
+      if jq -e '[.errors[]?.type] | index("NOT_FOUND")' "$G_OUT" >/dev/null 2>&1; then
+        check_access
+      fi
+      die 6 "the GraphQL answer is not usable (bad JSON or errors)"
+    }
+    IFS='|' read -r decision head ms author <<<"$fields"
+    if [ "$ms" = UNKNOWN ] && [ "$tries" -lt "$RETRIES" ]; then
+      sleep $((BACKOFF * (1 << tries))); tries=$((tries + 1)); continue
+    fi
+    break
+  done
+
+  case "$decision" in null|APPROVED|CHANGES_REQUESTED|REVIEW_REQUIRED) ;; *) die 6 "unexpected reviewDecision '$decision': failing closed" ;; esac
+  [[ "$head" =~ ^[0-9a-f]{40}$ ]] || die 6 "the verdict has no usable head SHA: failing closed"
+  case "$ms" in
+    CLEAN|HAS_HOOKS|UNSTABLE|BEHIND|DIRTY|DRAFT|BLOCKED|UNKNOWN) ;;
+    *) die 6 "unexpected mergeStateStatus '$ms': failing closed" ;;
+  esac
+
+  local verdict="$decision" policy=ok code=0 dec msg=() rrc=0 have_reviews=0 crs="" n
+  [ "$decision" = null ] && verdict=none
+
+  # Reviews are read to decide only where a change request can matter: GitHub's own
+  # CHANGES_REQUESTED, and null (no review required, but a reviewer's no still means no).
+  if [ "$decision" = CHANGES_REQUESTED ] || [ "$decision" = null ]; then
+    fetch_reviews; rrc=$?
+    if [ "$rrc" -eq 0 ]; then have_reviews=1
+    elif [ "$decision" = null ]; then
+      [ "$rrc" -eq 5 ] && check_access
+      die 6 "the reviews could not be read, so an outstanding change request cannot be ruled out: failing closed"
+    fi
+  fi
+  if [ "$have_reviews" -eq 1 ]; then
+    crs=$(jq -c '[.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")]
+        | group_by(.user.login) | map(max_by(.id)) | map(select(.state == "CHANGES_REQUESTED")) | sort_by(.id)' "$TMPD/reviews.json")
+  fi
+  n=0; [ -n "$crs" ] && n=$(jq 'length' <<<"$crs")
+
+  case "$decision" in
+    CHANGES_REQUESTED) dec=changes-requested; code=11 ;;
+    null)
+      if [ "$n" -gt 0 ]; then dec=changes-requested; code=11; policy=change-request-blocks
+      else dec=not-required; msg+=("approval not required by this repo's rules"); fi ;;
+    APPROVED)
+      if [ "$ms" = BLOCKED ]; then
+        dec=blocked; code=10; policy=merge-state-blocked
+        msg+=("GitHub reports the review as approved but the PR is BLOCKED: another rule is unmet (for example a required check or an unresolved conversation); see \`gh pr view\`")
+      else dec=approved; msg+=("approved at $head"); fi ;;
+    REVIEW_REQUIRED)
+      dec=review-required; code=10
+      if [ -n "$author" ] && [ "$(norm_login "$author")" = "$(norm_login "$REVIEW_LOGIN")" ]; then
+        msg+=("PR author is the review identity: recreate the PR with the lead role (GitHub forbids self-approval; see the develop skill, section PRs already in flight)")
+      else
+        msg+=("GitHub requires a review that is not there yet. Likely reasons: no approval at the head $head; the last pusher may be the review identity (push the final commit with the lead role); too few approvals; the approver may be the author")
+      fi ;;
+  esac
+
+  if [ "$dec" = changes-requested ]; then
+    if [ "$policy" = change-request-blocks ]; then
+      msg+=("GitHub does not require a review here; the plugin blocks because a reviewer requested changes")
+    fi
+    local l
+    if [ "$n" -gt 0 ]; then
+      while IFS= read -r l; do
+        local login rid commit by
+        login=$(jq -r '.user.login' <<<"$l"); rid=$(jq -r '.id' <<<"$l"); commit=$(jq -r '.commit_id // ""' <<<"$l")
+        by=$(jq -r '.body // ""' <<<"$l" | sed -n '/^Reviewed by:/{p;q}')
+        msg+=("changes were requested at ${commit:0:12} (review $rid by $login; ${by:-no Reviewed by line}); re-review at $head")
+      done < <(jq -c '.[]' <<<"$crs")
+    else
+      msg+=("GitHub reports changes requested; re-review at $head")
+    fi
+    msg+=("The PR's lead asks the lead who requested the changes to re-review. If they are gone or do not respond, ask the hub, which dismisses the review with a written reason. Nothing here dismisses a review.")
+  fi
+
+  # Guidance for the informational merge states.
+  case "$ms" in
+    BEHIND) msg+=("the branch is behind its base; updating it is a push, so make it with the lead role and re-review, because the push dismisses the approval") ;;
+    DIRTY) msg+=("merge conflicts; resolve them, push with the lead role, and re-review") ;;
+    DRAFT) msg+=("the PR is a draft; mark it ready") ;;
+    UNKNOWN) msg+=("merge state still UNKNOWN; the verdict stands on reviewDecision and GitHub's merge still enforces the rule"); LOG_WARNING="merge-state-unknown" ;;
+  esac
+
+  # Shared-login warning: one GitHub login serves every lead's review identity.
+  if [ "$code" -eq 0 ] && { [ "$decision" = APPROVED ] || [ "$decision" = null ]; }; then
+    [ "$have_reviews" -eq 1 ] || { fetch_reviews once && have_reviews=1; }
+    if [ "$have_reviews" -eq 1 ]; then
+      local a_by c_by a_agent c_agent
+      a_by=$(jq -r '[.[] | select(.state == "APPROVED")] | max_by(.id) | .body // empty' "$TMPD/reviews.json" 2>/dev/null)
+      a_agent=$(printf '%s' "$a_by" | agent_of)
+      c_by=$(jq -r --argjson aid "$(jq '[.[] | select(.state == "APPROVED")] | max_by(.id) | .id // 0' "$TMPD/reviews.json" 2>/dev/null || echo 0)" \
+        '[.[] | select(.state == "CHANGES_REQUESTED" and .id < $aid)] | max_by(.id) | .body // empty' "$TMPD/reviews.json" 2>/dev/null)
+      c_agent=$(printf '%s' "$c_by" | agent_of)
+      if [ -n "$a_agent" ] && [ -n "$c_agent" ] && [ "$a_agent" != "$c_agent" ]; then
+        warn "alfred-review: warning: the change request by $c_agent was superseded by an approval by $a_agent: same GitHub login, confirm with $c_agent"
+        LOG_WARNING="${LOG_WARNING:+$LOG_WARNING,}shared-login"
+      fi
+    fi
+  fi
+
+  LOG_DECISION="$dec"
+  say "decision: $dec"
+  say "github-verdict: $verdict"
+  say "plugin-policy: $policy"
+  say "head: $head"
+  say "merge-state: $ms"
+  local m
+  for m in "${msg[@]}"; do say "$m"; done
+  finish "$code"
+}
+
+# --- main ---------------------------------------------------------------------
+CMD="${1:-}"
+case "$CMD" in
+  post) shift; cmd_post "$@" ;;
+  check) shift; cmd_check "$@" ;;
+  *)
+    c="$CMD"; CMD=""
+    echo "usage: alfred-review post <owner>/<repo>#<n> --sha <40-hex> --verdict approve|request-changes --body-file <file>" >&2
+    echo "       alfred-review check <owner>/<repo>#<n>" >&2
+    [ -z "$c" ] || [ "$c" = -h ] || [ "$c" = --help ] || echo "alfred-review: unknown command '$c'" >&2
+    exit 2 ;;
+esac

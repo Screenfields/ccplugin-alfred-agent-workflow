@@ -13,7 +13,7 @@ allowed-tools: Bash, Read, WebFetch
 Structured review workflow covering 9 doctrine-aligned angles. Runs in two modes:
 
 - **Interactive** (default): conversational summary with a merge recommendation. Use when a human or agent invokes this skill directly in a Claude Code session.
-- **Headless** (`--mode=headless`): emits a structured markdown block to stdout and exits with a machine-readable exit code. Intended for GH Actions CI jobs that post the output as a PR comment. The caller is responsible for posting; this skill only produces the text.
+- **Headless** (`--mode=headless`): emits a structured markdown block to stdout and exits with a machine-readable exit code. Intended for GH Actions CI jobs that post the output as a PR comment. The caller is responsible for posting; this skill only produces the text. CI has no devbox review token, so headless mode never calls `alfred-review post`.
 
 Do not skip angles. Do not auto-approve without completing all steps.
 
@@ -32,11 +32,11 @@ If the diff is empty or the PR is already merged, report that fact and stop.
 Fetch full PR data:
 
 ```bash
-gh pr view {N} --json number,title,body,baseRefName,headRefName,author,additions,deletions,changedFiles,labels,statusCheckRollup
+gh pr view {N} --json number,title,body,baseRefName,headRefName,headRefOid,author,additions,deletions,changedFiles,labels,statusCheckRollup
 gh pr diff {N}
 ```
 
-Hold this data in context for all subsequent steps.
+Hold this data in context for all subsequent steps. Record `headRefOid` now, before reading the diff: it is the SHA you review, and the review is posted at exactly that SHA (Step 4, interactive mode). If the PR gets a new push while you review, the post is refused and you review again.
 
 ## Step 2 — Apply review angles
 
@@ -191,11 +191,31 @@ After emitting the markdown block, exit with the appropriate code:
 - `exit 0` — no BLOCKER findings
 - `exit 1` — one or more BLOCKER findings
 
+## Step 4 — Submit the review (interactive mode only)
+
+Skip this step in headless mode.
+
+Post the verdict as a real GitHub review, at the SHA recorded in Step 1, with `alfred-review post`. Write the body to a file first: for REQUEST CHANGES the findings (BLOCKERs first), for APPROVE WITH COMMENTS the warnings, for APPROVE a one-line reason. `post` adds the first line `Reviewed by: <agent_id> (alfred-agent:review)` itself.
+
+```bash
+AR=$(command -v alfred-review || echo "${CLAUDE_PLUGIN_ROOT}/bin/alfred-review")
+"$AR" post {owner}/{repo}#{N} --sha {headRefOid} --verdict approve|request-changes --body-file /tmp/review-{N}.md
+```
+
+| Recommendation | `--verdict` |
+|---|---|
+| APPROVE | `approve` |
+| APPROVE WITH COMMENTS | `approve` (the warnings go in the body) |
+| REQUEST CHANGES | `request-changes` (the findings go in the body) |
+
+Exit codes: 3 means the head moved, so review the new head and post again. 4 means this devbox has no review token: run `alfred-review check`; on `not-required` say the review was not posted because the repo needs none, and otherwise stop with "no review token on this devbox, and a review is required on {repo}: ask the hub". 5 means the review token does not reach the repo: pass on the widen ask it prints (this is not "no review token"). 6 means a GitHub API failure: wait and try again, then report it. 2 is an argument or environment error (for example `GH_TOKEN` is set: unset it, never work around it). Post only through `alfred-review`; the review comes from the `review` identity and never from the lead token.
+
 ## Rules
 
 - Never auto-approve without running all 9 angles.
 - BLOCKER findings must block the merge recommendation. Do not soften a BLOCKER to a WARNING because the fix looks easy.
 - In headless mode, the exit code is the only machine-readable signal — always exit explicitly. Do not omit the exit statement.
+- In interactive mode the review is posted with `alfred-review post` (Step 4), at the reviewed head. Never post it with another command or role.
 - Do not post the PR comment yourself in headless mode. Emit the markdown to stdout only; the GH Actions caller posts it.
 - Doctrines 03 (namespace) and 06 (lead-worker pattern) do not naturally surface in code diffs. Skip Angle 3 and omit Doctrine 06 entirely unless the PR body or title explicitly exhibits those patterns. Do not force-fit.
 - If the diff is empty or the PR is already merged, report and stop — do not produce a verdict.

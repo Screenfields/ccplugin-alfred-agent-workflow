@@ -1,0 +1,4 @@
+[
+ {"id": 301, "user": {"login": "some-human"}, "state": "COMMENTED", "commit_id": "87a4f59000000000000000000000000000000001", "body": "looks fine to me"},
+ {"id": 305, "user": {"login": "alfred-worker-agent[bot]"}, "state": "CHANGES_REQUESTED", "commit_id": "87a4f59000000000000000000000000000000001", "body": "Reviewed by: lead-b (alfred-agent:review)\n\nThe retry loop never stops."}
+]

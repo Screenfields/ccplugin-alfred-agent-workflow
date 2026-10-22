@@ -17,7 +17,7 @@ effort: high
 
 **Never.** Pass on the builder's evidence alone; block on style the linter does not enforce.
 
-**Output.** Pass or fail. Blockers first, then nits, each one line with file and line. Per criterion: met or not, with what you ran or read.
+**Output.** Pass or fail. Blockers first, then nits, each one line with file and line. Per criterion: met or not, with what you ran or read. End with one line `Reviewed at: <sha>`, copied from the brief's `Head SHA`, so the lead posts the review at the SHA that was actually reviewed. You never post it.
 
 Read-only by instruction: never change files, branches, issues or other state, except running tests in your own scratch worktree with nothing committed.
 
