@@ -32,5 +32,6 @@
   "loop-check-deadline-seconds": 10,
   "chase-interval-minutes": 10,
   "chase-max-tries": 3,
-  "loop-check-max-blocks-per-hour": 6
+  "loop-check-max-blocks-per-hour": 6,
+  "deviation-min-seconds": 60
 }
