@@ -697,7 +697,9 @@ JSON
   for s in owner-communication.sh session-check.sh doctrines-context.sh; do
     jq -e --arg s "$s" '[.hooks.SessionStart[].hooks[].command | select(contains($s))] | length == 1' "$h"
   done
-  jq -e '[.hooks.Stop[].hooks[].command | select(contains("bridge-check.sh"))] | length == 1' "$h"
+  # the bridge check now runs through hooks/stop.sh (ccplugin#127), still exactly once
+  jq -e '[.hooks.Stop[].hooks[].command | select(contains("hooks/stop.sh"))] | length == 1' "$h"
+  jq -e '[.hooks.Stop[].hooks[].command | select(contains("bridge-check.sh"))] | length == 0' "$h"
   # SessionEnd stays inside the hook runner's budget
   jq -e '.hooks.SessionEnd[].hooks[].timeout <= 1.5' "$h"
   # SubagentStop: one POST is capped at POST_TIMEOUT per chunk of CHUNK ids

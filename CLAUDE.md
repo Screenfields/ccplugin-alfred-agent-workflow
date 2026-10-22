@@ -18,13 +18,24 @@ ccplugin-alfred-agent-workflow/
 │   └── show-threads.md      # /alfred-agent:show-threads
 ├── bin/
 │   ├── alfred-wake          # Deterministic inbox wake bridge (one-shot background wait)
-│   └── alfred-workitem      # Work-item marks + token report from the agent-run store (tracked, not gated; fails open)
+│   ├── alfred-workitem      # Work-item marks + token report from the agent-run store (tracked, not gated; fails open)
+│   ├── alfred-config        # `get <name>`: read one threshold from config/thresholds.json
+│   └── alfred-loop-check    # Stop-hook loop check (actionable items + unread direct messages); fails open, always exit 0
+├── agreement/
+│   └── lead.md              # Lead agreement, delivered at SessionStart to leads
+├── config/
+│   └── thresholds.json      # All thresholds, read by name (no numbers in rule or skill texts)
+├── rules/
+│   ├── *.md                 # Old rules, delivered in full by doctrines-context.sh
+│   └── routed/*.md          # Role-routed rules (name, roles, work, severity), delivered by routed-context.sh
 ├── hooks/
 │   ├── hooks.json           # SessionStart → owner-communication.sh; alfred-workitem hook/guard entries
+│   ├── routed-context.sh    # SessionStart/SubagentStart: lead agreement + routed rules by level
+│   ├── stop.sh              # Stop: bridge-check.sh + alfred-loop-check, one combined decision
 │   ├── owner-communication.sh  # Emits the rules below as additionalContext
 │   └── owner-communication.md  # Owner-communication rules (timestamp line, local time, links)
 ├── tests/
-│   └── alfred-wake.bats, workitem.bats  # bats suites; stubs in tests/stub/, fixtures in tests/fixtures/workitem/
+│   └── alfred-wake.bats, workitem.bats, agreement-rules-context.bats, subagent-context.bats, thresholds.bats, loop-check.bats  # bats suites; stubs in tests/stub/, fixtures in tests/fixtures/workitem/
 ├── skills/
 │   └── messaging/
 │       └── SKILL.md         # General messaging context
