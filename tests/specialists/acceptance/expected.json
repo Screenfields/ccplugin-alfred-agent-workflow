@@ -1,0 +1,12 @@
+{
+  "defects": [
+    {"id": "d1", "summary": "Criterion 1 is evidenced only by 'merged, CI green'; a merge or green CI is not evidence that the status line appears on a running bridge.", "where": "Closing comment, evidence for criterion 1"},
+    {"id": "d2", "summary": "Criterion 2 requires version 2.26.0, but the pasted output and the install record show 2.24.0 (the pin on main is 2.26.0); the end state is not reached on the devbox.", "where": "Closing comment, evidence for criterion 2, and the install record"},
+    {"id": "d3", "summary": "Criterion 3 (exit 1 and 'not running' with no bridge) is evidenced only by naming a new bats test, with no run output or command result shown.", "where": "Closing comment, evidence for criterion 3"},
+    {"id": "d4", "summary": "The closing comment has no actual cost against the 0.9M token estimate, and friction is 'None' despite a stale install.", "where": "Closing comment, missing cost line"}
+  ],
+  "sound": {
+    "where": "Evidence for criterion 4: bats output of 47 tests, 0 failures",
+    "summary": "Looks like test output instead of a running service, but criterion 4 names the bats suite as its check, and the captured run on the merge commit confirms 47 ok lines."
+  }
+}

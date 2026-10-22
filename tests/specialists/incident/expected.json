@@ -1,0 +1,12 @@
+{
+  "defects": [
+    {"id": "d1", "summary": "The diagnosis blames release v1.8.2 (14:05 UTC), but the connection-slot log line (13:38 UTC) and the alert (13:41 UTC) both predate the rollout, and the release only changes a log format; the cause is not confirmed and the timeline contradicts it.", "where": "Diagnosis against Timeline"},
+    {"id": "d2", "summary": "A rollback is proposed although the release did not cause the problem, so the mitigation targets a symptom or the wrong cause and will not fix the exhausted connections.", "where": "Proposed mitigation, step 1"},
+    {"id": "d3", "summary": "The rollback uses the Recreate strategy on pods that hold live agent sessions, which doctrine 15 lists as session-disrupting; no drain check, affected agents or signal window is planned.", "where": "Proposed mitigation, step 1 (Recreate)"},
+    {"id": "d4", "summary": "No way back and no checkable success signal: 'watch the dashboards for a while' and 'looks better' name no metric, threshold or deadline.", "where": "Proposed mitigation, step 2"}
+  ],
+  "sound": {
+    "where": "Timeline, the entry at 16:25 CEST after the entry at 14:20 UTC",
+    "summary": "Looks like a two-hour jump or an inconsistent clock, but 16:25 CEST is 14:25 UTC (CEST is UTC+2 on 2026-10-22), so the timeline is consistent."
+  }
+}

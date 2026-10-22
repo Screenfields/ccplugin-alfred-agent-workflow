@@ -521,6 +521,87 @@ alfred-workitem deviations                # unmarked sessions: local record, plu
   written into a repository.
 - Marker and read formats: `tests/fixtures/workitem/` (`marker-*.json`, `workitems*.json`).
 
+## Specialists (`agents/`)
+
+Ten specialist definitions (ccplugin#128, AP-ADR0030, AP-ADR0031). A lead starts a specialist by
+name instead of writing role text into each brief. Each definition holds the role's job, order,
+what it never does, and what its output carries. The work-and-review pattern (author, then paired
+reviewer, then the fix to the same pair) is the routed rule `work-and-review-in-pairs`.
+
+| Specialist | Paired reviewer | Tools | Model, effort |
+|---|---|---|---|
+| `analyst` | `readiness-reviewer` | read-only, edits the item body in the brief | sonnet, high |
+| `readiness-reviewer` | `analyst` | read-only | sonnet, high |
+| `design-reviewer` | the lead or Alfred, who keep design | read-only | sonnet, high |
+| `builder` | `code-reviewer` (code), `document-reviewer` (docs only) | read and write | sonnet, medium |
+| `code-reviewer` | `builder` | read-only | sonnet, high |
+| `technical-writer` | `document-reviewer` | read and write | sonnet, medium |
+| `document-reviewer` | `technical-writer`, or the session that wrote the document | read-only | sonnet, high |
+| `acceptance-reviewer` | the lead, who claims done | read-only | sonnet, high |
+| `incident-reviewer` | the hub, who chooses the mitigation | read-only | opus, max |
+| `investigator` | none | `Read, Grep, Glob, WebFetch`, read-only Metis tools | haiku, low |
+
+`model` and `effort` follow `model-setting-per-role` in `config/thresholds.json`
+(`light`/`medium`/`strong` are `haiku`/`sonnet`/`opus`; effort `highest` is `max`). A role whose
+config entry is `default` has no `model` or `effort` line. `tests/specialists-config.bats` fails
+when a definition drifts from the config.
+
+### Starting one
+
+From a lead session, use the Agent tool with the specialist's name, for example
+`alfred-agent:code-reviewer` (the plugin lists them in the `--agent` error message; the bare
+`code-reviewer` resolves too). From the command line:
+
+```bash
+claude -p --agent alfred-agent:code-reviewer "Review PR 12 against issue 9 ..."
+```
+
+A subagent receives its definition, the `all` and `worker` rules (SubagentStart) and its brief.
+Nothing for leads.
+
+The investigator reads Metis through the read-only tools in its `tools:` list
+(`mcp__metis__query`, `search_notes`, `read_note`, `get_dependants`, `get_provenance`,
+`get_vault_profile`, `list_zone`); GitHub records come in through the lead's brief. Known
+coupling: the allowlist names assume a project `.mcp.json` server key `metis`. A plugin-shipped
+Metis server would be named `mcp__plugin_<plugin>_metis__*` and would match nothing; there are
+no alias names. Where no Metis tool is available the investigator reports "Metis unavailable".
+
+### Read-only by instruction
+
+Only the investigator is read-only by tool list: it has no `Bash`, `Edit`, `Write` or
+`NotebookEdit`, and a `tools:` allowlist leaves out every MCP tool it does not name. The analyst and the
+reviewers keep `Bash` because they need `gh`, `git log` and the test runner to check claims, so
+they are read-only by instruction: the definition says not to change files, branches, issues or
+other state, and nothing in the tool list stops it. The analyst may edit the body of the item named in the
+brief. The code reviewer may run tests in its own scratch worktree and commit nothing.
+
+### House style
+
+`skills/house-style/SKILL.md` holds the writing rules. The technical writer loads it first; any
+session writing a record loads it too.
+
+### Planted-defect cases
+
+`tests/specialists/<reviewer>/` holds one case per reviewer (`readiness`, `design`, `code`,
+`document`, `acceptance`, `incident`): `case.md` is a small self-contained piece of work with
+its sources quoted, and `expected.json` lists the seeded defects and names the sound part. A
+reviewer passes when it finds every seeded defect and leaves the sound part alone, in both runs.
+
+```bash
+tests/specialists/run.sh probe                    # prove the answer files are unreachable; run first
+tests/specialists/run.sh code --runs 2            # one reviewer
+tests/specialists/run.sh all                      # all six reviewers, two runs each
+```
+
+`run.sh` is a live runner (`claude -p`), not part of the bats job. It copies only `case.md` into
+a fresh temp directory, builds the plugin from `git archive HEAD` without `tests/`, sets
+`ALFRED_ROLE=worker`, and disallows `Bash`, `WebFetch` and Read, Grep and Glob on the checkout
+(`Read(//abs/path/**)`: an absolute path in a rule needs the double slash, a single slash fails
+open). Outputs go to `tests/specialists/results/<role>-reviewer-run<N>.md`, with usage and the session id
+in the matching `.json`. The runner only collects; the starting session compares each output with
+`expected.json` and records found or missed per defect and run. Run it from a commit that includes the
+definitions: the plugin copy is built from `HEAD`.
+
 ## Theme: owner prompts stand out (`themes/owner-prompts.json`)
 
 The plugin ships a Claude Code theme, **Owner prompts**: the dark preset with the owner's own

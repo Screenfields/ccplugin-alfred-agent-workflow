@@ -1,0 +1,12 @@
+{
+  "defects": [
+    {"id": "d1", "summary": "The item traces to O7, which is not in the objectives register (the register holds O1 to O4), so it has no approved objective.", "where": "Objective"},
+    {"id": "d2", "summary": "Acceptance criterion 2 ('fast and easy to read') has no named check and is not testable.", "where": "Acceptance criteria, criterion 2"},
+    {"id": "d3", "summary": "The class is stated as small, but the change adds a threshold to the config, so the sizing rule makes it medium at least; the expected class is medium.", "where": "Estimate, class"},
+    {"id": "d4", "summary": "Test structure is 'Not decided yet': no runner, style or file is named.", "where": "Test structure"}
+  ],
+  "sound": {
+    "where": "Bounds, Blocked by: none",
+    "summary": "The item names #131 as a dependency yet lists no blocker; this is correct because the linked-items source shows #131 is merged."
+  }
+}
