@@ -39,7 +39,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.8.0"
+VERSION="1.8.1"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -113,6 +113,8 @@ TZ_LOCAL="${ALFRED_WAKE_TZ:-Europe/Amsterdam}"
 PERSIST=true          # `check` flips this to false — a dry run must not eat news
 WAIT_MODE=false       # `wait` flips this: exit after the first pass with news
 CHILD_PID=""          # the pass or sleep currently being waited on
+FORKING=false         # true between forking a child and recording its pid
+PENDING_SIG=""        # signal that arrived while FORKING; acted on once CHILD_PID is set
 RUN_TMP=""            # private per-process temp dir (holds curl auth configs)
 BUZZ_ENABLED=false
 BUZZ_SKIP_LOGGED=false
@@ -912,6 +914,13 @@ cleanup_files() {
 
 on_signal() {
   local sig="$1" reason marker="$STATE_DIR/replaced_by.$$"
+  # Between forking a child and recording its pid there is nothing to kill
+  # yet; exiting now would orphan it (CCW-139). Remember the signal and let
+  # run_child replay it as soon as CHILD_PID is known.
+  if [ "$FORKING" = "true" ]; then
+    PENDING_SIG="$sig"
+    return 0
+  fi
   trap '' TERM INT HUP
   if [ -n "$CHILD_PID" ]; then
     kill_tree "$CHILD_PID" TERM
@@ -935,8 +944,17 @@ on_signal() {
 # trapped signal arrives, so shutdown takes well under a second instead of
 # waiting out a 25s curl or a 20s sleep in the foreground.
 run_child() {
+  FORKING=true
   "$@" &
+  # Test-only (ALFRED_WAKE_TEST_FORK_DELAY=<seconds>): hold the window between
+  # the fork and recording its pid open so a test can signal inside it.
+  if [ -n "${ALFRED_WAKE_TEST_FORK_DELAY:-}" ]; then
+    : > "$STATE_DIR/fork_window"
+    sleep "$ALFRED_WAKE_TEST_FORK_DELAY"
+  fi
   CHILD_PID=$!
+  FORKING=false
+  if [ -n "$PENDING_SIG" ]; then on_signal "$PENDING_SIG"; fi
   wait "$CHILD_PID" 2>/dev/null
   CHILD_PID=""
 }
