@@ -232,7 +232,7 @@ no_leftovers() {
   start b wait
   reap "$a_pid"
   [ "$rc" -eq 0 ]
-  [ "$(out_of a)" = "WAKE-STOPPED replaced by=$b_pid" ]
+  [ "$(out_of a)" = "WAKE-STOPPED replaced by=$b_pid" ] || { echo "a printed: $(out_of a)"; false; }
   until_true 30 pidfile_is "$b_pid"
   alive "$b_pid"
 }
@@ -279,7 +279,33 @@ no_leftovers() {
   start b wait
   reap "$a_pid"
   [ "$rc" -eq 0 ]
-  [ -z "$(out_of a)" ]
+  [ -z "$(out_of a)" ] || { echo "a printed: $(out_of a)"; false; }
+}
+
+# holders_of <file> — pids that have <file> open (any fd).
+holders_of() {
+  local fd
+  for fd in /proc/[0-9]*/fd/*; do
+    [ "$(readlink "$fd" 2>/dev/null)" = "$1" ] && { fd="${fd#/proc/}"; echo "${fd%%/*}"; }
+  done | sort -u
+  return 0
+}
+
+@test "a signal between forking the pass and recording its pid leaves no orphan pass (CCW-139)" {
+  mkdir -p "$STATE" && touch "$STATE/.initialized"
+  echo '{"unread_ids":[]}' > "$STATE/am_state.json"
+  echo 5 > "$STUB_DIR/slow"                  # the pass outlives the bridge if orphaned
+  export ALFRED_WAKE_TEST_FORK_DELAY=3       # test-only: hold the fork window open
+  start a run
+  until_true 50 test -e "$STATE/fork_window"  # a is now inside the window
+  kill -TERM "$a_pid"
+  reap "$a_pid"
+  [ "$rc" -eq 0 ]
+  [ -z "$(out_of a)" ] || { echo "a printed: $(out_of a)"; false; }
+  local holders
+  holders=$(holders_of "$BATS_TEST_TMPDIR/a.out")
+  [ -z "$holders" ] || { echo "orphans still hold a.out: $(echo $holders) -> $(ps -o pid,ppid,cmd -p $(echo $holders | tr ' ' ',') 2>&1)"; false; }
+  no_leftovers
 }
 
 @test "status is armed only while a live process holds the pidfile" {
@@ -320,13 +346,13 @@ EOF
   ln -s "$(readlink -f "$WAKE")" "$ALFRED_WAKE_BIN_DIR/alfred-wake"
   run "$ALFRED_WAKE_BIN_DIR/alfred-wake" wait 5
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.8.0"* ]]
+  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.8.1"* ]]
   [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-wake")" = "$BATS_TEST_TMPDIR/cache/9.9.0/bin/alfred-wake" ]
-  grep -q "upgrade: 1.8.0 -> 9.9.0" "$STATE/alfred-wake.log"
+  grep -q "upgrade: 1.8.1 -> 9.9.0" "$STATE/alfred-wake.log"
 }
 
 @test "an older or equal installed alfred-wake is not used" {
-  for v in 1.0.0 1.8.0; do
+  for v in 1.0.0 1.8.1; do
     fake_install "$v"
     run timeout 3 "$WAKE" wait
     [[ "$output" != *"ran $v"* ]]
@@ -353,7 +379,7 @@ EOF
 @test "--version prints the version" {
   run "$WAKE" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "alfred-wake 1.8.0" ]
+  [ "$output" = "alfred-wake 1.8.1" ]
 }
 
 # --- Stop hook: never end a turn with the bridge down -----------------------
