@@ -39,7 +39,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.7.0"
+VERSION="1.8.0"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -1130,11 +1130,17 @@ cmd_install() {
   exit 0
 }
 
-# cmd_unread: print the current agent-messaging unread count (one number),
-# for the SessionStart check. One bounded request, no cursor change, exit 1
-# and "?" when the server cannot be asked.
+# cmd_unread [--direct]: print the current agent-messaging unread count (one
+# number), for the SessionStart check. One bounded request, no cursor change,
+# exit 1 and "?" when the server cannot be asked.
+# --direct counts only direct messages (source "direct"), not topic posts, for
+# the Stop-hook loop check (ccplugin#127). It reads one page of up to 100
+# unread messages; when the page does not hold every unread message and none
+# of them is direct, a direct message further back could be missed, so it
+# prints 0 and says "inbox scan partial" on stderr rather than pass silently.
 cmd_unread() {
-  local workdir n
+  local workdir n direct=false
+  [ "${1:-}" = "--direct" ] && direct=true
   ensure_state_dir >/dev/null 2>&1 || true
   workdir=$(new_curl_workdir) || { echo "?"; exit 1; }
   AM_CFG="$workdir/curl.cfg"
@@ -1142,6 +1148,19 @@ cmd_unread() {
   trap "rm -rf '$workdir'" EXIT
   if ! am_write_auth_headers "$AM_CFG" || ! mcp_initialize "$AM_URL" "$AM_CFG" "$workdir" "alfred-wake"; then
     echo "?"; exit 1
+  fi
+  if [ "$direct" = true ]; then
+    if am_call '{"unread_only":true,"limit":100,"include_body":false}'; then
+      n=$(printf '%s' "$AM_RESULT" | jq -r '[.messages[] | select(.source == "direct")] | length')
+      if [[ "$n" =~ ^[0-9]+$ ]]; then
+        if [ "$n" -eq 0 ] && printf '%s' "$AM_RESULT" | jq -e '(.has_more == true) or ((.total_unread // 0) > (.messages | length))' >/dev/null 2>&1; then
+          echo "alfred-wake: inbox scan partial: unread messages beyond the first page were not checked for direct messages" >&2
+        fi
+        echo "$n"; exit 0
+      fi
+    fi
+    echo "?"
+    exit 1
   fi
   if am_call '{"unread_only":true,"limit":0,"include_body":false}' || am_call '{"unread_only":true,"limit":1}'; then
     n=$(printf '%s' "$AM_RESULT" | jq -r '.total_unread // empty')
@@ -1261,7 +1280,7 @@ Usage:
   alfred-wake install            symlink into ~/.local/bin
   alfred-wake status             show config; exit 0 only while a wait/run is alive
   alfred-wake status --json      armed/state for probes (a just-woken lead counts as armed)
-  alfred-wake unread             print the agent-messaging unread count
+  alfred-wake unread [--direct]  print the agent-messaging unread count (--direct: direct messages only)
   alfred-wake notify TO SUBJ BODY  send one agent-messaging message
   alfred-wake --version          print the version
 
@@ -1285,7 +1304,7 @@ main() {
       ;;
     install) cmd_install ;;
     status)  cmd_status "${2:-}" ;;
-    unread)  cmd_unread ;;
+    unread)  cmd_unread "${2:-}" ;;
     notify)  shift; cmd_notify "$@" ;;
     version|--version) echo "alfred-wake $VERSION"; exit 0 ;;
     -h|--help|help|'') usage; exit 0 ;;

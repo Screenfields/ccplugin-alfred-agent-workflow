@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# alfred-config — read one named value from the thresholds config.
+#
+# Skills, agents and hooks read thresholds by name through this, so a number
+# lives in exactly one file (config/thresholds.json) and never in a rule or
+# skill text (AP-ADR0031 item 8).
+#
+#   alfred-config get <name> [--file PATH]   print the value; strings raw,
+#                                            numbers/booleans/objects/arrays
+#                                            as compact JSON
+#   alfred-config names [--file PATH]        print every name, one per line
+#
+# Exit 0 on success, 2 on an unknown name, a missing/malformed file or a
+# usage error (a caller that needs a value must not carry on with a guess).
+# $ALFRED_THRESHOLDS or --file overrides the default file next to the plugin.
+set -u
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+file="${ALFRED_THRESHOLDS:-$(dirname "$SELF")/../config/thresholds.json}"
+
+usage() {
+  echo "usage: alfred-config get <name> [--file PATH] | names [--file PATH]" >&2
+  exit 2
+}
+
+cmd="${1:-}"
+[ -n "$cmd" ] || usage
+shift
+name=""
+if [ "$cmd" = "get" ]; then
+  [ $# -ge 1 ] || usage
+  name="$1"
+  shift
+fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --file) [ $# -ge 2 ] || usage; file="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || { echo "alfred-config: requires jq" >&2; exit 2; }
+jq -e 'type == "object"' "$file" >/dev/null 2>&1 \
+  || { echo "alfred-config: missing or malformed thresholds file: $file" >&2; exit 2; }
+
+case "$cmd" in
+  get)
+    jq -e --arg n "$name" 'has($n)' "$file" >/dev/null 2>&1 \
+      || { echo "alfred-config: unknown threshold: $name" >&2; exit 2; }
+    jq -r --arg n "$name" '.[$n] | if type == "string" then . else tojson end' "$file"
+    ;;
+  names) jq -r 'keys_unsorted[]' "$file" ;;
+  *) usage ;;
+esac

@@ -55,6 +55,15 @@ append it to the end.
   `action:jochem`), plus open issues whose most recent comments contain an explicit owner ask
   ("owner decision", "Waiting on you", "Owner:", a numbered decision list) that has not been
   answered in a later comment.
+- **Items parked by a lead** (the waiting status): every open item carrying the waiting label, in
+  each repo listed under `repos` in `.alfred/config.json` (or the current repo when there is no
+  such key). Read the label name with `alfred-config get waiting-label` (today
+  `status:waiting-on-owner`), never from memory. For each repo run
+  `gh issue list -R <owner/name> --state open --label "<waiting-label>" --json number,title,url,comments`
+  and take the question from the item's latest comment by the lead. These items keep their state
+  label; the label only says that the lead is waiting on a decision, and it frees the lead's
+  work-in-progress slot. This is separate from `action:jochem`, which marks an action the owner
+  performs (a login, a merge) and which this command still reads as above.
 - **Open PRs** that need the owner: labelled `requires-elevated-merge`, review requested from the
   owner, or blocked on a policy call the PR body names.
 - **Agent-messaging threads**: threads whose last message is a peer relaying or requesting an
@@ -192,7 +201,18 @@ answer.
    run the cheap read-only verification you named in the instructions (the tag is on the device,
    the setting reads "on", the token works) before you mark the item resolved. If verification is
    not possible, say so and record the item as "done, unverified".
-4. Never widen scope on the back of an answer: a "yes" to one item is not a "yes" to the chain it
+4. **Parked items (the waiting label).** When the owner has answered an item that carries the
+   waiting label: post the decision as a comment on the item (the owner's words where wording
+   matters), then remove the label with
+   `gh issue edit <n> -R <owner/name> --remove-label "<waiting-label>"`, in that order, so the
+   decision is on record before the lead sees the item as actionable again. If the owner skips or
+   defers it, leave the label in place.
+   Then check the item still carries a state label: read `workable-states` and `ready-state` with
+   `alfred-config get`, and if the item has no label from `workable-states`, add the `ready-state`
+   label with `gh issue edit <n> -R <owner/name> --add-label "<ready-state>"`. Parking is meant to
+   keep the state label, but an item that lost it has no workable label once the waiting label is
+   gone, and the lead's loop would never see it again.
+5. Never widen scope on the back of an answer: a "yes" to one item is not a "yes" to the chain it
    implies. New work that surfaces becomes a new item or a new issue.
 
 ## Step 6: Closing summary

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Test double for gh, for the loop check: answers `gh issue list -R owner/name`
+# from files in $GH_STUB_DIR, and logs every call to calls.log.
+#   <owner>__<name>.json   the open issues [{number,title,url,labels:[{name}]}]
+#   fail-<owner>__<name>   present → exit 1 with an auth-looking error
+#   slow-<owner>__<name>   present → sleep <its content> seconds first
+#   garbage-<owner>__<name> present → answer text that is not JSON
+repo=""
+args="$*"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -R) repo="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+echo "$args" >> "$GH_STUB_DIR/calls.log"
+f="${repo//\//__}"
+if [ -f "$GH_STUB_DIR/slow-$f" ]; then sleep "$(cat "$GH_STUB_DIR/slow-$f")"; fi
+if [ -f "$GH_STUB_DIR/fail-$f" ]; then echo "gh: HTTP 401: Bad credentials" >&2; exit 1; fi
+if [ -f "$GH_STUB_DIR/garbage-$f" ]; then echo "<html>not json</html>"; exit 0; fi
+if [ -f "$GH_STUB_DIR/$f.json" ]; then cat "$GH_STUB_DIR/$f.json"; else echo '[]'; fi

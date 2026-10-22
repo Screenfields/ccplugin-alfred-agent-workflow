@@ -337,14 +337,147 @@ how the rules reach a session. The doctrines are owned in `Screenfields/alfred-p
 
 A lead relaunches `alfred-wake wait` after every wake. If a turn ends without that, the session
 stays up but deaf. This was seen live on screenfields-ai on 2026-10-14: about three hours with no
-bridge, until a nudge. The plugin therefore ships a `Stop` hook, `hooks/bridge-check.sh`, which
-runs `alfred-wake status` when a turn ends. That is a pid check, with no network and no model call.
+bridge, until a nudge. The plugin therefore ships a `Stop` check, `hooks/bridge-check.sh` (called
+through `hooks/stop.sh`, see the loop check below), which runs `alfred-wake status` when a turn ends. That is a pid check, with no network and no model call.
 - **Bridge down:** it blocks the stop once with "relaunch `alfred-wake wait`", so the same turn re-arms it.
 - **Still down after that relaunch:** it lets the stop through with a visible `WARNING` instead of blocking again, so it never loops.
 
 The hook only acts on Alfred devboxes (marker: the image's `/usr/local/lib/alfred/start-helpers.sh`),
 in projects with `.alfred/config.json` (an `agent_id`). The hub and workstations run other bridges
 and are left alone. `ALFRED_WAKE_STOP_CHECK=1` forces the check on; `=0` switches it off.
+
+## Lead agreement and routed rules (SessionStart and SubagentStart hook)
+
+`hooks/routed-context.sh` delivers the lead agreement and the role-routed rules (ccplugin#127,
+AP-ADR0021, AP-ADR0031). It is a separate hook from `doctrines-context.sh`, so neither string
+grows past the hook cap (a test enforces 9,500 characters for each).
+- **Lead** (any `agent_id` in `.alfred/config.json` other than `hub` and `alfred`): the agreement
+  from `agreement/lead.md`, then the `all` and `lead` rules.
+- **Hub and Alfred:** the `all` rules only. Their process part lives in the hub charter and
+  `alfred/INSTRUCTIONS.md`.
+- **No `.alfred/config.json`:** nothing.
+- **`ALFRED_ROLE=worker`** (set by worker and test launchers): the worker rules, never the agreement
+  and never the loop check.
+- **Subagents** (SubagentStart, every agent type): the `all` and `worker` rules, nothing for leads.
+
+The rules are `rules/routed/*.md`, one file each, in AP-ADR0021 format (frontmatter `name`,
+`roles`, `work`, `severity`, then one statement with its reason). They sit outside the
+`rules/*.md` glob of `doctrines-context.sh`, so nothing is delivered twice. The GitOps rule lives
+there too (`author-gitops-pr-never-self-approve`, lead only).
+
+## Thresholds (`config/thresholds.json`, `bin/alfred-config`)
+
+All thresholds live in one file and are read by name, so no rule or skill text carries a number:
+`alfred-config get wip-limit`. An unknown name, or a missing or malformed file, exits 2.
+`alfred-config names` lists the keys. A bats test fails when a new text contains a digit or a
+percent sign (other than `AP-ADRnnnn`, `AP-nnnn`, `AP#nnnn` and `doctrine NN`) or names a
+threshold that does not resolve.
+
+## Loop check at the end of every turn (Stop hook)
+
+A lead keeps working while it has actionable items or unread direct messages. At the end of a
+turn `bin/alfred-loop-check --hook` decides, with `gh` and one inbox call and no model call,
+whether to block the stop once. Items waiting on the owner never hold the loop open.
+
+- **Actionable set:** open issues in the lead's repos that carry a label in `workable-states` and
+  not the `waiting-label` (`status:waiting-on-owner`). Once the not-ready items number at least
+  `wip-limit` (counted over all repos together), only they count; below it the ready ones count
+  too. An unread **direct** agent-messaging message counts as well (`alfred-wake unread --direct`);
+  topic posts do not. `worker-limit` is not used: the hook cannot see a builder bound.
+- **Parking:** add the `waiting-label` and comment the question. The item keeps its state label.
+  `/alfred-agent:waiting` lists these items and, once the owner answers, records the decision and
+  removes the label.
+- **`repos` key:** `.alfred/config.json` takes `{"agent_id": "...", "repos": ["owner/name", ...]}`.
+  Without `repos` the check uses the working directory's `origin` remote. The label names must
+  exist in each repo; a repo that has open issues but none with a state or waiting label gives a
+  warning and counts as empty.
+- **Block, at most once per unchanged set.** The signature is the sorted actionable items with their
+  labels plus the unread direct count. The same signature does not block again inside
+  `chase-interval-minutes`. Inside a chain (`stop_hook_active`) the stored state is the guard
+  whatever its age: a different signature blocks, the same one is allowed with friction, and a
+  missing state is allowed, so expiry or a fail-open stop can never cause a second block. Only
+  outside a chain does an old state (past the chase interval) let the same set block again.
+  Issue titles in the block reason are untrusted: control characters, backticks and quotes are
+  removed and each is cut to about 100 characters, and the list is labelled as data.
+  If the state cannot be written, the stop is allowed with a warning.
+  A stop that is allowed because nothing changed prints a warning and appends one line to
+  `${CLAUDE_CONFIG_DIR:-~/.claude}/alfred-loop/friction.jsonl` (local only).
+- **Chase, then escalate:** an item that is still unchanged after `chase-max-tries` blocks makes
+  the block reason say to escalate to the hub and record it on the item. The count resets when the
+  item's labels change.
+- **Owner present:** `bin/alfred-loop-check note-turn` (UserPromptSubmit) records whether the turn
+  started with the owner. In an interactive session (`CLAUDE_CODE_ENTRYPOINT` is `cli`, `claude-vscode` or
+  `claude-desktop`; anything else, or unset, is a machine), a prompt without a machine prefix
+  (`<task-notification>`, `<cross-session-message`, `[substrate wake]`, `<scheduled-task`) is an
+  owner turn. The next stop then only adds a one-line note and consumes the marker, so a later
+  stop without a new prompt blocks normally. Unknown counts as a machine turn.
+- **Cap:** at most `loop-check-max-blocks-per-hour` blocks per session.
+- **Kill switch:** `ALFRED_LOOP_CHECK=0` or `"loop-check-enabled": false` in the thresholds.
+- **Silent** without `.alfred/config.json`, for the `hub` and `alfred` ids under the plugin entry,
+  and for `ALFRED_ROLE=worker`.
+
+### One Stop entry
+
+`hooks/stop.sh` is the plugin's only Stop entry for this: it runs `bridge-check.sh` (unchanged)
+and the loop check with the same stdin, and emits **at most one JSON object**. Precedence: a block
+from either part blocks, with one reason (a paragraph for the bridge, then the items and inbox);
+all warnings are joined into one `systemMessage`. Garbage or a timeout from a part becomes a
+warning, never raw output and never a block. Worst case is 5 s for the bridge plus
+`loop-check-deadline-seconds` for the loop part, under the entry's 20 s timeout. Hook-mode scripts
+use no `set -e`/`set -u` and always exit 0 (CI audits this); a syntax error would exit 2, which
+blocks, so CI also runs `bash -n` on every hook.
+
+### Required binaries
+
+`jq`, `gh` (authenticated), `timeout` (coreutils) and `alfred-wake` (with `curl`). If one is
+missing, the check allows the stop with `skipped, missing binary: <name>`.
+
+### Warning strings
+
+Printed on stderr as `alfred-loop-check: <text>` (and, where the stop decision changed, in the
+`systemMessage`). Stable text, for grep:
+`skipped, missing binary: <name>` · `bad hook input, stop allowed` · `config malformed (<path>), stop allowed` ·
+`thresholds file missing or malformed (<path>), stop allowed` · `no session_id in the hook input, stop allowed` ·
+`<repo>: gh timed out` · `<repo>: gh failed (exit N): ...` · `<repo>: gh output is not a JSON list` ·
+`<repo>: 500 open items, later ones are not seen` · `no status labels in <repo>` ·
+`no repos to check (no repos key in the config, no origin remote)` · `inbox unreachable (...)` ·
+`inbox scan partial: ...` · `all sources failed, stop allowed` · `some sources failed, stop allowed` ·
+`block cap reached, stop allowed` · `no state for this chain, stop allowed` ·
+`no progress since the last block, stop allowed`. From `stop.sh`: `<bridge|loop> part gave unusable output, ignored`
+and `<bridge|loop> part timed out, stop allowed`.
+
+### Known false blocks
+
+- A change from outside the session (a teammate moves or opens an item) changes the signature, so
+  the next stop can block once for work the lead did not cause.
+- An item that waits on someone without the `waiting-label` (a hub gate, a background builder)
+  stays actionable and is chased every `chase-interval-minutes` until it is parked or escalated.
+- With several repos, when one repo call fails and no state exists yet, the set from the repos
+  that answered can still block.
+
+### Known false allows
+
+- A repo whose issues carry none of the state labels is read as empty (the warning above says so).
+- A direct message behind more than 100 unread messages that are all topic posts is missed (the
+  partial-scan warning says so).
+- Items past the 500th open issue of a repo are not seen.
+- A stop that fails open (any error, timeout, missing input) is allowed.
+
+### Reusing the check from the hub and Alfred
+
+The script runs outside the plugin's hook entry with an explicit config path, thresholds and level.
+The hub and Alfred keep their own actionable sets by passing their own `workable-states` and
+`waiting-label` in their own thresholds file (required keys: `waiting-label`, `workable-states`,
+`wip-limit`; optional: `ready-state`, `loop-check-timeout-seconds`, `chase-interval-minutes`,
+`chase-max-tries`, `loop-check-max-blocks-per-hour`, `loop-check-enabled`). From another Stop setup:
+
+```bash
+alfred-loop-check --level hub --config /path/config.json --thresholds /path/thresholds.json --hook
+```
+
+with the Stop hook JSON on stdin; it prints Stop hook JSON or nothing and always exits 0. Without
+`--hook` it prints `{items, direct_unread, warnings}`. Combine it with another Stop check the way
+`hooks/stop.sh` does: one stdin copy per part, one JSON object out, children killed in a trap.
 
 ## Tokens per work item (`bin/alfred-workitem`)
 
