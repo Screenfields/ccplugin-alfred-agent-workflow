@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Test double for `gh issue view <n> -R <repo> --json body --jq .body`:
+# prints $STUB_DIR/issue-body.txt, or fails when it is absent.
+echo "gh $*" >> "$STUB_DIR/calls.log"
+[ -f "$STUB_DIR/issue-body.txt" ] || exit 1
+cat "$STUB_DIR/issue-body.txt"

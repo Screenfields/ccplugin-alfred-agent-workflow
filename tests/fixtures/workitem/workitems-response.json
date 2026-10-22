@@ -1,0 +1,321 @@
+{
+  "project": "acme",
+  "from": "2026-10-21",
+  "to": "2026-10-21",
+  "work_items": [
+    {
+      "work_item": "acme/other#9",
+      "sessions": 1,
+      "by_model": [
+        {
+          "model": "claude-sonnet-5-5",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 400,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 501
+          },
+          "cost_usd": 0.08
+        }
+      ],
+      "by_role": [
+        {
+          "role": "builder",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 400,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 501
+          },
+          "cost_usd": 0.08
+        }
+      ],
+      "by_role_model": [
+        {
+          "role": "builder",
+          "model": "claude-sonnet-5-5",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 400,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 501
+          },
+          "cost_usd": 0.08
+        }
+      ],
+      "requests": 1,
+      "tokens": {
+        "input": 1,
+        "output": 400,
+        "cache_read": 100,
+        "cache_write": 0,
+        "cache_write_5m": 0,
+        "cache_write_1h": 0,
+        "total": 501
+      },
+      "cost_usd": 0.08
+    },
+    {
+      "work_item": "acme/widgets#7",
+      "sessions": 1,
+      "by_model": [
+        {
+          "model": "claude-opus-5-5",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 900,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 1001
+          },
+          "cost_usd": 0.42
+        },
+        {
+          "model": "claude-sonnet-5-5",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 600,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 701
+          },
+          "cost_usd": 0.12
+        }
+      ],
+      "by_role": [
+        {
+          "role": "builder",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 600,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 701
+          },
+          "cost_usd": 0.12
+        },
+        {
+          "role": "main",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 900,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 1001
+          },
+          "cost_usd": 0.42
+        }
+      ],
+      "by_role_model": [
+        {
+          "role": "builder",
+          "model": "claude-sonnet-5-5",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 600,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 701
+          },
+          "cost_usd": 0.12
+        },
+        {
+          "role": "main",
+          "model": "claude-opus-5-5",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 900,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 1001
+          },
+          "cost_usd": 0.42
+        }
+      ],
+      "requests": 2,
+      "tokens": {
+        "input": 2,
+        "output": 1500,
+        "cache_read": 200,
+        "cache_write": 0,
+        "cache_write_5m": 0,
+        "cache_write_1h": 0,
+        "total": 1702
+      },
+      "cost_usd": 0.54
+    },
+    {
+      "work_item": "unattributed",
+      "sessions": 2,
+      "by_model": [
+        {
+          "model": "claude-haiku-5-5",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 5,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 106
+          },
+          "cost_usd": 0.001
+        },
+        {
+          "model": "claude-opus-5-5",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 50,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 151
+          },
+          "cost_usd": 0.05
+        }
+      ],
+      "by_role": [
+        {
+          "role": "main",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 50,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 151
+          },
+          "cost_usd": 0.05
+        },
+        {
+          "role": "overhead",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 5,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 106
+          },
+          "cost_usd": 0.001
+        }
+      ],
+      "by_role_model": [
+        {
+          "role": "main",
+          "model": "claude-opus-5-5",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 50,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 151
+          },
+          "cost_usd": 0.05
+        },
+        {
+          "role": "overhead",
+          "model": "claude-haiku-5-5",
+          "requests": 1,
+          "tokens": {
+            "input": 1,
+            "output": 5,
+            "cache_read": 100,
+            "cache_write": 0,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "total": 106
+          },
+          "cost_usd": 0.001
+        }
+      ],
+      "requests": 2,
+      "tokens": {
+        "input": 2,
+        "output": 55,
+        "cache_read": 200,
+        "cache_write": 0,
+        "cache_write_5m": 0,
+        "cache_write_1h": 0,
+        "total": 257
+      },
+      "cost_usd": 0.051
+    }
+  ],
+  "deviations": [
+    {
+      "project": "acme",
+      "session_id": "sess-a",
+      "first": "2026-10-21T07:59:00Z",
+      "last": "2026-10-21T07:59:00Z",
+      "requests": 1,
+      "tokens": {
+        "input": 1,
+        "output": 5,
+        "cache_read": 100,
+        "cache_write": 0,
+        "cache_write_5m": 0,
+        "cache_write_1h": 0,
+        "total": 106
+      },
+      "cost_usd": 0.001
+    },
+    {
+      "project": "acme",
+      "session_id": "sess-b",
+      "first": "2026-10-21T09:00:00Z",
+      "last": "2026-10-21T09:00:00Z",
+      "requests": 1,
+      "tokens": {
+        "input": 1,
+        "output": 50,
+        "cache_read": 100,
+        "cache_write": 0,
+        "cache_write_5m": 0,
+        "cache_write_1h": 0,
+        "total": 151
+      },
+      "cost_usd": 0.05
+    }
+  ]
+}

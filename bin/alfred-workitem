@@ -1,0 +1,694 @@
+#!/usr/bin/env bash
+# alfred-workitem — token counting per work item, plugin side (ccplugin#126).
+#
+# Deterministic bash + curl + jq; no model call anywhere. The central
+# agent-run store counts the tokens. This script only
+#   - tells the store which work item a session (or a subagent's requests)
+#     works on, by sending OTLP/HTTP JSON "work_item" log records (markers);
+#   - reads the store's /workitems totals back and prints them.
+#
+# Tracked, not gated: nothing here stops or blocks work. `check` is a report
+# and always exits 0. All token types are shown separately (input, output,
+# cache_read, cache_write) with totals with and without cache reads; no unit
+# is chosen, and the `Estimate-tokens:` line is shown exactly as written.
+#
+# Subcommands:
+#   mark <owner>/<repo>#<n>|none   mark the current session ($CLAUDE_CODE_SESSION_ID)
+#   guard                          PreToolUse (Bash) hook: deny `mark` inside a subagent
+#   hook                           SessionStart(resume)/UserPromptSubmit/Stop/
+#                                  SubagentStop/SessionEnd hook (event from stdin JSON)
+#   check-session <session_id>     detached at SessionEnd: [deviation] notice to the hub
+#   check <item> [--estimate <text>] [--from D] [--to D]
+#                                  report actual against estimate; always exit 0
+#   report <item> [--estimate <text>] [--from D] [--to D]
+#                                  markdown table for a closing comment
+#   line <item> [--estimate <text>] [--from D] [--to D]
+#                                  one line for the review record
+#   deviations [--from D] [--to D] unmarked sessions (local record + store amounts)
+#
+# Environment (the store; every command fails open when they are missing):
+#   AGENT_RUNS_OTLP_LOGS_ENDPOINT  marker POST target (ends in /v1/logs)
+#   AGENT_RUNS_OTLP_HEADERS        "Name: value, Name: value" request headers
+#   AGENT_RUNS_READER_URL          base URL of the reader (GET /workitems)
+#   AGENT_RUNS_TOKEN               bearer token for the reader
+# Local state, under ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-workitem/:
+#   <session_id>.json        mark file {item, marked_at, estimate}
+#   <session_id>.state.json  sent-override counts per briefed subagent
+#   <session_id>.prompts     prompt counter that throttles the unmarked reminder
+#   <session_id>.check.lock  dir held while the detached SessionEnd run is live
+#   deviations.jsonl         one record per session that had unmarked time (last 500)
+# Nothing is ever written into a repository.
+set -u
+
+VERSION="1.0.0"
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+WAKE_BIN="${ALFRED_WORKITEM_WAKE:-$(dirname "$SELF")/alfred-wake}"
+STATE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-workitem"
+DEV_FILE="$STATE_DIR/deviations.jsonl"
+# The store's own shape: owner [A-Za-z0-9-]+, number without leading zero, never #0.
+ITEM_RE='[A-Za-z0-9-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*'
+CHUNK=500             # request_ids per record; the collector drops arrays
+POST_TIMEOUT=2        # inline markers (mark, SessionStart, SubagentStop)
+READ_TIMEOUT=5
+NOTIFY_TIMEOUT=10
+GH_TIMEOUT=5
+STALE_DAYS=90
+REMIND_EVERY=5        # unmarked reminder: once per this many prompts, per session
+DEV_KEEP=500          # lines of deviations.jsonl kept
+CHECK_TIMEOUT=30      # the detached SessionEnd run
+
+warn() { echo "alfred-workitem: $*" >&2; }
+# The curl config holds secrets: removed on any exit, signals included.
+CFG_TMP=""
+trap 'rm -f "$CFG_TMP"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT HUP
+# ALFRED_WORKITEM_NOW (RFC 3339 UTC) pins the clock; the tests use it for exact bodies.
+now_iso() { if [ -n "${ALFRED_WORKITEM_NOW:-}" ]; then echo "$ALFRED_WORKITEM_NOW"; else date -u +%Y-%m-%dT%H:%M:%SZ; fi; }
+now_nano() { if [ -n "${ALFRED_WORKITEM_NOW:-}" ]; then echo "$(date -u -d "$ALFRED_WORKITEM_NOW" +%s)000000000"; else date +%s%N; fi; }
+ensure_dir() { mkdir -p "$STATE_DIR" 2>/dev/null; }
+mark_file() { printf '%s/%s.json' "$STATE_DIR" "$1"; }
+state_file() { printf '%s/%s.state.json' "$STATE_DIR" "$1"; }
+valid_sid() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
+valid_item() { [[ "$1" =~ ^${ITEM_RE}$ ]]; }
+
+# touch_session <sid>: last use, for the 90-day cleanup.
+touch_session() {
+  [ -e "$(mark_file "$1")" ] && touch "$(mark_file "$1")" 2>/dev/null
+  [ -e "$(state_file "$1")" ] && touch "$(state_file "$1")" 2>/dev/null
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# HTTP to the store. Secrets go through a private curl config file, never argv.
+# ---------------------------------------------------------------------------
+
+cfg_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
+# header_lines <list>: curl config `header` lines. The list is comma-separated,
+# each entry either `Name: value` or the OTLP form `key=value`. An entry is
+# OTLP when its first `=` comes before any `:`.
+header_lines() {
+  local raw="$1" h
+  while IFS= read -r h; do
+    h="${h#"${h%%[![:space:]]*}"}"
+    h="${h%"${h##*[![:space:]]}"}"
+    [ -n "$h" ] || continue
+    if [[ "$h" =~ ^([^:=]+)=(.*)$ ]]; then
+      h="${BASH_REMATCH[1]}: ${BASH_REMATCH[2]}"
+    fi
+    printf 'header = "%s"\n' "$(cfg_escape "$h")"
+  done < <(printf '%s\n' "$raw" | tr ',' '\n')
+}
+
+# post_json <body> [timeout]: POST to the OTLP logs endpoint; 0 on 2xx.
+post_json() {
+  local body="$1" t="${2:-$POST_TIMEOUT}" cfg code
+  if [ -z "${AGENT_RUNS_OTLP_LOGS_ENDPOINT:-}" ]; then
+    warn "AGENT_RUNS_OTLP_LOGS_ENDPOINT not set; marker not sent"
+    return 1
+  fi
+  cfg=$(mktemp) || return 1
+  CFG_TMP="$cfg"
+  { echo 'header = "Content-Type: application/json"'; header_lines "${AGENT_RUNS_OTLP_HEADERS:-}"; } > "$cfg"
+  code=$(printf '%s' "$body" | curl -sS -o /dev/null -w '%{http_code}' --max-time "$t" \
+    -X POST -K "$cfg" --data-binary @- "$AGENT_RUNS_OTLP_LOGS_ENDPOINT" 2>/dev/null) || code=000
+  rm -f "$cfg"
+  case "$code" in
+    2??) return 0 ;;
+  esac
+  warn "marker POST failed (http $code)"
+  return 1
+}
+
+HTTP_BODY=""
+# http_get <url>: GET with the reader token; body in HTTP_BODY; 0 on 2xx.
+http_get() {
+  local url="$1" cfg out code
+  HTTP_BODY=""
+  cfg=$(mktemp) || return 1
+  CFG_TMP="$cfg"
+  printf 'header = "Authorization: Bearer %s"\n' "$(cfg_escape "${AGENT_RUNS_TOKEN:-}")" > "$cfg"
+  out=$(curl -sS --max-time "$READ_TIMEOUT" -w '\n%{http_code}' -K "$cfg" "$url" 2>/dev/null) || out=$'\n000'
+  rm -f "$cfg"
+  code="${out##*$'\n'}"
+  HTTP_BODY="${out%$'\n'*}"
+  case "$code" in
+    2??) return 0 ;;
+  esac
+  warn "store read failed (http $code)"
+  return 1
+}
+
+# fetch_workitems <from> <to> [item]: GET /workitems into HTTP_BODY, valid JSON
+# with a work_items array, or return 1 (fail open: callers print "unknown").
+fetch_workitems() {
+  local from="$1" to="$2" item="${3:-}" url
+  if [ -z "${AGENT_RUNS_READER_URL:-}" ] || [ -z "${AGENT_RUNS_TOKEN:-}" ]; then
+    warn "AGENT_RUNS_READER_URL / AGENT_RUNS_TOKEN not set; cannot read the store"
+    return 1
+  fi
+  url="${AGENT_RUNS_READER_URL%/}/workitems?from=$from&to=$to"
+  if [ -n "$item" ]; then url="$url&work_item=$(jq -rn --arg s "$item" '$s|@uri')"; fi
+  http_get "$url" || return 1
+  if ! printf '%s' "$HTTP_BODY" | jq -e '.work_items | type == "array"' >/dev/null 2>&1; then
+    warn "store answered with unexpected JSON"
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Markers
+# ---------------------------------------------------------------------------
+
+# marker_body <session_id> <item|""> [request_ids]
+marker_body() {
+  jq -cn --arg sid "$1" --arg item "$2" --arg ids "${3:-}" --arg ts "$(now_iso)" --arg nano "$(now_nano)" '
+    [ {key:"event.name", value:{stringValue:"work_item"}},
+      {key:"session.id", value:{stringValue:$sid}},
+      {key:"work_item", value:{stringValue:$item}},
+      {key:"event.timestamp", value:{stringValue:$ts}} ]
+    + (if $ids != "" then [{key:"request_ids", value:{stringValue:$ids}}] else [] end)
+    | {resourceLogs:[{scopeLogs:[{scope:{name:"alfred-workitem"},
+        logRecords:[{timeUnixNano:$nano, body:{stringValue:"work_item"}, attributes:.}]}]}]}'
+}
+
+send_marker() { post_json "$(marker_body "$1" "$2" "${3:-}")"; }
+
+# send_overrides <session_id> <item> <request_id>...: records of <= CHUNK ids.
+send_overrides() {
+  local sid="$1" item="$2" i rc=0 joined
+  shift 2
+  local ids=("$@")
+  for ((i = 0; i < ${#ids[@]}; i += CHUNK)); do
+    joined=$(IFS=,; printf '%s' "${ids[*]:i:CHUNK}")
+    send_marker "$sid" "$item" "$joined" || rc=1
+  done
+  return $rc
+}
+
+# transcript_request_ids <file>: distinct requestIds of assistant lines, in order.
+transcript_request_ids() {
+  jq -r 'select(.type == "assistant") | .requestId // empty' "$1" 2>/dev/null | awk '!seen[$0]++'
+}
+
+# transcript_brief <file>: text of the first user message (the brief).
+transcript_brief() {
+  jq -rn 'first(inputs | select(.type == "user") | .message.content
+    | if type == "string" then . else ([.[]? | select(.type == "text") | .text] | join("\n")) end)' "$1" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Estimate
+# ---------------------------------------------------------------------------
+
+# issue_estimate <item>: the `Estimate-tokens:` line of the item body, as given.
+issue_estimate() {
+  local item="$1" repo="${1%%#*}" num="${1##*#}" body
+  command -v gh >/dev/null 2>&1 || return 0
+  body=$(timeout "$GH_TIMEOUT" gh issue view "$num" -R "$repo" --json body --jq .body 2>/dev/null) || return 0
+  printf '%s\n' "$body" | tr -d '\r' | sed -n 's/^[[:space:]]*Estimate-tokens:[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p' | head -1
+}
+
+# estimate_for <item> <explicit|"">: explicit, else the mark file, else the issue.
+estimate_for() {
+  local item="$1" explicit="$2" sid="${CLAUDE_CODE_SESSION_ID:-}" mf est=""
+  if [ -n "$explicit" ]; then printf '%s' "$explicit"; return; fi
+  if [ -n "$sid" ] && valid_sid "$sid"; then
+    mf=$(mark_file "$sid")
+    if [ -r "$mf" ]; then
+      est=$(jq -r --arg i "$item" 'select(.item == $i) | .estimate // empty' "$mf" 2>/dev/null)
+    fi
+  fi
+  if [ -z "$est" ]; then est=$(issue_estimate "$item"); fi
+  printf '%s' "$est"
+}
+
+# estimate_number <text>: a plain count for the percentage (12M -> 12000000).
+# Only the magnitude suffix is read; the text itself is shown as given.
+estimate_number() {
+  printf '%s' "$1" | awk '{
+    if (match($0, /^[0-9][0-9]*(\.[0-9]+)?/)) {
+      n = substr($0, RSTART, RLENGTH) + 0; rest = substr($0, RLENGTH + 1)
+      m = 1
+      if (rest ~ /^[kK]/) m = 1000
+      else if (rest ~ /^[mM]/) m = 1000000
+      else if (rest ~ /^[bBgG]/) m = 1000000000
+      printf "%.0f", n * m
+    }
+  }'
+}
+
+# ---------------------------------------------------------------------------
+# Summaries from /workitems (jq)
+# ---------------------------------------------------------------------------
+
+# $SUMMARY_JQ turns a /workitems response + $item into a summary object.
+# Totals come from the store's separate fields; "excl" is without cache reads.
+read -r -d '' SUMMARY_JQ <<'JQ'
+def n: (. // 0) + 0;   # arithmetic canonicalises numbers: 1.0 prints as 1 in every jq version
+def t4: {input:(.input | n), output:(.output | n), cache_read:(.cache_read | n), cache_write:(.cache_write | n)};
+def sum4: reduce .[] as $x ({input:0, output:0, cache_read:0, cache_write:0};
+  .input += $x.input | .output += $x.output | .cache_read += $x.cache_read | .cache_write += $x.cache_write);
+def fin: . + {all: (.input + .output + .cache_read + .cache_write), excl: (.input + .output + .cache_write)};
+def rows: [.[]? | {role: (.role // "?"), model: (.model // "?"), requests: (.requests | n),
+  cost_usd: (.cost_usd | n)} + ((.tokens // {}) | t4 | fin)];
+([.work_items[] | select(.work_item == $item)] | first) as $w
+| if $w == null then {found: false, requests: 0, cost_usd: 0, tokens: ({input:0,output:0,cache_read:0,cache_write:0} | fin),
+    crossed: [], by_role: [], by_model: []}
+  else {found: true,
+    requests: (($w.requests // ([$w.by_role_model[]?.requests // 0] | add // 0)) | n),
+    cost_usd: (($w.cost_usd // ([$w.by_role_model[]?.cost_usd // 0] | add // 0)) | n),
+    tokens: (if $w.tokens then ($w.tokens | t4 | fin) else ([$w.by_role_model[]? | (.tokens // {}) | t4] | sum4 | fin) end),
+    crossed: ($w.by_role_model | rows), by_role: ($w.by_role | rows), by_model: ($w.by_model | rows)} end
+JQ
+
+# session level for the `main` role: lead, hub or alfred, else session.
+session_level() {
+  local aid
+  aid=$(jq -r '.agent_id // empty' "$PWD/.alfred/config.json" 2>/dev/null)
+  case "$aid" in
+    "") echo session ;;
+    hub) echo hub ;;
+    alfred) echo alfred ;;
+    *) echo lead ;;
+  esac
+}
+
+# pct <actual> <estimate-number>: one decimal, or "unknown".
+pct() {
+  if [ -z "$2" ] || [ "$2" = 0 ]; then printf 'unknown'; return; fi
+  awk -v a="$1" -v e="$2" 'BEGIN { printf "%.1f%%", a * 100 / e }'
+}
+
+# Option parsing shared by check/report/line: sets ITEM EST_OPT FROM TO.
+parse_item_opts() {
+  ITEM="" EST_OPT=""
+  FROM=$(date -u -d "$STALE_DAYS days ago" +%F)
+  TO=$(date -u -d tomorrow +%F)   # the reader's `to` may be exclusive
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --estimate) EST_OPT="${2:-}"; shift 2 ;;
+      --from) FROM="${2:-}"; shift 2 ;;
+      --to) TO="${2:-}"; shift 2 ;;
+      -*) echo "alfred-workitem: unknown option $1" >&2; return 2 ;;
+      *) if [ -z "$ITEM" ]; then ITEM="$1"; else echo "alfred-workitem: unexpected argument $1" >&2; return 2; fi; shift ;;
+    esac
+  done
+  if ! valid_item "$ITEM"; then
+    echo "usage: alfred-workitem <check|report|line> <owner>/<repo>#<n> [--estimate <text>] [--from YYYY-MM-DD] [--to YYYY-MM-DD]" >&2
+    return 2
+  fi
+  return 0
+}
+
+# summary_of <item>: fetch + summarise into SUMMARY; 1 when the store is unreadable.
+SUMMARY=""
+summary_of() {
+  SUMMARY=""
+  fetch_workitems "$FROM" "$TO" "$1" || return 1
+  SUMMARY=$(printf '%s' "$HTTP_BODY" | jq -c --arg item "$1" "$SUMMARY_JQ") || return 1
+}
+
+# Deviations of the sessions involved: the current session and every session in
+# the local record. Reads the last fetched response (HTTP_BODY).
+print_deviations() {
+  local sids out
+  sids=$(
+    { [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && echo "${CLAUDE_CODE_SESSION_ID}"
+      jq -r '.session_id' "$DEV_FILE" 2>/dev/null; } | sort -u | jq -R . | jq -sc .
+  )
+  out=$(printf '%s' "$HTTP_BODY" | jq -r --argjson sids "$sids" '
+    .deviations[]? | select(.session_id as $s | $sids | index($s))
+    | "deviation (unmarked time): session \(.session_id) \(.project // "") \(.first // "?")..\(.last // "?"), requests \((.requests // 0) + 0), tokens \((.tokens // {}) | ((.input // 0) + (.output // 0) + (.cache_read // 0) + (.cache_write // 0))) all types, cost_usd \((.cost_usd // 0) + 0)"' 2>/dev/null)
+  if [ -n "$out" ]; then printf '%s\n' "$out"; fi
+}
+
+# summary line text: "<all> all types / <excl> without cache reads"
+fmt_actual() { jq -r '"\(.tokens.all) tokens (all types) / \(.tokens.excl) tokens (without cache reads)"' <<<"$1"; }
+
+fmt_vs_estimate() { # <summary> <estimate text>
+  local n all excl
+  n=$(estimate_number "$2")
+  all=$(jq -r '.tokens.all' <<<"$1")
+  excl=$(jq -r '.tokens.excl' <<<"$1")
+  if [ -z "$2" ]; then printf 'estimate: none (no Estimate-tokens line)'; return; fi
+  printf 'estimate: %s (as given); actual is %s of it with all types, %s without cache reads' \
+    "$2" "$(pct "$all" "$n")" "$(pct "$excl" "$n")"
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+cmd_mark() {
+  local arg="${1:-}" sid="${CLAUDE_CODE_SESSION_ID:-}" item est="" mf tmp
+  if [ "$arg" != none ] && ! valid_item "$arg"; then
+    echo "usage: alfred-workitem mark <owner>/<repo>#<n>|none" >&2
+    exit 2
+  fi
+  if [ -z "$sid" ] || ! valid_sid "$sid"; then
+    warn "CLAUDE_CODE_SESSION_ID not set; nothing marked"
+    exit 0
+  fi
+  ensure_dir || { warn "cannot create $STATE_DIR; nothing marked"; exit 0; }
+  [ "$arg" = none ] && item="" || item="$arg"
+  if [ -n "$item" ]; then est=$(issue_estimate "$item"); fi
+  mf=$(mark_file "$sid")
+  tmp="$mf.tmp.$$"
+  if jq -n --arg item "$item" --arg at "$(now_iso)" --arg est "$est" \
+      '{item: $item, marked_at: $at, estimate: (if $est == "" then null else $est end)}' > "$tmp"; then
+    mv "$tmp" "$mf"
+  else
+    rm -f "$tmp"; warn "cannot write $mf"
+  fi
+  # Cleanup: files not used for STALE_DAYS, never the current session's.
+  find "$STATE_DIR" -maxdepth 1 -type f \( -name '*.json' -o -name '*.prompts' \) -mtime "+$STALE_DAYS" \
+    ! -name "$sid.json" ! -name "$sid.state.json" ! -name "$sid.prompts" -delete 2>/dev/null
+  if send_marker "$sid" "$item"; then :; else warn "the store did not take the marker; mark file kept"; fi
+  if [ -n "$item" ]; then
+    echo "marked session $sid -> $item (estimate: ${est:-none})"
+  else
+    echo "marked session $sid -> none (cleared)"
+  fi
+  exit 0
+}
+
+cmd_guard() {
+  local input cmd aid
+  input=$(cat)
+  aid=$(jq -r '.agent_id // empty' <<<"$input" 2>/dev/null)
+  cmd=$(jq -r '.tool_input.command // empty' <<<"$input" 2>/dev/null)
+  [ -n "$aid" ] || exit 0
+  if printf '%s' "$cmd" | grep -Eq 'alfred-workitem[[:space:]]+mark([[:space:]]|$)'; then
+    jq -cn '{hookSpecificOutput:{hookEventName:"PreToolUse", permissionDecision:"deny",
+      permissionDecisionReason:"alfred-workitem mark sets the work item of the whole session and is for the main session only. A subagent is attributed through the \"Work item: <owner>/<repo>#<n>\" line in its brief."}}'
+  fi
+  exit 0
+}
+
+# --- hook events -----------------------------------------------------------
+
+REMINDER='No work item is marked for this session, so its token usage is recorded as an unmarked deviation. Mark it: alfred-workitem mark <owner>/<repo>#<n> (operational work without its own item goes on the standing item of objective 1; see the alfred-agent README), or alfred-workitem mark none.'
+
+# with_dev_lock <cmd...>: run under an flock on deviations.jsonl (2 s); on a
+# timeout or an unusable lock file, warn and skip: failing open.
+with_dev_lock() {
+  ensure_dir || return 0
+  (
+    flock -w 2 9 || { warn "deviations.jsonl is locked; skipped"; exit 0; }
+    "$@"
+  ) 9>"$DEV_FILE.lock" || true
+}
+
+record_deviation() { with_dev_lock record_deviation_locked "$@"; }
+
+record_deviation_locked() { # <sid> <cwd>
+  local sid="$1" cwd="$2" old first="" notified="" now tmp
+  now=$(now_iso)
+  old=$(jq -c --arg s "$sid" 'select(.session_id == $s)' "$DEV_FILE" 2>/dev/null | head -1)
+  if [ -n "$old" ]; then
+    first=$(jq -r '.first_unmarked_at' <<<"$old")
+    notified=$(jq -r '.notified_at // empty' <<<"$old")
+  fi
+  tmp="$DEV_FILE.tmp.$$"
+  {
+    jq -c --arg s "$sid" 'select(.session_id != $s)' "$DEV_FILE" 2>/dev/null
+    jq -cn --arg s "$sid" --arg first "${first:-$now}" --arg last "$now" --arg cwd "$cwd" --arg n "$notified" \
+      '{session_id: $s, first_unmarked_at: $first, last_seen_at: $last, cwd: $cwd}
+       + (if $n == "" then {} else {notified_at: $n} end)'
+  } | tail -n "$DEV_KEEP" > "$tmp" && mv "$tmp" "$DEV_FILE"
+  rm -f "$tmp"
+}
+
+hook_subagent_stop() { # <input> <sid>
+  local input="$1" sid="$2" aid tpath brief item ids=() sf tmp
+  aid=$(jq -r '.agent_id // empty' <<<"$input")
+  tpath=$(jq -r '.agent_transcript_path // empty' <<<"$input")
+  tpath="${tpath/#\~/$HOME}"
+  [ -n "$aid" ] && [ -r "$tpath" ] || return 0
+  brief=$(transcript_brief "$tpath")
+  item=$(printf '%s' "$brief" | grep -Eo "Work item:[[:space:]]*${ITEM_RE}" | head -1 | sed 's/^Work item:[[:space:]]*//')
+  [ -n "$item" ] || return 0
+  mapfile -t ids < <(transcript_request_ids "$tpath")
+  [ "${#ids[@]}" -gt 0 ] || return 0
+  ensure_dir || return 0
+  # Sent counts live in a per-session state file, marked or not.
+  if send_overrides "$sid" "$item" "${ids[@]}"; then
+    sf=$(state_file "$sid"); tmp="$sf.tmp.$$"
+    if jq -c --arg a "$aid" --arg i "$item" --arg t "$tpath" --argjson n "${#ids[@]}" \
+        '(. // {}) | .agents[$a] = {item: $i, transcript: $t, sent: $n}' "$sf" > "$tmp" 2>/dev/null \
+      || jq -cn --arg a "$aid" --arg i "$item" --arg t "$tpath" --argjson n "${#ids[@]}" \
+        '{agents: {($a): {item: $i, transcript: $t, sent: $n}}}' > "$tmp"; then
+      mv "$tmp" "$sf"
+    fi
+    rm -f "$tmp"
+  fi
+}
+
+# resend_session_mark <sid>: re-send the stored mark. A mark file that does not
+# parse, or holds an item the store would reject, sends nothing: an empty
+# work_item would clear the mark on the store.
+resend_session_mark() {
+  local sid="$1" item
+  if ! item=$(jq -ser '.[0].item | strings' "$(mark_file "$sid")" 2>/dev/null) \
+     || { [ -n "$item" ] && ! valid_item "$item"; }; then
+    warn "mark file for $sid is unreadable; marker not re-sent"
+    return 0
+  fi
+  send_marker "$sid" "$item" || true
+}
+
+# remind_due <sid>: 0 on the 1st, then every REMIND_EVERY-th prompt of an
+# unmarked session; without a usable state dir, every prompt.
+remind_due() {
+  local pf n=0
+  ensure_dir || return 0
+  pf="$STATE_DIR/$1.prompts"
+  [ -r "$pf" ] && n=$(cat "$pf" 2>/dev/null)
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  echo $((n + 1)) > "$pf" 2>/dev/null
+  [ $((n % REMIND_EVERY)) -eq 0 ]
+}
+
+cmd_hook() {
+  local input event sid cwd lock
+  input=$(cat)
+  event=$(jq -r '.hook_event_name // empty' <<<"$input" 2>/dev/null) || exit 0
+  sid=$(jq -r '.session_id // empty' <<<"$input")
+  cwd=$(jq -r '.cwd // empty' <<<"$input")
+  { [ -n "$sid" ] && valid_sid "$sid"; } || exit 0
+  touch_session "$sid"
+  case "$event" in
+    SessionStart)
+      # A resumed session stays attributed from its first request.
+      if [ "$(jq -r '.source // empty' <<<"$input")" = resume ] && [ -r "$(mark_file "$sid")" ]; then
+        resend_session_mark "$sid"
+      fi ;;
+    UserPromptSubmit)
+      # Rides on a prompt that is already happening: forces no extra turn.
+      if [ ! -e "$(mark_file "$sid")" ] && remind_due "$sid"; then
+        jq -cn --arg c "$REMINDER" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit", additionalContext:$c}}'
+      fi ;;
+    Stop)
+      # Detection only: no output, never blocks or continues.
+      if [ ! -e "$(mark_file "$sid")" ]; then record_deviation "$sid" "$cwd"; fi ;;
+    SubagentStop) hook_subagent_stop "$input" "$sid" ;;
+    SessionEnd)
+      # Fully detached, all three streams redirected: the hook runner must not
+      # wait on inherited pipes (its budget is 1.5 s). One run per session at a
+      # time (lock dir; a lock older than the run's time limit is stale), and the
+      # run is time-limited, so none can leak.
+      if ensure_dir; then
+        lock="$STATE_DIR/$sid.check.lock"
+        find "$STATE_DIR" -maxdepth 1 -type d -name "$sid.check.lock" -mmin +1 -exec rmdir {} + 2>/dev/null
+        if mkdir "$lock" 2>/dev/null; then
+          # shellcheck disable=SC2016  # the script text is meant for the inner bash
+          setsid bash -c 'timeout "$3" "$0" check-session "$1"; rmdir "$2"' "$SELF" "$sid" "$lock" "$CHECK_TIMEOUT" \
+            </dev/null >/dev/null 2>&1 &
+        fi
+      fi
+      ;;
+  esac
+  exit 0
+}
+
+# check-session <sid>: the detached SessionEnd run. One [deviation] notice to
+# the hub when the session had unmarked time and it was not reported yet.
+cmd_check_session() {
+  local sid="${1:-}" rec first last notified body amounts="" tmp
+  { [ -n "$sid" ] && valid_sid "$sid"; } || exit 0
+  rec=$(jq -c --arg s "$sid" 'select(.session_id == $s)' "$DEV_FILE" 2>/dev/null | head -1)
+  [ -n "$rec" ] || exit 0
+  first=$(jq -r '.first_unmarked_at' <<<"$rec")
+  last=$(jq -r '.last_seen_at' <<<"$rec")
+  notified=$(jq -r '.notified_at // empty' <<<"$rec")
+  # A resumed session ends many times: report each stretch of unmarked time once.
+  if [ -n "$notified" ] && [[ ! "$notified" < "$last" ]]; then exit 0; fi
+  FROM=$(date -u -d "$STALE_DAYS days ago" +%F); TO=$(date -u -d tomorrow +%F)
+  if fetch_workitems "$FROM" "$TO" ""; then
+    amounts=$(printf '%s' "$HTTP_BODY" | jq -r --arg s "$sid" '
+      [.deviations[]? | select(.session_id == $s)] | first // empty
+      | "Store: requests \((.requests // 0) + 0), tokens \((.tokens // {}) | ((.input // 0) + (.output // 0) + (.cache_read // 0) + (.cache_write // 0))) (all types), cost_usd \((.cost_usd // 0) + 0)."' 2>/dev/null)
+  fi
+  body="Session $sid had no work item mark from $first to $last (project dir: $(jq -r '.cwd' <<<"$rec")). ${amounts:-Store amounts unavailable.} Tracked, nothing was stopped."
+  if timeout "$NOTIFY_TIMEOUT" "$WAKE_BIN" notify hub "[deviation] $sid" "$body" >/dev/null 2>&1; then
+    with_dev_lock mark_notified "$sid" "$last"
+  fi
+  exit 0
+}
+
+mark_notified() { # <sid> <last_seen_at that was reported>
+  local tmp="$DEV_FILE.tmp.$$"
+  jq -c --arg s "$1" --arg l "$2" 'if .session_id == $s then .notified_at = $l else . end' "$DEV_FILE" > "$tmp" \
+    && mv "$tmp" "$DEV_FILE"
+  rm -f "$tmp"
+}
+
+# resend_new_overrides: before reading, send the request ids a briefed
+# subagent produced since its last send (count tracked per agent).
+resend_new_overrides() {
+  local sid="${CLAUDE_CODE_SESSION_ID:-}" sf aid item tpath sent ids tmp n
+  { [ -n "$sid" ] && valid_sid "$sid"; } || return 0
+  sf=$(state_file "$sid")
+  [ -r "$sf" ] || return 0
+  while IFS=$'\t' read -r aid item tpath sent; do
+    [ -r "$tpath" ] || continue
+    mapfile -t ids < <(transcript_request_ids "$tpath")
+    n="${#ids[@]}"
+    [ "$n" -gt "$sent" ] || continue
+    if send_overrides "$sid" "$item" "${ids[@]:sent}"; then
+      tmp="$sf.tmp.$$"
+      jq -c --arg a "$aid" --argjson n "$n" '.agents[$a].sent = $n' "$sf" > "$tmp" && mv "$tmp" "$sf"
+      rm -f "$tmp"
+    fi
+  done < <(jq -r '.agents // {} | to_entries[] | [.key, .value.item, .value.transcript, .value.sent] | @tsv' "$sf" 2>/dev/null)
+}
+
+cmd_check() {
+  local est s
+  # A report never fails: a usage error is a warning too.
+  parse_item_opts "$@" || { warn "usage error; nothing checked"; exit 0; }
+  resend_new_overrides
+  est=$(estimate_for "$ITEM" "$EST_OPT")
+  if ! summary_of "$ITEM"; then
+    echo "check $ITEM: actual unknown (store unreachable or not configured); ${est:+estimate: $est (as given)}"
+    exit 0
+  fi
+  s="$SUMMARY"
+  echo "check $ITEM ($FROM..$TO, from the agent-run store; a report, nothing is stopped)"
+  if [ "$(jq -r '.found' <<<"$s")" != true ]; then echo "no usage recorded for $ITEM in this range"; fi
+  echo "actual: $(fmt_actual "$s")"
+  jq -r '.tokens | "by type: input \(.input), output \(.output), cache_read \(.cache_read), cache_write \(.cache_write)"' <<<"$s"
+  fmt_vs_estimate "$s" "$est"; echo
+  echo "note: this is the item total; per-role overruns are not checked"
+  print_deviations
+  exit 0
+}
+
+cmd_line() {
+  local est s
+  parse_item_opts "$@" || exit "$?"
+  est=$(estimate_for "$ITEM" "$EST_OPT")
+  if ! summary_of "$ITEM"; then
+    echo "$ITEM: actual unknown (store unreachable or not configured); estimate: ${est:-none}"
+    exit 0
+  fi
+  s="$SUMMARY"
+  jq -r --arg item "$ITEM" --arg est "$est" --arg pa "$(pct "$(jq -r '.tokens.all' <<<"$s")" "$(estimate_number "$est")")" \
+    --arg pe "$(pct "$(jq -r '.tokens.excl' <<<"$s")" "$(estimate_number "$est")")" '
+    "\($item): actual \(.tokens.all) tokens all types (\(.tokens.excl) without cache reads; input \(.tokens.input), output \(.tokens.output), cache_read \(.tokens.cache_read), cache_write \(.tokens.cache_write)) vs estimate \(if $est == "" then "none" else $est end): \($pa) of it with all types, \($pe) without cache reads"' <<<"$s"
+  exit 0
+}
+
+cmd_report() {
+  local est s level
+  parse_item_opts "$@" || exit "$?"
+  resend_new_overrides
+  est=$(estimate_for "$ITEM" "$EST_OPT")
+  if ! summary_of "$ITEM"; then
+    echo "### Token usage for $ITEM"
+    echo
+    echo "Actual: unknown (store unreachable or not configured). Estimate: ${est:-none}${est:+ (as given)}."
+    exit 0
+  fi
+  s="$SUMMARY"
+  level=$(session_level)
+  echo "### Token usage for $ITEM"
+  echo
+  echo "From the agent-run store, $FROM to $TO. All token types are shown separately; totals are given with and without cache reads."
+  echo
+  if [ "$(jq -r '.found' <<<"$s")" != true ]; then
+    echo "No usage recorded for $ITEM in this range."
+  elif [ "$(jq -r '.crossed | length' <<<"$s")" -gt 0 ]; then
+    echo "| Role | Model | Requests | Input | Output | Cache read | Cache write | Total | Total without cache reads | Cost USD |"
+    echo "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+    jq -r --arg level "$level" '.crossed[]
+      | "| \(if .role == "main" then "main (\($level))" else .role end) | \(.model) | \(.requests) | \(.input) | \(.output) | \(.cache_read) | \(.cache_write) | \(.all) | \(.excl) | \(.cost_usd) |"' <<<"$s"
+  else
+    echo "The store gave only separate by-role and by-model breakdowns; they cannot be crossed into role x model rows."
+    echo
+    jq -r --arg level "$level" '.by_role[] | "| \(if .role == "main" then "main (\($level))" else .role end) | \(.requests) | \(.input) | \(.output) | \(.cache_read) | \(.cache_write) | \(.all) | \(.excl) | \(.cost_usd) |"' <<<"$s" \
+      | { echo "| Role | Requests | Input | Output | Cache read | Cache write | Total | Total without cache reads | Cost USD |"; echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"; cat; }
+    echo
+    jq -r '.by_model[] | "| \(.model) | \(.requests) | \(.input) | \(.output) | \(.cache_read) | \(.cache_write) | \(.all) | \(.excl) | \(.cost_usd) |"' <<<"$s" \
+      | { echo "| Model | Requests | Input | Output | Cache read | Cache write | Total | Total without cache reads | Cost USD |"; echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"; cat; }
+  fi
+  echo
+  jq -r '"Totals: input \(.tokens.input), output \(.tokens.output), cache_read \(.tokens.cache_read), cache_write \(.tokens.cache_write); **\(.tokens.all)** with cache reads, **\(.tokens.excl)** without cache reads; \(.requests) requests; cost_usd \(.cost_usd)."' <<<"$s"
+  echo
+  echo "Estimate and actual: $(fmt_vs_estimate "$s" "$est")."
+  print_deviations
+  exit 0
+}
+
+cmd_deviations() {
+  local from to local_rows rows
+  FROM=$(date -u -d "$STALE_DAYS days ago" +%F)
+  TO=$(date -u -d tomorrow +%F)
+  from="$FROM" to="$TO"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from) from="${2:-}"; shift 2 ;;
+      --to) to="${2:-}"; shift 2 ;;
+      *) echo "usage: alfred-workitem deviations [--from YYYY-MM-DD] [--to YYYY-MM-DD]" >&2; exit 2 ;;
+    esac
+  done
+  FROM="$from" TO="$to"
+  # Local record: checkable with no network. `to` is inclusive here.
+  local_rows=$(jq -c --arg f "$from" --arg t "$to" \
+    'select((.first_unmarked_at[0:10] >= $f) and (.first_unmarked_at[0:10] <= $t))' "$DEV_FILE" 2>/dev/null)
+  if [ -z "$local_rows" ]; then echo "no unmarked sessions recorded locally between $from and $to"; exit 0; fi
+  if fetch_workitems "$from" "$to" ""; then :; else HTTP_BODY='{"work_items":[],"deviations":[]}'; fi
+  rows=$(printf '%s\n' "$local_rows" | jq -r --argjson store "$HTTP_BODY" '
+    . as $r | ($store.deviations // [] | map(select(.session_id == $r.session_id)) | first) as $d
+    | "session \($r.session_id)  first \($r.first_unmarked_at)  last \($r.last_seen_at)  "
+      + (if $d == null then "tokens unknown (no store amount)"
+         else "requests \(($d.requests // 0) + 0), tokens \(($d.tokens // {}) | ((.input // 0) + (.output // 0) + (.cache_read // 0) + (.cache_write // 0))) all types, cost_usd \(($d.cost_usd // 0) + 0)" end)')
+  printf '%s\n' "$rows"
+  exit 0
+}
+
+usage() {
+  sed -n '2,/^set -u/p' "$SELF" | sed -e '/^set -u/d' -e 's/^# \{0,1\}//' >&2
+}
+
+main() {
+  local sub="${1:-}"
+  [ $# -gt 0 ] && shift
+  case "$sub" in
+    mark) cmd_mark "$@" ;;
+    guard) cmd_guard ;;
+    hook) cmd_hook ;;
+    check-session) cmd_check_session "$@" ;;
+    check) cmd_check "$@" ;;
+    report) cmd_report "$@" ;;
+    line) cmd_line "$@" ;;
+    deviations) cmd_deviations "$@" ;;
+    --version|version) echo "alfred-workitem $VERSION" ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+main "$@"

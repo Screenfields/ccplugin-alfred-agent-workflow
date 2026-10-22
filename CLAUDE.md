@@ -17,11 +17,14 @@ ccplugin-alfred-agent-workflow/
 │   ├── show-inbox.md        # /alfred-agent:show-inbox
 │   └── show-threads.md      # /alfred-agent:show-threads
 ├── bin/
-│   └── alfred-wake          # Deterministic inbox wake bridge (one-shot background wait)
+│   ├── alfred-wake          # Deterministic inbox wake bridge (one-shot background wait)
+│   └── alfred-workitem      # Work-item marks + token report from the agent-run store (tracked, not gated; fails open)
 ├── hooks/
-│   ├── hooks.json           # SessionStart → owner-communication.sh
+│   ├── hooks.json           # SessionStart → owner-communication.sh; alfred-workitem hook/guard entries
 │   ├── owner-communication.sh  # Emits the rules below as additionalContext
 │   └── owner-communication.md  # Owner-communication rules (timestamp line, local time, links)
+├── tests/
+│   └── alfred-wake.bats, workitem.bats  # bats suites; stubs in tests/stub/, fixtures in tests/fixtures/workitem/
 ├── skills/
 │   └── messaging/
 │       └── SKILL.md         # General messaging context

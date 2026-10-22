@@ -1,0 +1,53 @@
+{
+  "resourceLogs": [
+    {
+      "scopeLogs": [
+        {
+          "scope": {
+            "name": "alfred-workitem"
+          },
+          "logRecords": [
+            {
+              "timeUnixNano": "1792656000000000000",
+              "body": {
+                "stringValue": "work_item"
+              },
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": {
+                    "stringValue": "work_item"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "11111111-1111-4111-8111-111111111111"
+                  }
+                },
+                {
+                  "key": "work_item",
+                  "value": {
+                    "stringValue": "acme/other#9"
+                  }
+                },
+                {
+                  "key": "event.timestamp",
+                  "value": {
+                    "stringValue": "2026-10-22T08:00:00Z"
+                  }
+                },
+                {
+                  "key": "request_ids",
+                  "value": {
+                    "stringValue": "req-1,req-2,req-3"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
