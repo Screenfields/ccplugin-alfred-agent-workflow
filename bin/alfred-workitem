@@ -34,7 +34,9 @@
 # Local state, under ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-workitem/:
 #   <session_id>.json        mark file {item, marked_at, estimate}
 #   <session_id>.state.json  sent-override counts per briefed subagent
-#   deviations.jsonl         one record per session that had unmarked time
+#   <session_id>.prompts     prompt counter that throttles the unmarked reminder
+#   <session_id>.check.lock  dir held while the detached SessionEnd run is live
+#   deviations.jsonl         one record per session that had unmarked time (last 500)
 # Nothing is ever written into a repository.
 set -u
 
@@ -43,13 +45,17 @@ SELF=$(readlink -f "${BASH_SOURCE[0]}")
 WAKE_BIN="${ALFRED_WORKITEM_WAKE:-$(dirname "$SELF")/alfred-wake}"
 STATE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-workitem"
 DEV_FILE="$STATE_DIR/deviations.jsonl"
-ITEM_RE='[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+'
+# The store's own shape: owner [A-Za-z0-9-]+, number without leading zero, never #0.
+ITEM_RE='[A-Za-z0-9-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*'
 CHUNK=500             # request_ids per record; the collector drops arrays
 POST_TIMEOUT=2        # inline markers (mark, SessionStart, SubagentStop)
 READ_TIMEOUT=5
 NOTIFY_TIMEOUT=10
 GH_TIMEOUT=5
 STALE_DAYS=90
+REMIND_EVERY=5        # unmarked reminder: once per this many prompts, per session
+DEV_KEEP=500          # lines of deviations.jsonl kept
+CHECK_TIMEOUT=30      # the detached SessionEnd run
 
 warn() { echo "alfred-workitem: $*" >&2; }
 # The curl config holds secrets: removed on any exit, signals included.
@@ -241,18 +247,19 @@ estimate_number() {
 # $SUMMARY_JQ turns a /workitems response + $item into a summary object.
 # Totals come from the store's separate fields; "excl" is without cache reads.
 read -r -d '' SUMMARY_JQ <<'JQ'
-def t4: {input:(.input // 0), output:(.output // 0), cache_read:(.cache_read // 0), cache_write:(.cache_write // 0)};
+def n: (. // 0) + 0;   # arithmetic canonicalises numbers: 1.0 prints as 1 in every jq version
+def t4: {input:(.input | n), output:(.output | n), cache_read:(.cache_read | n), cache_write:(.cache_write | n)};
 def sum4: reduce .[] as $x ({input:0, output:0, cache_read:0, cache_write:0};
   .input += $x.input | .output += $x.output | .cache_read += $x.cache_read | .cache_write += $x.cache_write);
 def fin: . + {all: (.input + .output + .cache_read + .cache_write), excl: (.input + .output + .cache_write)};
-def rows: [.[]? | {role: (.role // "?"), model: (.model // "?"), requests: (.requests // 0),
-  cost_usd: (.cost_usd // 0)} + ((.tokens // {}) | t4 | fin)];
+def rows: [.[]? | {role: (.role // "?"), model: (.model // "?"), requests: (.requests | n),
+  cost_usd: (.cost_usd | n)} + ((.tokens // {}) | t4 | fin)];
 ([.work_items[] | select(.work_item == $item)] | first) as $w
 | if $w == null then {found: false, requests: 0, cost_usd: 0, tokens: ({input:0,output:0,cache_read:0,cache_write:0} | fin),
     crossed: [], by_role: [], by_model: []}
   else {found: true,
-    requests: ($w.requests // ([$w.by_role_model[]?.requests // 0] | add // 0)),
-    cost_usd: ($w.cost_usd // ([$w.by_role_model[]?.cost_usd // 0] | add // 0)),
+    requests: (($w.requests // ([$w.by_role_model[]?.requests // 0] | add // 0)) | n),
+    cost_usd: (($w.cost_usd // ([$w.by_role_model[]?.cost_usd // 0] | add // 0)) | n),
     tokens: (if $w.tokens then ($w.tokens | t4 | fin) else ([$w.by_role_model[]? | (.tokens // {}) | t4] | sum4 | fin) end),
     crossed: ($w.by_role_model | rows), by_role: ($w.by_role | rows), by_model: ($w.by_model | rows)} end
 JQ
@@ -314,7 +321,7 @@ print_deviations() {
   )
   out=$(printf '%s' "$HTTP_BODY" | jq -r --argjson sids "$sids" '
     .deviations[]? | select(.session_id as $s | $sids | index($s))
-    | "deviation (unmarked time): session \(.session_id) \(.project // "") \(.first // "?")..\(.last // "?"), requests \(.requests // 0), tokens \((.tokens // {}) | ((.input // 0) + (.output // 0) + (.cache_read // 0) + (.cache_write // 0))) all types, cost_usd \(.cost_usd // 0)"' 2>/dev/null)
+    | "deviation (unmarked time): session \(.session_id) \(.project // "") \(.first // "?")..\(.last // "?"), requests \((.requests // 0) + 0), tokens \((.tokens // {}) | ((.input // 0) + (.output // 0) + (.cache_read // 0) + (.cache_write // 0))) all types, cost_usd \((.cost_usd // 0) + 0)"' 2>/dev/null)
   if [ -n "$out" ]; then printf '%s\n' "$out"; fi
 }
 
@@ -357,8 +364,8 @@ cmd_mark() {
     rm -f "$tmp"; warn "cannot write $mf"
   fi
   # Cleanup: files not used for STALE_DAYS, never the current session's.
-  find "$STATE_DIR" -maxdepth 1 -type f -name '*.json' -mtime "+$STALE_DAYS" \
-    ! -name "$sid.json" ! -name "$sid.state.json" -delete 2>/dev/null
+  find "$STATE_DIR" -maxdepth 1 -type f \( -name '*.json' -o -name '*.prompts' \) -mtime "+$STALE_DAYS" \
+    ! -name "$sid.json" ! -name "$sid.state.json" ! -name "$sid.prompts" -delete 2>/dev/null
   if send_marker "$sid" "$item"; then :; else warn "the store did not take the marker; mark file kept"; fi
   if [ -n "$item" ]; then
     echo "marked session $sid -> $item (estimate: ${est:-none})"
@@ -411,7 +418,7 @@ record_deviation_locked() { # <sid> <cwd>
     jq -cn --arg s "$sid" --arg first "${first:-$now}" --arg last "$now" --arg cwd "$cwd" --arg n "$notified" \
       '{session_id: $s, first_unmarked_at: $first, last_seen_at: $last, cwd: $cwd}
        + (if $n == "" then {} else {notified_at: $n} end)'
-  } > "$tmp" && mv "$tmp" "$DEV_FILE"
+  } | tail -n "$DEV_KEEP" > "$tmp" && mv "$tmp" "$DEV_FILE"
   rm -f "$tmp"
 }
 
@@ -440,8 +447,33 @@ hook_subagent_stop() { # <input> <sid>
   fi
 }
 
+# resend_session_mark <sid>: re-send the stored mark. A mark file that does not
+# parse, or holds an item the store would reject, sends nothing: an empty
+# work_item would clear the mark on the store.
+resend_session_mark() {
+  local sid="$1" item
+  if ! item=$(jq -ser '.[0].item | strings' "$(mark_file "$sid")" 2>/dev/null) \
+     || { [ -n "$item" ] && ! valid_item "$item"; }; then
+    warn "mark file for $sid is unreadable; marker not re-sent"
+    return 0
+  fi
+  send_marker "$sid" "$item" || true
+}
+
+# remind_due <sid>: 0 on the 1st, then every REMIND_EVERY-th prompt of an
+# unmarked session; without a usable state dir, every prompt.
+remind_due() {
+  local pf n=0
+  ensure_dir || return 0
+  pf="$STATE_DIR/$1.prompts"
+  [ -r "$pf" ] && n=$(cat "$pf" 2>/dev/null)
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  echo $((n + 1)) > "$pf" 2>/dev/null
+  [ $((n % REMIND_EVERY)) -eq 0 ]
+}
+
 cmd_hook() {
-  local input event sid cwd
+  local input event sid cwd lock
   input=$(cat)
   event=$(jq -r '.hook_event_name // empty' <<<"$input" 2>/dev/null) || exit 0
   sid=$(jq -r '.session_id // empty' <<<"$input")
@@ -452,11 +484,11 @@ cmd_hook() {
     SessionStart)
       # A resumed session stays attributed from its first request.
       if [ "$(jq -r '.source // empty' <<<"$input")" = resume ] && [ -r "$(mark_file "$sid")" ]; then
-        send_marker "$sid" "$(jq -r '.item // ""' "$(mark_file "$sid")")" || true
+        resend_session_mark "$sid"
       fi ;;
     UserPromptSubmit)
       # Rides on a prompt that is already happening: forces no extra turn.
-      if [ ! -e "$(mark_file "$sid")" ]; then
+      if [ ! -e "$(mark_file "$sid")" ] && remind_due "$sid"; then
         jq -cn --arg c "$REMINDER" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit", additionalContext:$c}}'
       fi ;;
     Stop)
@@ -465,8 +497,18 @@ cmd_hook() {
     SubagentStop) hook_subagent_stop "$input" "$sid" ;;
     SessionEnd)
       # Fully detached, all three streams redirected: the hook runner must not
-      # wait on inherited pipes (its budget is 1.5 s).
-      setsid "$SELF" check-session "$sid" </dev/null >/dev/null 2>&1 &
+      # wait on inherited pipes (its budget is 1.5 s). One run per session at a
+      # time (lock dir; a lock older than the run's time limit is stale), and the
+      # run is time-limited, so none can leak.
+      if ensure_dir; then
+        lock="$STATE_DIR/$sid.check.lock"
+        find "$STATE_DIR" -maxdepth 1 -type d -name "$sid.check.lock" -mmin +1 -exec rmdir {} + 2>/dev/null
+        if mkdir "$lock" 2>/dev/null; then
+          # shellcheck disable=SC2016  # the script text is meant for the inner bash
+          setsid bash -c 'timeout "$3" "$0" check-session "$1"; rmdir "$2"' "$SELF" "$sid" "$lock" "$CHECK_TIMEOUT" \
+            </dev/null >/dev/null 2>&1 &
+        fi
+      fi
       ;;
   esac
   exit 0
@@ -488,7 +530,7 @@ cmd_check_session() {
   if fetch_workitems "$FROM" "$TO" ""; then
     amounts=$(printf '%s' "$HTTP_BODY" | jq -r --arg s "$sid" '
       [.deviations[]? | select(.session_id == $s)] | first // empty
-      | "Store: requests \(.requests // 0), tokens \((.tokens // {}) | ((.input // 0) + (.output // 0) + (.cache_read // 0) + (.cache_write // 0))) (all types), cost_usd \(.cost_usd // 0)."' 2>/dev/null)
+      | "Store: requests \((.requests // 0) + 0), tokens \((.tokens // {}) | ((.input // 0) + (.output // 0) + (.cache_read // 0) + (.cache_write // 0))) (all types), cost_usd \((.cost_usd // 0) + 0)."' 2>/dev/null)
   fi
   body="Session $sid had no work item mark from $first to $last (project dir: $(jq -r '.cwd' <<<"$rec")). ${amounts:-Store amounts unavailable.} Tracked, nothing was stopped."
   if timeout "$NOTIFY_TIMEOUT" "$WAKE_BIN" notify hub "[deviation] $sid" "$body" >/dev/null 2>&1; then
@@ -623,7 +665,7 @@ cmd_deviations() {
     . as $r | ($store.deviations // [] | map(select(.session_id == $r.session_id)) | first) as $d
     | "session \($r.session_id)  first \($r.first_unmarked_at)  last \($r.last_seen_at)  "
       + (if $d == null then "tokens unknown (no store amount)"
-         else "requests \($d.requests // 0), tokens \(($d.tokens // {}) | ((.input // 0) + (.output // 0) + (.cache_read // 0) + (.cache_write // 0))) all types, cost_usd \($d.cost_usd // 0)" end)')
+         else "requests \(($d.requests // 0) + 0), tokens \(($d.tokens // {}) | ((.input // 0) + (.output // 0) + (.cache_read // 0) + (.cache_write // 0))) all types, cost_usd \(($d.cost_usd // 0) + 0)" end)')
   printf '%s\n' "$rows"
   exit 0
 }

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
 # Test double for `alfred-wake notify <to> <subject> <body>`: records the call.
+# notify-slow present → hang <content> seconds first (a live detached run)
+[ -f "$STUB_DIR/notify-slow" ] && sleep "$(cat "$STUB_DIR/notify-slow")"
 jq -cn --arg cmd "${1:-}" --arg to "${2:-}" --arg subject "${3:-}" --arg body "${4:-}" \
   '{cmd: $cmd, to: $to, subject: $subject, body: $body}' >> "$STUB_DIR/notify.jsonl"

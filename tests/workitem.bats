@@ -154,6 +154,23 @@ mark_item() { jq -r '.item' "$DIR/sess-main.json"; }
   [ ! -e "$STUB_DIR/posts.jsonl" ]
 }
 
+@test "the item regex is the store's: no leading zero, no #0, owner without _ or ." {
+  for bad in acme/widgets#0 acme/widgets#07 acme/widgets#00 my_org/widgets#7 my.org/widgets#7 acme/widgets#; do
+    run "$WI" mark "$bad"
+    [ "$status" -eq 2 ]
+    run "$WI" line "$bad"
+    [ "$status" -eq 2 ]
+  done
+  [ ! -e "$STUB_DIR/posts.jsonl" ]
+  run "$WI" mark my-org/wid_gets.x#10
+  [ "$status" -eq 0 ]
+  # a subagent brief with a rejected item attributes nothing
+  transcript "$BATS_TEST_TMPDIR/agent.jsonl" "Work item: acme/other#07" 3
+  : > "$STUB_DIR/posts.jsonl"
+  hook_in "$(ev SubagentStop sess-main "$(jq -cn --arg p "$BATS_TEST_TMPDIR/agent.jsonl" '{agent_id: "a1", agent_transcript_path: $p}')")"
+  [ "$(nposts)" -eq 0 ]
+}
+
 # --- request_ids chunking ----------------------------------------------------------
 
 @test "a briefed subagent sends its request ids in records of at most 500" {
@@ -312,6 +329,39 @@ mark_item() { jq -r '.item' "$DIR/sess-main.json"; }
   [[ "$output" == *"| main (hub) | claude-opus-x |"* ]]
 }
 
+# Contract fixture: the store's real /workitems output, copied byte for byte
+# from monitoring's committed fixture (monitoring #52, head 7c34474). If the
+# store's response changes, refresh the file byte for byte from monitoring.
+# Served compact on one line, as on the wire.
+@test "report and line read the store's real /workitems response (contract fixture)" {
+  jq -c . "$FIX/workitems-response.json" > "$STUB_DIR/workitems.json"
+  [ "$(wc -l < "$STUB_DIR/workitems.json")" -eq 1 ]
+  run "$WI" report acme/widgets#7 --estimate 12M
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"warn"* ]]
+  [[ "$output" == *"**1702** with cache reads"* ]]
+  [[ "$output" == *"input 2, output 1500, cache_read 200, cache_write 0"* ]]
+  [[ "$output" == *"2 requests; cost_usd 0.54."* ]]
+  # role x model rows: the builder / main split (main is the session's level)
+  [[ "$output" == *"| builder | claude-"* ]]
+  [[ "$output" == *"| main (session) | claude-"* ]]
+  [ "$(grep -c '^| \(builder\|main (session)\) |' <<<"$output")" -eq 2 ]
+  # the response also holds an "unattributed" row; it never leaks into the item's figures
+  [ "$(jq -r '[.work_items[].work_item] | index("unattributed") != null' "$STUB_DIR/workitems.json")" = true ]
+  [[ "$output" != *"unattributed"* ]]
+  grep -q 'work_item=acme%2Fwidgets%237' "$STUB_DIR/calls.log"
+  # deviations: the two sessions of the response, when they are the involved ones
+  mkdir -p "$DIR"
+  printf '%s\n' '{"session_id":"sess-a"}' '{"session_id":"sess-b"}' > "$DIR/deviations.jsonl"
+  run "$WI" report acme/widgets#7
+  [ "$(grep -c '^deviation (unmarked time)' <<<"$output")" -eq 2 ]
+  [[ "$output" == *"session sess-a acme 2026-10-21T07:59:00Z..2026-10-21T07:59:00Z, requests 1, tokens 106 all types, cost_usd 0.001"* ]]
+  [[ "$output" == *"session sess-b acme"*"tokens 151 all types, cost_usd 0.05"* ]]
+  run "$WI" line acme/widgets#7 --estimate 1702
+  [ "$status" -eq 0 ]
+  [[ "$output" == "acme/widgets#7: actual 1702 tokens all types (1502 without cache reads;"*"100.0% of it with all types"* ]]
+}
+
 @test "report falls back to separate role and model tables when the store cannot cross them" {
   cp "$FIX/workitems-uncrossed.json" "$STUB_DIR/workitems.json"
   run "$WI" report acme/widgets#7 --estimate 12M
@@ -326,6 +376,25 @@ mark_item() { jq -r '.item' "$DIR/sess-main.json"; }
   run "$WI" report acme/widgets#7 --estimate 12M
   [ "$status" -eq 0 ]
   [[ "$output" == *"No usage recorded for acme/widgets#7"* ]]
+}
+
+@test "numbers print normalised: 1.0 as 1, whatever the jq version" {
+  cat > "$STUB_DIR/workitems.json" <<'JSON'
+{"work_items": [{"work_item": "acme/widgets#7", "requests": 2.0, "cost_usd": 2.50,
+  "tokens": {"input": 10.0, "output": 20.0, "cache_read": 0.0, "cache_write": 5.0},
+  "by_role_model": [{"role": "builder", "model": "m", "requests": 2.0, "cost_usd": 3.0,
+    "tokens": {"input": 10.0, "output": 20.0, "cache_read": 0.0, "cache_write": 5.0}}]}],
+ "deviations": [{"session_id": "sess-main", "requests": 1.0, "cost_usd": 4.0,
+    "tokens": {"input": 1.0, "output": 1.0, "cache_read": 0.0, "cache_write": 0.0}}]}
+JSON
+  run "$WI" report acme/widgets#7 --estimate 12M
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"| builder | m | 2 | 10 | 20 | 0 | 5 | 35 | 35 | 3 |"* ]]
+  [[ "$output" == *"; 2 requests; cost_usd 2.5."* ]]
+  [[ "$output" == *"requests 1, tokens 2 all types, cost_usd 4"* ]]
+  cp "$FIX/workitems.json" "$STUB_DIR/workitems.json"
+  run "$WI" report acme/widgets#7
+  [[ "$output" != *"1.0 "* ]]
 }
 
 @test "line: actual against estimate with the percentage, estimate shown as given" {
@@ -478,6 +547,34 @@ mark_item() { jq -r '.item' "$DIR/sess-main.json"; }
   [ "$(nposts)" -eq 0 ]
 }
 
+@test "SessionStart resume with a corrupt mark file sends nothing and warns" {
+  mkdir -p "$DIR"
+  : > "$STUB_DIR/posts.jsonl"
+  for body in '{not json' '{}' '{"item": 7}' '{"item": "acme/widgets#07"}' ''; do
+    printf '%s' "$body" > "$DIR/sess-main.json"
+    run hook_in "$(ev SessionStart sess-main '{"source":"resume"}')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"unreadable"* ]]
+    [ "$(nposts)" -eq 0 ]
+  done
+  # a deliberate "none" still re-sends the empty item
+  "$WI" mark none
+  hook_in "$(ev SessionStart sess-main '{"source":"resume"}')"
+  [ "$(nposts)" -eq 2 ]
+  [ "$(posts | tail -1 | attr work_item)" = "" ]
+}
+
+@test "the unmarked reminder comes on the 1st prompt and then every 5th" {
+  got=""
+  for i in 1 2 3 4 5 6 7; do
+    out=$(hook_in "$(ev UserPromptSubmit sess-main '{"prompt":"hi"}')")
+    if [ -n "$out" ]; then got="$got$i,"; else got="$got-,"; fi
+  done
+  [ "$got" = "1,-,-,-,-,6,-," ]
+  # per session
+  [ -n "$(hook_in "$(ev UserPromptSubmit sess-other '{"prompt":"hi"}')")" ]
+}
+
 # --- SessionEnd -----------------------------------------------------------------------------------
 
 @test "SessionEnd returns at once and the detached run sends one [deviation] notice to the hub" {
@@ -519,6 +616,51 @@ mark_item() { jq -r '.item' "$DIR/sess-main.json"; }
   [[ "$(jq -r '.body' "$STUB_DIR/notify.jsonl")" == *"Store amounts unavailable"* ]]
 }
 
+@test "a second SessionEnd for the same session starts no second detached run" {
+  hook_in "$(ev Stop sess-unmarked)"
+  echo 2 > "$STUB_DIR/notify-slow"
+  hook_in "$(ev SessionEnd sess-unmarked '{"reason":"other"}')"
+  hook_in "$(ev SessionEnd sess-unmarked '{"reason":"other"}')"
+  [ -d "$DIR/sess-unmarked.check.lock" ]
+  # a second run would not see notified_at yet and would notify as well
+  for _ in $(seq 1 60); do [ ! -d "$DIR/sess-unmarked.check.lock" ] && break; sleep 0.1; done
+  [ ! -d "$DIR/sess-unmarked.check.lock" ]
+  [ "$(wc -l < "$STUB_DIR/notify.jsonl")" -eq 1 ]
+  # the lock is released: a later SessionEnd (a resumed session) may run again
+  rm "$STUB_DIR/notify-slow"
+  hook_in "$(ev Stop sess-unmarked)"
+  sleep 1.1
+  hook_in "$(ev Stop sess-unmarked)"
+  hook_in "$(ev SessionEnd sess-unmarked '{"reason":"other"}')"
+  for _ in $(seq 1 50); do [ "$(wc -l < "$STUB_DIR/notify.jsonl")" -eq 2 ] && break; sleep 0.1; done
+  [ "$(wc -l < "$STUB_DIR/notify.jsonl")" -eq 2 ]
+}
+
+@test "a stale SessionEnd lock (older than the run's time limit) is cleared" {
+  mkdir -p "$DIR/sess-unmarked.check.lock"
+  touch -d '5 minutes ago' "$DIR/sess-unmarked.check.lock"
+  hook_in "$(ev Stop sess-unmarked)"
+  hook_in "$(ev SessionEnd sess-unmarked '{"reason":"other"}')"
+  for _ in $(seq 1 50); do [ -s "$STUB_DIR/notify.jsonl" ] && break; sleep 0.1; done
+  [ -s "$STUB_DIR/notify.jsonl" ]
+}
+
+@test "the detached SessionEnd run is time-limited" {
+  grep -q 'timeout "\$3" "\$0" check-session' "$WI"
+  grep -q '^CHECK_TIMEOUT=30 ' "$WI"
+}
+
+@test "deviations.jsonl keeps the last 500 lines, newest included" {
+  mkdir -p "$DIR"
+  for i in $(seq 1 600); do
+    jq -cn --arg s "old-$i" '{session_id: $s, first_unmarked_at: "2026-01-01T00:00:00Z", last_seen_at: "2026-01-01T00:00:00Z", cwd: "/x"}'
+  done > "$DIR/deviations.jsonl"
+  hook_in "$(ev Stop sess-unmarked)"
+  [ "$(wc -l < "$DIR/deviations.jsonl")" -eq 500 ]
+  [ "$(tail -1 "$DIR/deviations.jsonl" | jq -r .session_id)" = "sess-unmarked" ]
+  [ "$(head -1 "$DIR/deviations.jsonl" | jq -r .session_id)" = "old-102" ]
+}
+
 # --- housekeeping -------------------------------------------------------------------------------------
 
 @test "mark removes state not used for 90 days, never the current session's" {
@@ -558,4 +700,6 @@ mark_item() { jq -r '.item' "$DIR/sess-main.json"; }
   jq -e '[.hooks.Stop[].hooks[].command | select(contains("bridge-check.sh"))] | length == 1' "$h"
   # SessionEnd stays inside the hook runner's budget
   jq -e '.hooks.SessionEnd[].hooks[].timeout <= 1.5' "$h"
+  # SubagentStop: one POST is capped at POST_TIMEOUT per chunk of CHUNK ids
+  jq -e '.hooks.SubagentStop[].hooks[].timeout >= 30' "$h"
 }

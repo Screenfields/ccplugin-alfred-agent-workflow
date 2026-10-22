@@ -73,7 +73,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/alfred-workitem\" hook",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       }
