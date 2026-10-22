@@ -1,0 +1,12 @@
+{
+  "defects": [
+    {"id": "d1", "summary": "The document names a --all flag; the script has no --all option (an unknown option exits 2).", "where": "usage line and the --all bullet"},
+    {"id": "d2", "summary": "The document gives the default label as status:ready; the script's default is status:in-progress (the intro sentence also says 'in progress').", "where": "--label bullet"},
+    {"id": "d3", "summary": "The document says the script exits 1 when no open item matched; the script exits 0 when nothing matched and uses 1 only when a comment failed.", "where": "paragraph on limit and exit codes"},
+    {"id": "d4", "summary": "The example exposes internal topology (pod name, node name and internal IP address) in a public repository's README.", "where": "'Typical use' paragraph"}
+  ],
+  "sound": {
+    "where": "--dry-run bullet: 'It still needs gh authentication and network access'",
+    "summary": "Looks wrong for a dry run, but the source reads the issue list with gh before the dry-run branch, so the statement is correct."
+  }
+}

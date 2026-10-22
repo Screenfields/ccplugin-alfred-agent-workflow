@@ -119,3 +119,37 @@ effort_to_field() {
   grep -q '^description:' "$f"
   [ "$(grep -c '^- \*\*' "$f")" -eq 8 ]
 }
+
+@test "each reviewer case has a case.md and a well-formed expected.json" {
+  for r in $REVIEWERS; do
+    [ -s "$ROOT/tests/specialists/$r/case.md" ]
+    e="$ROOT/tests/specialists/$r/expected.json"
+    jq -e '(.defects | length >= 3 and length <= 4)
+      and all(.defects[]; has("id") and has("summary") and has("where"))
+      and (.sound | has("where") and has("summary"))' "$e"
+  done
+}
+
+@test "a case does not hint at its defects" {
+  for r in $REVIEWERS; do
+    ! grep -qiE 'seed|plant|expected defect|sound part|deliberate' "$ROOT/tests/specialists/$r/case.md"
+  done
+}
+
+@test "run.sh builds deny rules in the // absolute form" {
+  run "$ROOT/tests/specialists/run.sh" deny-rules
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Read(//"*"/**)"* ]]
+  [[ "$output" == *"Grep(//"*"/**)"* ]]
+  [[ "$output" == *"Glob(//"*"/**)"* ]]
+  [[ "$output" == *$'\nBash'* || "$output" == Bash* ]]
+  [[ "$output" == *WebFetch* ]]
+  # No rule uses a single slash after the tool name.
+  ! grep -E '^(Read|Grep|Glob)\(/[^/]' <<<"$output"
+}
+
+@test "run.sh builds the plugin copy from git archive without tests/" {
+  grep -q 'git -C "\$REPO" archive HEAD' "$ROOT/tests/specialists/run.sh"
+  grep -q 'rm -rf "\$dir/tests"' "$ROOT/tests/specialists/run.sh"
+  grep -q 'ALFRED_ROLE=worker' "$ROOT/tests/specialists/run.sh"
+}

@@ -1,0 +1,12 @@
+{
+  "defects": [
+    {"id": "d1", "summary": "The note claims hooks.json has no PreToolUse entry, but the source shows a PreToolUse block with the Bash matcher (alfred-workitem guard) already exists.", "where": "Current state"},
+    {"id": "d2", "summary": "On internal failure the hook exits 2, which blocks the call and contradicts the repo convention that hook scripts always exit 0 because exit 2 blocks; a missing jq would block every Bash command.", "where": "Design, internal failure bullet"},
+    {"id": "d3", "summary": "The dismissal of patterns in the thresholds config does not hold: the config already holds string values (waiting-label, ready-state, workable-states).", "where": "Alternatives, first item"},
+    {"id": "d4", "summary": "The expected effect ('safer', 'more consistently') is not measurable: no number, check or observable is named.", "where": "Expected effect"}
+  ],
+  "sound": {
+    "where": "Design, 'Only the Bash tool is covered. Write and Edit input is not scanned.'",
+    "summary": "Looks like a gap, but the work item puts Write and Edit input out of scope, so the design correctly stays inside the bounds."
+  }
+}

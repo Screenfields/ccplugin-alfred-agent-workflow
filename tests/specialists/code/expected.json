@@ -1,0 +1,12 @@
+{
+  "defects": [
+    {"id": "d1", "summary": "With --default, a missing or malformed thresholds file prints the default and exits 0, which breaks criterion 3 (it must still exit 2) and hides a broken config.", "where": "bin/alfred-config, the new if ! jq -e 'type == \"object\"' block"},
+    {"id": "d2", "summary": "The names subcommand was changed to drop object-valued keys, so model-setting-per-role no longer appears; this is behaviour changed beyond the item and breaks criterion 4.", "where": "bin/alfred-config, names) line"},
+    {"id": "d3", "summary": "The test titled 'a missing thresholds file still exits 2 with --default' never passes --default, so it passes without testing the change and leaves criterion 3 unverified (it would not catch d1).", "where": "tests/thresholds.bats, last new test"},
+    {"id": "d4", "summary": "The README section is not updated: it does not describe --default, so criterion 5 is not met.", "where": "README.md, Thresholds section (not in the diff)"}
+  ],
+  "sound": {
+    "where": "bin/alfred-config, get) branch: has($n) test followed by .[$n] instead of '// $default'",
+    "summary": "Looks verbose, but is correct: jq's // operator would replace a false value with the default, and the has($n) test keeps false intact, as the false-value test shows."
+  }
+}
