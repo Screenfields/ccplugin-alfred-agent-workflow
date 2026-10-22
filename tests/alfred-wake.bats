@@ -521,8 +521,8 @@ EOF
   until_true 30 test -s "$STUB_DIR/keys"
   sleep 1.5
   grep -q 'substrate wake' "$STUB_DIR/keys"
-  ! grep -q 'BSpace' "$STUB_DIR/keys"
-  ! grep -q ' Enter$' "$STUB_DIR/keys"
+  if grep -q 'BSpace' "$STUB_DIR/keys"; then return 1; fi
+  if grep -q ' Enter$' "$STUB_DIR/keys"; then return 1; fi
   [ "$(wc -l < "$STUB_DIR/keys")" -eq 1 ]
 }
 
@@ -640,7 +640,7 @@ line 2" ]
   # One "- DNN <title>: <rule>" line per doctrine file, none with an empty title or rule.
   n_files=$(ls "$BATS_TEST_DIRNAME"/../doctrines/[0-9][0-9]-*.md | wc -l)
   [ "$(printf '%s\n' "$ctx" | grep -cE '^- D[0-9]{2} [^:]+: .+')" -eq "$n_files" ]
-  ! printf '%s\n' "$ctx" | grep -qE '^- D[0-9]{2} :'
+  if printf '%s\n' "$ctx" | grep -qE '^- D[0-9]{2} :'; then return 1; fi
   # Hook strings are capped at 10,000 characters; keep headroom.
   [ "${#ctx}" -lt 9500 ]
 }

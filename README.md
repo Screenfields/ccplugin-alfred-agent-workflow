@@ -531,15 +531,15 @@ reviewer, then the fix to the same pair) is the routed rule `work-and-review-in-
 | Specialist | Paired reviewer | Tools | Model, effort |
 |---|---|---|---|
 | `analyst` | `readiness-reviewer` | read-only, edits the item body in the brief | sonnet, high |
-| `readiness-reviewer` | | read-only | sonnet, high |
-| `design-reviewer` | | read-only | sonnet, high |
+| `readiness-reviewer` | `analyst` | read-only | sonnet, high |
+| `design-reviewer` | the lead or Alfred, who keep design | read-only | sonnet, high |
 | `builder` | `code-reviewer` (code), `document-reviewer` (docs only) | read and write | sonnet, medium |
-| `code-reviewer` | | read-only | sonnet, high |
+| `code-reviewer` | `builder` | read-only | sonnet, high |
 | `technical-writer` | `document-reviewer` | read and write | sonnet, medium |
-| `document-reviewer` | | read-only | sonnet, high |
-| `acceptance-reviewer` | | read-only | sonnet, high |
-| `incident-reviewer` | | read-only | opus, max |
-| `investigator` | none | `Read, Grep, Glob, WebFetch` | haiku, low |
+| `document-reviewer` | `technical-writer`, or the session that wrote the document | read-only | sonnet, high |
+| `acceptance-reviewer` | the lead, who claims done | read-only | sonnet, high |
+| `incident-reviewer` | the hub, who chooses the mitigation | read-only | opus, max |
+| `investigator` | none | `Read, Grep, Glob, WebFetch`, read-only Metis tools | haiku, low |
 
 `model` and `effort` follow `model-setting-per-role` in `config/thresholds.json`
 (`light`/`medium`/`strong` are `haiku`/`sonnet`/`opus`; effort `highest` is `max`). A role whose
@@ -559,10 +559,17 @@ claude -p --agent alfred-agent:code-reviewer "Review PR 12 against issue 9 ..."
 A subagent receives its definition, the `all` and `worker` rules (SubagentStart) and its brief.
 Nothing for leads.
 
+The investigator reads Metis through the read-only tools in its `tools:` list
+(`mcp__metis__query`, `search_notes`, `read_note`, `get_dependants`, `get_provenance`,
+`get_vault_profile`, `list_zone`); GitHub records come in through the lead's brief. Known
+coupling: the allowlist names assume a project `.mcp.json` server key `metis`. A plugin-shipped
+Metis server would be named `mcp__plugin_<plugin>_metis__*` and would match nothing; there are
+no alias names. Where no Metis tool is available the investigator reports "Metis unavailable".
+
 ### Read-only by instruction
 
 Only the investigator is read-only by tool list: it has no `Bash`, `Edit`, `Write` or
-`NotebookEdit`, and a `tools:` allowlist also leaves out MCP tools. The analyst and the
+`NotebookEdit`, and a `tools:` allowlist leaves out every MCP tool it does not name. The analyst and the
 reviewers keep `Bash` because they need `gh`, `git log` and the test runner to check claims, so
 they are read-only by instruction: the definition says not to change files, branches, issues or
 other state, and nothing in the tool list stops it. The analyst may edit the body of the item named in the
@@ -590,7 +597,7 @@ tests/specialists/run.sh all                      # all six reviewers, two runs 
 a fresh temp directory, builds the plugin from `git archive HEAD` without `tests/`, sets
 `ALFRED_ROLE=worker`, and disallows `Bash`, `WebFetch` and Read, Grep and Glob on the checkout
 (`Read(//abs/path/**)`: an absolute path in a rule needs the double slash, a single slash fails
-open). Outputs go to `tests/specialists/results/<role>-run<N>.md`, with usage and the session id
+open). Outputs go to `tests/specialists/results/<role>-reviewer-run<N>.md`, with usage and the session id
 in the matching `.json`. The runner only collects; the starting session compares each output with
 `expected.json` and records found or missed per defect and run. Run it from a commit that includes the
 definitions: the plugin copy is built from `HEAD`.

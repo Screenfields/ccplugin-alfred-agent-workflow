@@ -26,7 +26,6 @@ Review the work item below for the done transition. The lead has posted the clos
    ```
    $ alfred-wake status
    running pid=48213
-   state-dir: /home/dev-agent/.alfred/wake/cc-tools
    version: 2.24.0
    ```
 3. Covered by the new bats test `status exits 1 and prints not running when no bridge runs`.

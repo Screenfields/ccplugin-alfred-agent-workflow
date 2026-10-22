@@ -18,6 +18,6 @@ effort: high
 
 **Output adds.** The item's new text, the open questions with options and a recommendation, the split proposal if any.
 
-Read-only by instruction, except the body of the work item named in the brief, which you edit with `gh issue edit`: never change other files, branches, issues or state.
+Read-only by instruction, except the body of the work item named in the brief: never change other files, branches, issues or state.
 
 **Pairs with.** The readiness reviewer checks your output at the ready transition.

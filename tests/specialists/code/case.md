@@ -124,7 +124,7 @@ diff --git a/tests/thresholds.bats b/tests/thresholds.bats
 
 `overrun-pct`, `wip-limit`, `worker-limit`, `failed-review-max`, `recovery-inform-minutes`, `unread-flag-minutes`, `inactive-flag-days`, `several-leads-min`, `model-setting-per-role` (an object), `waiting-label`, `ready-state`, `workable-states` (an array), `loop-check-enabled`, `loop-check-timeout-seconds`, `loop-check-deadline-seconds`, `chase-interval-minutes`, `chase-max-tries`, `loop-check-max-blocks-per-hour`.
 
-## Repo file: README.md, section "Thresholds" (on the branch, not touched by the diff)
+## Repo file: README.md, section "Thresholds" (as on the branch)
 
 > All thresholds live in one file and are read by name, so no rule or skill text carries a number: `alfred-config get wip-limit`. An unknown name, or a missing or malformed file, exits 2. `alfred-config names` lists the keys.
 

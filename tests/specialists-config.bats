@@ -70,7 +70,11 @@ effort_to_field() {
   for r in $ROLES; do
     key=$(config_role "$r")
     tier=$(jq -r --arg k "$key" '."model-setting-per-role"[$k].tier' "$CFG")
-    if [ "$tier" = default ]; then ! grep -q '^model: ' "$AGENTS/$r.md"; else grep -q '^model: ' "$AGENTS/$r.md"; fi
+    if [ "$tier" = default ]; then
+      if grep -q '^model: ' "$AGENTS/$r.md"; then echo "model line in $r"; return 1; fi
+    else
+      grep -q '^model: ' "$AGENTS/$r.md"
+    fi
   done
 }
 
@@ -85,12 +89,29 @@ effort_to_field() {
   done
 }
 
-@test "the investigator has no Bash, Edit, Write or NotebookEdit (AC 3)" {
+@test "the investigator has no Bash or write tool, and only read-only Metis tools (AC 3)" {
   tools=$(fm investigator tools)
-  [ "$tools" = "Read, Grep, Glob, WebFetch" ]
+  allowed="mcp__metis__query mcp__metis__search_notes mcp__metis__read_note mcp__metis__get_dependants mcp__metis__get_provenance mcp__metis__get_vault_profile mcp__metis__list_zone"
   for t in Bash Edit Write NotebookEdit; do
     [[ ", $tools," != *", $t,"* ]]
   done
+  for w in capture_note lease_staged release_lease quarantine_staged release_quarantine withhold_staged purge_quarantine list_inbox list_staged list_quarantine read_quarantine; do
+    if [[ "$tools" == *"$w"* ]]; then echo "writer or queue tool $w"; return 1; fi
+  done
+  IFS=',' read -ra entries <<<"$tools"
+  for e in "${entries[@]}"; do
+    e=${e# }
+    case "$e" in
+      Read | Grep | Glob | WebFetch) ;;
+      mcp__*) [[ " $allowed " == *" $e "* ]] || { echo "mcp tool not allowed: $e"; return 1; } ;;
+      *) echo "unexpected tool: $e"; return 1 ;;
+    esac
+  done
+  for m in $allowed; do [[ "$tools" == *"$m"* ]]; done
+}
+
+@test "the investigator body says what to do without Metis" {
+  grep -q 'Metis unavailable' "$AGENTS/investigator.md"
 }
 
 @test "the investigator body does not claim to be read-only by instruction (its limit is the tool list)" {
@@ -132,7 +153,10 @@ effort_to_field() {
 
 @test "a case does not hint at its defects" {
   for r in $REVIEWERS; do
-    ! grep -qiE 'seed|plant|expected defect|sound part|deliberate' "$ROOT/tests/specialists/$r/case.md"
+    if grep -qiE 'seed|plant|expected defect|sound part|deliberate' "$ROOT/tests/specialists/$r/case.md"; then
+      echo "hint in $r"
+      return 1
+    fi
   done
 }
 
@@ -146,6 +170,49 @@ effort_to_field() {
   [[ "$output" == *WebFetch* ]]
   # No rule uses a single slash after the tool name.
   ! grep -E '^(Read|Grep|Glob)\(/[^/]' <<<"$output"
+}
+
+# A stub claude: STUB_MODE=ok|error|fail|empty.
+make_stub() {
+  STUB="$BATS_TEST_TMPDIR/claude-stub"
+  cat > "$STUB" <<'STUBEOF'
+#!/usr/bin/env bash
+cat >/dev/null
+case "$STUB_MODE" in
+  ok) echo '{"result":"found things","is_error":false,"session_id":"s1","num_turns":1,"usage":{}}' ;;
+  error) echo '{"result":"API Error","is_error":true,"session_id":"s1"}' ;;
+  empty) echo '{"result":"","is_error":false,"session_id":"s1"}' ;;
+  fail) exit 124 ;;
+esac
+STUBEOF
+  chmod +x "$STUB"
+}
+
+@test "run.sh: a run that fails, errors or returns nothing is reported FAILED and leaves no result files" {
+  make_stub
+  for mode in error empty fail; do
+    run env CLAUDE_BIN="$STUB" STUB_MODE=$mode "$ROOT/tests/specialists/run.sh" readiness --runs 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"FAILED readiness run 1"* ]]
+    [ ! -e "$ROOT/tests/specialists/results/readiness-reviewer-run1.md" ]
+    [ ! -e "$ROOT/tests/specialists/results/readiness-reviewer-run1.json" ]
+  done
+}
+
+@test "run.sh: a good run writes the result files and exits 0" {
+  make_stub
+  run env CLAUDE_BIN="$STUB" STUB_MODE=ok "$ROOT/tests/specialists/run.sh" readiness --runs 1
+  [ "$status" -eq 0 ]
+  [ "$(cat "$ROOT/tests/specialists/results/readiness-reviewer-run1.md")" = "found things" ]
+  [ "$(jq -r .session_id "$ROOT/tests/specialists/results/readiness-reviewer-run1.json")" = s1 ]
+  rm -f "$ROOT"/tests/specialists/results/readiness-reviewer-run1.*
+}
+
+@test "run.sh: all keeps going after a failure and exits non-zero at the end" {
+  make_stub
+  run env CLAUDE_BIN="$STUB" STUB_MODE=error "$ROOT/tests/specialists/run.sh" all --runs 1
+  [ "$status" -ne 0 ]
+  for r in readiness design code document acceptance incident; do [[ "$output" == *"FAILED $r run 1"* ]]; done
 }
 
 @test "run.sh builds the plugin copy from git archive without tests/" {

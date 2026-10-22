@@ -24,22 +24,25 @@ The latency began with release v1.8.2, which introduced an inefficient query pat
 1. Roll back the control-channel service to v1.8.1 with `kubectl rollout undo`, using the `Recreate` strategy so that no two versions run at once.
 2. Watch the dashboards for a while and close the incident if latency looks better.
 
-## Critical-change checklist (as supplied with the brief)
+## Critical-change checklist (test fixture, as supplied with the brief)
 
 - What else does the change restart, scale or disable?
 - Do running agent sessions need a drain first? (doctrine 15)
 - What is the way back if the change makes it worse?
 - What signal shows the change worked, and by when?
 
-## Doctrine 15, "What counts as a session-disrupting op" (verbatim)
+## Doctrine 15, section "What counts as a session-disrupting op" (verbatim copy of doctrines/15-drain-before-disrupt.md)
 
-- Pod restart of a pod containing an active Claude Code session (devbox, watcher, control-channel)
-- `kubectl delete pod` on the above
-- `Recreate` deployment strategy applied to the above
-- GitOps changes that trigger any of the above (manifest edits in alfred-projects-gitops/alfred-platform-gitops touching a devbox or hub pod)
-- Manual `tmux kill-session` on a session another agent uses
-
-Does NOT count:
-
-- Restarting non-agent infrastructure pods (databases, controllers, operators)
-- Routine `RollingUpdate` deploys (one pod replaced at a time; sessions on the surviving replicas continue)
+> ## What counts as a "session-disrupting op"
+>
+> - Pod restart of a pod containing an active Claude Code session (devbox, watcher, control-channel)
+> - `kubectl delete pod` on the above
+> - `Recreate` deployment strategy applied to the above
+> - GitOps changes that trigger any of the above (manifest edits in alfred-projects-gitops/alfred-platform-gitops touching a devbox or hub pod)
+> - Manual `tmux kill-session` on a session another agent uses
+>
+> Does NOT count:
+>
+> - Restarting non-agent infrastructure pods (databases, controllers, operators)
+> - Routine `RollingUpdate` deploys (one pod replaced at a time; sessions on the surviving replicas continue)
+> - Auto-flow-driven restarts (Image Updater triggering ArgoCD sync → new deployment) — covered by doctrine 14's escalation-timer model, not this gated model

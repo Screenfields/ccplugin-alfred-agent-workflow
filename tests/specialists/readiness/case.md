@@ -52,7 +52,7 @@ The lead gets a list of branches that have had no commit for a long time.
 
 Not decided yet.
 
-## Source: objectives register (excerpt)
+## Source: objectives register (test fixture, complete for this case)
 
 | ID | Objective | Status |
 |---|---|---|
@@ -61,7 +61,7 @@ Not decided yet.
 | O3 | Every agent session starts with the rules it needs | approved |
 | O4 | Spend is tracked per work item | approved |
 
-## Source: item template (fixed headings, AP-ADR0025)
+## Source: item template (test fixture)
 
 Objective; Benefit and who notices it; If nothing is done; Estimate (tokens per role and model tier, with derived parts and the reason for the class); Success state; Acceptance criteria (each testable by a named check); Bounds (in scope, out of scope, blocked by); Test structure (runner, style, file).
 
