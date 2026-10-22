@@ -198,6 +198,7 @@ Only these shapes are ever printed to stdout. Anything else there is a bug.
 | `WAKE am unread=<n> from=<a,b> cursor-reset` | The server no longer knew the stored cursor: it was reseated without replaying history; `n` is what is unread now |
 | `WAKE am unread=<n> from=<a,b> pending-at-start` | `wait` only: the inbox already had unread mail when the cursors were first seeded |
 | `WAKE buzz <label> new=<n> from=<…> last=<HH:MM TZ>` | New non-self posts in that Buzz channel |
+| `… no-mark` (suffix on any `WAKE am`/`WAKE buzz` line) | The current session has no work item mark: run `alfred-workitem mark <owner>/<repo>#<n>` (see [Tokens per work item](#tokens-per-work-item-binalfred-workitem)) |
 | `WAKE-INIT …` | Legacy `run` only, first ever run: cursors seeded, history deliberately not replayed |
 | `WAKE-ERROR <source>: <reason>` | A source failed 5 consecutive passes (repeats at most hourly) |
 | `WAKE-RECOVERED <source>` | A previously-failing source succeeded again |
@@ -344,6 +345,43 @@ runs `alfred-wake status` when a turn ends. That is a pid check, with no network
 The hook only acts on Alfred devboxes (marker: the image's `/usr/local/lib/alfred/start-helpers.sh`),
 in projects with `.alfred/config.json` (an `agent_id`). The hub and workstations run other bridges
 and are left alone. `ALFRED_WAKE_STOP_CHECK=1` forces the check on; `=0` switches it off.
+
+## Tokens per work item (`bin/alfred-workitem`)
+
+Every action links to a work item (AP-ADR0017). The central agent-run store counts the tokens;
+`bin/alfred-workitem` (bash, curl and jq, no model call) tells the store which item a session works
+on and reads the totals back. It is **tracked, not gated**: nothing here stops or blocks work, and
+nothing notifies on an overrun.
+
+```bash
+alfred-workitem mark <owner>/<repo>#<n>   # mark this session ($CLAUDE_CODE_SESSION_ID); `mark none` clears it
+alfred-workitem check <item> [--estimate <text>] [--from D] [--to D]   # report: actual against estimate, always exit 0
+alfred-workitem report <item>             # markdown table for the closing comment, one row per role x model
+alfred-workitem line <item>               # one line for the review record
+alfred-workitem deviations                # unmarked sessions: local record, plus the store's amounts
+```
+
+- **All token types, no unit.** Input, output, cache_read and cache_write are shown separately, with
+  totals with and without cache reads. The `Estimate-tokens:` line of the item body is read once at
+  `mark` and shown exactly as written (no unit conversion); the percentage is computed against the
+  number and its `k`/`M` suffix, for both totals.
+- **Subagents.** Brief a subagent with a `Work item: <owner>/<repo>#<n>` line and its requests book
+  to that item (a `SubagentStop` hook sends the request ids). Without the line they book to the
+  session's mark. `mark` itself is denied inside a subagent (`PreToolUse` guard on `agent_id`).
+- **Unmarked sessions** are a deviation, not a bucket. A `UserPromptSubmit` reminder and the `no-mark`
+  flag on `alfred-wake` lines ask for the mark; the `Stop` hook records the session in
+  `deviations.jsonl`; the detached run at `SessionEnd` sends the hub one `[deviation] <session_id>`
+  notice (`alfred-wake notify hub`). A resumed session is re-marked at `SessionStart`.
+- **Operational work** without its own item goes on the standing item of objective 1 (AP-ADR0028).
+  The hub names its number; it is not recorded here yet.
+- **Store env** (set by the hub in gitops): `AGENT_RUNS_OTLP_LOGS_ENDPOINT`, `AGENT_RUNS_OTLP_HEADERS`
+  (`Name: value`, comma-separated), `AGENT_RUNS_READER_URL`, `AGENT_RUNS_TOKEN`. Hooks cannot see
+  `OTEL_*` (Claude Code strips it). **Every command fails open**: a missing env, an unreachable store
+  or bad JSON gives a stderr warning, exit 0 and "unknown" in the output.
+- **Local state** is under `${CLAUDE_CONFIG_DIR:-~/.claude}/alfred-workitem/`: one mark file per
+  session (removed after 90 days unused), a sent-count state file, and `deviations.jsonl`. Nothing is
+  written into a repository.
+- Marker and read formats: `tests/fixtures/workitem/` (`marker-*.json`, `workitems*.json`).
 
 ## Theme: owner prompts stand out (`themes/owner-prompts.json`)
 

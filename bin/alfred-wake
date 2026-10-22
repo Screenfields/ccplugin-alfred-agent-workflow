@@ -39,7 +39,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.6.0"
+VERSION="1.7.0"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -1019,7 +1019,7 @@ cmd_run() {
     if [ "$WAIT_MODE" = "true" ]; then
       run_child run_pass_to "$news" "$do_am"
       if [ -s "$news" ]; then
-        cat "$news"
+        flag_no_mark < "$news"
         rc=0
         if grep -q '^WAKE-ERROR' "$news"; then rc=2; fi
         cleanup_files
@@ -1046,6 +1046,20 @@ cmd_run() {
 
     run_child sleep "$interval"
   done
+}
+
+# flag_no_mark: copy stdin to stdout; when the current session has no work item
+# mark file (ccplugin#126), end each news line (WAKE am/buzz) with " no-mark".
+# A wake-only session gets no UserPromptSubmit hook, so the reminder to run
+# `alfred-workitem mark` rides on the wake line. Unknown session: no flag.
+flag_no_mark() {
+  local sid="${CLAUDE_CODE_SESSION_ID:-}"
+  if [ -n "$sid" ] && [[ "$sid" =~ ^[A-Za-z0-9._-]+$ ]] \
+     && [ ! -e "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-workitem/$sid.json" ]; then
+    sed -E 's/^(WAKE (am|buzz) .*)$/\1 no-mark/'
+  else
+    cat
+  fi
 }
 
 run_pass_to() {

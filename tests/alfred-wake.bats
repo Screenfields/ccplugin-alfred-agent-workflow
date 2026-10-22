@@ -20,6 +20,10 @@ setup() {
   # Never pick up the machine's real installed plugin (self-upgrade).
   export ALFRED_WAKE_PLUGINS_JSON="$BATS_TEST_TMPDIR/no-plugins.json"
   export ALFRED_WAKE_BIN_DIR="$BATS_TEST_TMPDIR/bin"
+  # No session id and a private config dir: the no-mark flag (ccplugin#126)
+  # must not depend on the session these tests happen to run in.
+  unset CLAUDE_CODE_SESSION_ID
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/claude"
   inbox
   # Job control: without it, `&` jobs of a non-interactive shell start with
   # SIGINT ignored, and an ignored-at-start signal cannot be trapped.
@@ -106,6 +110,31 @@ no_leftovers() {
   sleep 2.5
   alive "$a_pid"
   [ -z "$(out_of a)" ]
+}
+
+@test "ccplugin#126: a WAKE line carries no-mark while the session has no work item mark" {
+  export CLAUDE_CODE_SESSION_ID=sess-wake-1
+  start a wait
+  sleep 2.5
+  inbox m1:bob
+  reap "$a_pid"
+  [ "$rc" -eq 0 ]
+  [ "$(out_of a)" = "WAKE am unread=1 from=bob no-mark" ]
+  no_leftovers
+}
+
+@test "ccplugin#126: no no-mark flag once the session is marked" {
+  export CLAUDE_CODE_SESSION_ID=sess-wake-2
+  mkdir -p "$CLAUDE_CONFIG_DIR/alfred-workitem"
+  echo '{"item":"acme/widgets#7","marked_at":"2026-10-22T08:00:00Z","estimate":null}' \
+    > "$CLAUDE_CONFIG_DIR/alfred-workitem/sess-wake-2.json"
+  start a wait
+  sleep 2.5
+  inbox m1:bob
+  reap "$a_pid"
+  [ "$rc" -eq 0 ]
+  [ "$(out_of a)" = "WAKE am unread=1 from=bob" ]
+  no_leftovers
 }
 
 @test "legacy run still seeds with WAKE-INIT only, never a pending-at-start line" {
@@ -291,13 +320,13 @@ EOF
   ln -s "$(readlink -f "$WAKE")" "$ALFRED_WAKE_BIN_DIR/alfred-wake"
   run "$ALFRED_WAKE_BIN_DIR/alfred-wake" wait 5
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.6.0"* ]]
+  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.7.0"* ]]
   [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-wake")" = "$BATS_TEST_TMPDIR/cache/9.9.0/bin/alfred-wake" ]
-  grep -q "upgrade: 1.6.0 -> 9.9.0" "$STATE/alfred-wake.log"
+  grep -q "upgrade: 1.7.0 -> 9.9.0" "$STATE/alfred-wake.log"
 }
 
 @test "an older or equal installed alfred-wake is not used" {
-  for v in 1.0.0 1.6.0; do
+  for v in 1.0.0 1.7.0; do
     fake_install "$v"
     run timeout 3 "$WAKE" wait
     [[ "$output" != *"ran $v"* ]]
@@ -324,7 +353,7 @@ EOF
 @test "--version prints the version" {
   run "$WAKE" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "alfred-wake 1.6.0" ]
+  [ "$output" = "alfred-wake 1.7.0" ]
 }
 
 # --- Stop hook: never end a turn with the bridge down -----------------------

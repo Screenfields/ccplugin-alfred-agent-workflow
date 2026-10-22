@@ -1,0 +1,65 @@
+{
+  "work_items": [
+    {
+      "work_item": "acme/widgets#7",
+      "requests": 12,
+      "tokens": {
+        "input": 1000,
+        "output": 2000,
+        "cache_read": 90000,
+        "cache_write": 7000,
+        "cache_write_5m": 3500,
+        "cache_write_1h": 3500,
+        "total": 100000
+      },
+      "cost_usd": 1.5,
+      "by_role": [
+        {
+          "role": "main",
+          "requests": 5,
+          "tokens": {
+            "input": 600,
+            "output": 1200,
+            "cache_read": 60000,
+            "cache_write": 4000,
+            "cache_write_5m": 2000,
+            "cache_write_1h": 2000,
+            "total": 65800
+          },
+          "cost_usd": 1.0
+        },
+        {
+          "role": "builder",
+          "requests": 7,
+          "tokens": {
+            "input": 400,
+            "output": 800,
+            "cache_read": 30000,
+            "cache_write": 3000,
+            "cache_write_5m": 1500,
+            "cache_write_1h": 1500,
+            "total": 34200
+          },
+          "cost_usd": 0.5
+        }
+      ],
+      "by_model": [
+        {
+          "model": "claude-opus-x",
+          "requests": 12,
+          "tokens": {
+            "input": 1000,
+            "output": 2000,
+            "cache_read": 90000,
+            "cache_write": 7000,
+            "cache_write_5m": 3500,
+            "cache_write_1h": 3500,
+            "total": 100000
+          },
+          "cost_usd": 1.5
+        }
+      ]
+    }
+  ],
+  "deviations": []
+}

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Test double for curl, used by tests/workitem.bats (installed as `curl` in a
+# private bin dir). Records every call under $STUB_DIR and answers like the
+# agent-run store:
+#   calls.log      one line per call: "<METHOD> <url>"
+#   posts.jsonl    the compacted JSON body of every POST, one per line
+#   headers.log    the -K config (the request headers) of every call, then "--"
+#   workitems.json served for GET .../workitems?...  (HTTP 200)
+#   fail           present → every call answers HTTP 500
+#   slow           present → hang <content> seconds first; --max-time shorter
+#                  than that gives curl's timeout (exit 28, code 000)
+method=GET url="" cfg="" fmt="" maxtime=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -K) cfg="$2"; shift 2 ;;
+    -w) fmt="$2"; shift 2 ;;
+    --max-time) maxtime="$2"; shift 2 ;;
+    -o) shift 2 ;;
+    --data-binary) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+body=""
+if [ "$method" = POST ]; then body=$(cat); fi
+
+echo "$method $url" >> "$STUB_DIR/calls.log"
+{ [ -z "$cfg" ] || cat "$cfg"; echo "--"; } >> "$STUB_DIR/headers.log"
+if [ -n "$body" ]; then printf '%s' "$body" | jq -c . >> "$STUB_DIR/posts.jsonl"; fi
+
+if [ -f "$STUB_DIR/slow" ]; then
+  delay=$(cat "$STUB_DIR/slow")
+  if [ -n "$maxtime" ] && [ "$maxtime" -lt "$delay" ]; then sleep "$maxtime"; exit 28; fi
+  sleep "$delay"
+fi
+
+code=200 out='{}'
+if [ -f "$STUB_DIR/fail" ]; then
+  code=500
+elif [ "$method" = GET ]; then
+  case "$url" in
+    *"/workitems?"*) out=$(cat "$STUB_DIR/workitems.json") ;;
+    *) code=404 ;;
+  esac
+fi
+case "$fmt" in
+  *'\n%{http_code}'*) printf '%s\n%s' "$out" "$code" ;;
+  *) printf '%s' "$code" ;;
+esac
