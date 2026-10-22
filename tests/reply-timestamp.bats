@@ -56,14 +56,23 @@ line_is() {
 
 @test "the other interactive entrypoints count as owner" {
   for ep in claude-vscode claude-desktop; do
+    echo "$ep"
     CLAUDE_CODE_ENTRYPOINT=$ep hook "$(prompt_json "hello")"
-    line_is "2026-10-22 18:40 CEST" || { echo "$ep"; return 1; }
+    line_is "2026-10-22 18:40 CEST"
   done
 }
 
 @test "CET: the line carries CET" {
   FAKE_DATE="2026-12-01 09:05 CET" hook "$(prompt_json "hello" user)"
   line_is "2026-12-01 09:05 CET"
+}
+
+@test "real date: the line matches the CET/CEST format" {
+  [ -e /usr/share/zoneinfo/Europe/Amsterdam ] || skip "no Europe/Amsterdam tzdata"
+  rm "$BATS_TEST_TMPDIR/bin/date"
+  hook "$(prompt_json "hello" user)"
+  [ "$status" -eq 0 ]
+  [[ "$(jq -r '.hookSpecificOutput.additionalContext' <<< "$output")" =~ _\[[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}\ CES?T\]_ ]]
 }
 
 @test "missing tzdata (zone is not CET or CEST): no output, one line on stderr" {

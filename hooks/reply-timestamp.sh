@@ -20,7 +20,7 @@ command -v jq >/dev/null 2>&1 || exit 0
 . "$(dirname "$0")/../lib/owner-turn.sh" 2>/dev/null || exit 0
 
 src=$(jq -r '.source // empty' <<< "$input" 2>/dev/null)
-prompt=$(jq -r '.prompt // empty' <<< "$input" 2>/dev/null)
+{ prompt=$(jq -r '.prompt // empty' <<< "$input" 2>/dev/null); } 2>/dev/null
 ep="${CLAUDE_CODE_ENTRYPOINT:-}"
 owner=false
 is_owner_turn "$ep" "$src" "$prompt" && owner=true
