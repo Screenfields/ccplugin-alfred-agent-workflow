@@ -18,6 +18,8 @@
 # The runner tests HEAD (the plugin copy is built from git archive), not the
 # working tree: commit changes to agents/ and skills/ first. It warns when
 # they are dirty.
+# SPECIALISTS_RESULTS overrides the results directory (the bats tests use a
+# temp one so they never touch the committed evidence).
 # CLAUDE_BIN overrides the claude binary (the bats tests use a stub).
 # Results: tests/specialists/results/<role>-run<N>.md (the answer) and .json
 # (usage and session id).
@@ -25,7 +27,7 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 REPO=$(cd "$HERE/../.." && pwd -P)
-RESULTS="$HERE/results"
+RESULTS="${SPECIALISTS_RESULTS:-$HERE/results}"
 REVIEWERS=(readiness design code document acceptance incident)
 
 # An absolute path in a permission rule needs a double slash: "Read(/$REPO/**)"
@@ -65,6 +67,7 @@ claude_run() {
     printf '%s' "$prompt" | ALFRED_ROLE=worker timeout "${RUN_TIMEOUT:-900}" "$CLAUDE_BIN" -p \
       --plugin-dir "$plugin" \
       --agent "alfred-agent:$agent" \
+      --permission-mode default \
       --disallowedTools "${rules[@]}" \
       --output-format "$format" "$@"
   )

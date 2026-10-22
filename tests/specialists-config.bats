@@ -190,27 +190,31 @@ STUBEOF
 
 @test "run.sh: a run that fails, errors or returns nothing is reported FAILED and leaves no result files" {
   make_stub
+  R="$BATS_TEST_TMPDIR/results"
   for mode in error empty fail; do
-    run env CLAUDE_BIN="$STUB" STUB_MODE=$mode "$ROOT/tests/specialists/run.sh" readiness --runs 1
+    mkdir -p "$R"
+    echo stale > "$R/readiness-reviewer-run1.md"
+    echo stale > "$R/readiness-reviewer-run1.json"
+    run env CLAUDE_BIN="$STUB" STUB_MODE=$mode SPECIALISTS_RESULTS="$R" "$ROOT/tests/specialists/run.sh" readiness --runs 1
     [ "$status" -ne 0 ]
     [[ "$output" == *"FAILED readiness run 1"* ]]
-    [ ! -e "$ROOT/tests/specialists/results/readiness-reviewer-run1.md" ]
-    [ ! -e "$ROOT/tests/specialists/results/readiness-reviewer-run1.json" ]
+    [ ! -e "$R/readiness-reviewer-run1.md" ]
+    [ ! -e "$R/readiness-reviewer-run1.json" ]
   done
 }
 
 @test "run.sh: a good run writes the result files and exits 0" {
   make_stub
-  run env CLAUDE_BIN="$STUB" STUB_MODE=ok "$ROOT/tests/specialists/run.sh" readiness --runs 1
+  R="$BATS_TEST_TMPDIR/results"
+  run env CLAUDE_BIN="$STUB" STUB_MODE=ok SPECIALISTS_RESULTS="$R" "$ROOT/tests/specialists/run.sh" readiness --runs 1
   [ "$status" -eq 0 ]
-  [ "$(cat "$ROOT/tests/specialists/results/readiness-reviewer-run1.md")" = "found things" ]
-  [ "$(jq -r .session_id "$ROOT/tests/specialists/results/readiness-reviewer-run1.json")" = s1 ]
-  rm -f "$ROOT"/tests/specialists/results/readiness-reviewer-run1.*
+  [ "$(cat "$R/readiness-reviewer-run1.md")" = "found things" ]
+  [ "$(jq -r .session_id "$R/readiness-reviewer-run1.json")" = s1 ]
 }
 
 @test "run.sh: all keeps going after a failure and exits non-zero at the end" {
   make_stub
-  run env CLAUDE_BIN="$STUB" STUB_MODE=error "$ROOT/tests/specialists/run.sh" all --runs 1
+  run env CLAUDE_BIN="$STUB" STUB_MODE=error SPECIALISTS_RESULTS="$BATS_TEST_TMPDIR/results" "$ROOT/tests/specialists/run.sh" all --runs 1
   [ "$status" -ne 0 ]
   for r in readiness design code document acceptance incident; do [[ "$output" == *"FAILED $r run 1"* ]]; done
 }
