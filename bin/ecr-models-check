@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# ecr-models-check — confirm every model named in the ecr skill's two model
+# tables (External Panel, Alternative External Models) is on the LiteLLM key
+# (GET /v1/models). Exits 1 and names the missing models otherwise.
+#
+#   ecr-models-check [--list] [--skill PATH]
+#
+#   --list    print the model ids parsed from the skill's tables and exit
+#   --skill   default <script dir>/../skills/ecr/SKILL.md
+#
+# Reads LITELLM_URL (default https://litellm.screenfields.net) and
+# LITELLM_API_KEY. Without the key it prints "skipped: no LITELLM_API_KEY"
+# and exits 0. The key goes to curl only through a mode-600 header file
+# (curl -H @file), never argv, and the file is deleted on exit.
+# Exit: 0 all present or skipped; 1 model missing; 2 usage or fetch error.
+set -u
+
+skill="$(dirname "$0")/../skills/ecr/SKILL.md"
+list_only=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --list) list_only=1; shift ;;
+    --skill) skill="${2:-}"; shift 2 ;;
+    *) echo "usage: ecr-models-check [--list] [--skill PATH]" >&2; exit 2 ;;
+  esac
+done
+[ -f "$skill" ] || { echo "ecr-models-check: skill not found: $skill" >&2; exit 2; }
+
+# First-column backticked ids of table rows under the two model-table headings.
+wanted=$(awk '
+  /^#/            { on = ($0 ~ /^### (External Panel|Alternative External Models)/) }
+  on && /^\| `/   { s = $0; sub(/^\| `/, "", s); sub(/`.*/, "", s); print s }
+' "$skill")
+[ -n "$wanted" ] || { echo "ecr-models-check: no models found in $skill" >&2; exit 2; }
+
+if [ "$list_only" = 1 ]; then printf '%s\n' "$wanted"; exit 0; fi
+
+if [ -z "${LITELLM_API_KEY:-}" ]; then
+  echo "skipped: no LITELLM_API_KEY"
+  exit 0
+fi
+command -v jq >/dev/null 2>&1 || { echo "ecr-models-check: jq not found" >&2; exit 2; }
+
+umask 077
+tmp=$(mktemp -d) || exit 2
+trap 'rm -rf "$tmp"' EXIT
+printf 'Authorization: Bearer %s\n' "$LITELLM_API_KEY" > "$tmp/hdr"
+chmod 600 "$tmp/hdr"
+
+url="${LITELLM_URL:-https://litellm.screenfields.net}"
+code=$(curl -s --max-time 30 -o "$tmp/body" -w '%{http_code}' -H @"$tmp/hdr" "$url/v1/models") || code=000
+if [ "$code" != 200 ]; then
+  echo "ecr-models-check: GET $url/v1/models failed (HTTP $code)" >&2
+  exit 2
+fi
+have=$(jq -r '.data[]?.id' "$tmp/body" 2>/dev/null) || have=""
+[ -n "$have" ] || { echo "ecr-models-check: no models in response" >&2; exit 2; }
+
+missing=0
+while IFS= read -r m; do
+  if printf '%s\n' "$have" | grep -qxF -- "$m"; then
+    echo "ok: $m"
+  else
+    echo "MISSING: $m"
+    missing=1
+  fi
+done <<< "$wanted"
+exit "$missing"
