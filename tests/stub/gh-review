@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Test double for `gh` and `gh-as`, for bin/alfred-review. Symlink it under both
+# names; it acts by the name it is called by. Every call is logged to
+# $STUB_DIR/calls.log as "gh <args>" or "gh-as review <args>".
+#
+# Served from $STUB_DIR (tests copy fixtures from tests/fixtures/review/):
+#   graphql.json, graphql.<n>.json   the GraphQL verdict (n-th call, else graphql.json)
+#   pull.json                        GET repos/o/r/pulls/N
+#   reviews-page<k>.json             GET .../reviews; all pages with --paginate, page 1 without
+#   post-response.json               POST .../reviews; else built from the request
+# Failures, one marker file per endpoint kind (graphql, pull, reviews, post):
+#   fail-<kind>   "<code> [count]": answer HTTP <code> (count times, else always);
+#                 "403-rate" is a rate limit; "timeout" sleeps; "timeout-after-record"
+#                 (post only) records the review and then sleeps
+# Also writes $STUB_DIR/post-body.json (the POST request body) and counts POSTs in post.count.
+name=$(basename "$0")
+D="${STUB_DIR:?STUB_DIR not set}"
+if [ "$name" = gh-as ]; then
+  role="$1"; shift
+  if [ -n "${GH_TOKEN:-}" ]; then echo "gh-as: GH_TOKEN is set; refusing" >&2; exit 1; fi
+  tag="gh-as $role"
+else
+  tag="gh"
+fi
+echo "$tag $*" >> "$D/calls.log"
+args=" $* "
+
+kind=""
+case "$args" in
+  *" graphql "*) kind=graphql ;;
+  *"/reviews"*) if [[ "$args" == *" -X POST "* || "$args" == *" --method POST "* ]]; then kind=post; else kind=reviews; fi ;;
+  *"/pulls/"*) kind=pull ;;
+esac
+[ -n "$kind" ] || { echo "stub: unrecognised call: $*" >&2; exit 1; }
+
+tokval=""
+[ -s "${ALFRED_SECRETS_DIR:-/nonexistent}/gh-review/token" ] && tokval=$(cat "$ALFRED_SECRETS_DIR/gh-review/token")
+
+bump() { local n=0; [ -f "$D/$1" ] && n=$(cat "$D/$1"); n=$((n + 1)); echo "$n" > "$D/$1"; echo "$n"; }
+
+if [ "$kind" = post ]; then
+  cat > "$D/post-body.json"
+  bump post.count >/dev/null
+fi
+
+record_post() {
+  local ev st
+  ev=$(jq -r .event "$D/post-body.json"); [ "$ev" = APPROVE ] && st=APPROVED || st=CHANGES_REQUESTED
+  jq -c --arg st "$st" '{id: 9001, state: $st, commit_id: .commit_id, body: .body,
+    user: {login: "alfred-worker-agent[bot]"}, submitted_at: (now | todate)}' "$D/post-body.json" > "$D/post-recorded.json"
+}
+
+if [ -f "$D/fail-$kind" ]; then
+  read -r code limit < "$D/fail-$kind"
+  n=$(bump "fail-$kind.count")
+  if [ -z "${limit:-}" ] || [ "$n" -le "$limit" ]; then
+    case "$code" in
+      timeout) sleep 5; exit 124 ;;
+      timeout-after-record) record_post; sleep 5; exit 124 ;;
+      403-rate) echo '{"message":"API rate limit exceeded"}'; echo "gh: API rate limit exceeded (HTTP 403)" >&2; exit 1 ;;
+      *)
+        msg="Stub error $code"; [ "$code" = 404 ] && msg="Not Found"; [ "$code" = 422 ] && msg="Validation Failed: custom"
+        printf '{"message":"%s"}\n' "$msg"
+        echo "gh: $msg (HTTP $code) [debug: token ${tokval:-none}]" >&2
+        exit 1 ;;
+    esac
+  fi
+fi
+
+case "$kind" in
+  graphql)
+    n=$(bump graphql.count)
+    if [ -f "$D/graphql.$n.json" ]; then cat "$D/graphql.$n.json"; else cat "$D/graphql.json"; fi ;;
+  pull) cat "$D/pull.json" ;;
+  reviews)
+    if [[ "$args" == *" --paginate "* ]]; then
+      for f in "$D"/reviews-page*.json; do if [ -f "$f" ]; then cat "$f"; fi; done
+      # a review posted through this stub is listed too (as its own page)
+      if [ -f "$D/post-recorded.json" ]; then jq -s '.' "$D/post-recorded.json"; fi
+    else
+      cat "$D/reviews-page1.json"
+    fi ;;
+  post)
+    if [ -f "$D/post-response.json" ]; then cat "$D/post-response.json"; else record_post; cat "$D/post-recorded.json"; fi ;;
+esac
