@@ -380,6 +380,12 @@ All thresholds live in one file and are read by name, so no rule or skill text c
 percent sign (other than `AP-ADRnnnn`, `AP-nnnn`, `AP#nnnn` and `doctrine NN`) or names a
 threshold that does not resolve.
 
+`model-setting-per-role` holds one tier and effort per role. `reviewer-light` is the lighter reviewer
+setting for small items: the light path of `develop` starts the reviewer with it. No document defines
+that setting as a value, so it is one named key next to `reviewer`, with the value
+`{"tier":"medium","effort":"medium"}` (the choice recorded in ccplugin#129). The tier and the effort map
+to the `model` and `effort` of a specialist as described under "Specialists (`agents/`)".
+
 ## Loop check at the end of every turn (Stop hook)
 
 A lead keeps working while it has actionable items or unread direct messages. At the end of a
@@ -535,6 +541,8 @@ merge skill asks GitHub for its own verdict and merges pinned to that head. This
 `lead-review` ruleset (AP-1230) run on a repo without blocking its lead. `bin/alfred-review` is bash,
 `gh` and `jq`, with no model call.
 
+`review/verdict` (Gate 1 and Gate 2 of `change-gates.md` in alfred-platform) applies to alfred-platform and alfred-platform-docs only (v1 scope), and for lead repos AP-1230 is the review gate: the `lead-review` ruleset plus `reviewDecision`, as `alfred-review` and the merge skill implement it. The table "Gate 2 mapping (lead repos)" below shows how each Gate 2 requirement is met there.
+
 ```bash
 alfred-review post <owner>/<repo>#<n> --sha <40-hex> --verdict approve|request-changes --body-file <file>
 alfred-review check <owner>/<repo>#<n>
@@ -615,6 +623,20 @@ non-zero exit, and merges with `--match-head-commit`. It refuses `alfred-platfor
 merges with platform-gh, not this skill"); `alfred-project-manager` merges its own PRs through it like
 any lead. The hub merges a PR labelled `requires-elevated-merge` outside the skill.
 
+### Gate 2 mapping (lead repos)
+
+One row per requirement of Gate 2 in `change-gates.md`, with the AP-1230 mechanism and its evidence. Evidence is a `tests/review-gate.bats` test title, a live step of the CCW-145 closing comment, or `gap`; a gap is accepted by the owner's option A (ccplugin#129, 2026-10-23).
+
+| # | Keyword | AP-1230 mechanism | Evidence |
+|---|---|---|---|
+| 1 | **head SHA** | `reviewDecision` at the current head; the ruleset dismisses stale approvals; the merge skill merges with `--match-head-commit` | `post refuses when head moved`, `merge skill passes --match-head-commit from the check`, CCW-145 6353161637 step C. Dismissal of stale approvals is a ruleset setting, shown live only. |
+| 2 | **other than the PR author** | GitHub forbids self-approval; the ruleset requires last-push approval | `author is the review identity gives the author message`, `check words the last pusher as likely`, CCW-145 6353161637 steps E and F |
+| 3 | **allowlist** | none; any identity with review rights counts | `gap`, accepted by option A |
+| 4 | **ADVISORY** | an approval passes; APPROVE WITH COMMENTS posts as `approve` (`skills/review-panel/SKILL.md`); a change request blocks with exit 11. A later approval by the same login supersedes a change request, so a failure is not sticky per SHA. | `check maps APPROVED (probe S1)`, `check maps CHANGES_REQUESTED`, `null with a later approve by the same login exits 0`. The non-sticky failure is a `gap`, accepted by option A. |
+| 5 | **regardless of CI** | merge Step 5 is a hard gate that stops on any non-zero exit, with no identity branch | `merge skill calls alfred-review check before the label gate`, `merge skill stops on any non-zero exit`, `check has no identity branch` |
+| 6 | **author ≠ reviewer ≠ merger** | the reviewer (`alfred-worker-agent[bot]`) differs from both the author and the merger, which is the lead role | `author is the review identity gives the author message`. Author ≠ merger is a `gap` (the lead authors and merges), accepted by option A. |
+| 7 | **Review panel verdict** comment | none; the review body is the record (`post` writes a `Reviewed by:` first line) | `gap`, accepted by option A |
+
 ### Runbook
 
 | Exit | Symptom | Cause | Remedy |
@@ -668,6 +690,20 @@ reviewer, then the fix to the same pair) is the routed rule `work-and-review-in-
 (`light`/`medium`/`strong` are `haiku`/`sonnet`/`opus`; effort `highest` is `max`). A role whose
 config entry is `default` has no `model` or `effort` line. `tests/specialists-config.bats` fails
 when a definition drifts from the config.
+
+### Phase skills and their pairs
+
+Each phase skill names the specialist or the format that belongs to its phase. The rule for the pair lives in the routed rule `work-and-review-in-pairs` and the lead agreement; the skill carries the steps.
+
+| Skill | Gains | Specialists it names |
+|---|---|---|
+| `refine` | the analyst and readiness reviewer pair, new to ready | `analyst`, `readiness-reviewer` |
+| `design` | the design reviewer pair; the owner's approval of a large item's design before it is marked complete, with `alfred-agent:ecr` for the expert consulting review | `design-reviewer` |
+| `develop` | the builder and code reviewer pair; the light path for small items, which starts the reviewer with the `reviewer-light` setting | `builder`, `code-reviewer`, `document-reviewer` |
+| `merge` | the review-record check (`alfred-review check`, see "Review gate") | none |
+| `retro` | one agenda for every level; the friction line for small items | none |
+| `waiting` (`/alfred-agent:waiting`) | the owner-join and owner-question format, by reference to `hooks/owner-communication.md`; urgent requests for the hub and Alfred | none |
+| `troubleshoot` | the section "Incident handling (hub)": diagnose, mitigate, incident reviewer, then a sized fix | `incident-reviewer` |
 
 ### Starting one
 

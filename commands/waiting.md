@@ -227,6 +227,12 @@ Then, briefly:
 - new items or issues that surfaced,
 - what remains on the owner, in one line each.
 
+## Owner-join, owner questions and urgent requests
+
+An owner decision goes as `[owner-join]` (the Escalate paragraph of `agreement/lead.md`). The format of an owner-join and of any question put to the owner is the section "Asking the owner something" of `hooks/owner-communication.md`; use it as written there. This command does not restate it.
+
+Urgent requests (AP-ADR0031, the decision on urgent requests): urgent requests go by push notification through Remote Control, from the hub and Alfred only, for a security incident, a user-visible outage beyond the bounds, a risk of data loss or a decision that blocks recovery. Alerts stay on Telegram (AP-ADR0012). Until the owner answers, every reply of the sending session ends with the request, its reason and a link (AP#1140). A lead is not the hub or Alfred: it sends its decisions as `[owner-join]`.
+
 ## Style
 
 - Plain language throughout; the owner should understand each item without opening anything.

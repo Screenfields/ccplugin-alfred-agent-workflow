@@ -197,6 +197,12 @@ Each finding requires an explicit disposition of **"addressed"** (fix applied no
 
 Only after all findings have dispositions is the design considered complete.
 
+## Design review and the owner's approval
+
+Before the design is marked complete, send it to the `design-reviewer` pair. Start a fresh `design-reviewer` specialist (`agents/design-reviewer.md`) with the Agent tool. The brief links the work item and the design document and states purpose (decide whether the design is sound enough to build on), end state (pass or fail, with the reviewer's output) and bounds (read-only, no rewrite of the design). The loop is the routed rule `work-and-review-in-pairs`: findings go back to the session that wrote the design, the fixed design goes to the same reviewer, and after `alfred-config get failed-review-max` failed rounds the session stops and escalates to the hub.
+
+Following Size in `agreement/lead.md` ("Large and very large need the owner at ready and at designed, and an expert consulting review"): a large or very large item needs the owner's approval of the design before it is marked complete. After the reviewer passes the design, park the item with the status that `alfred-config get waiting-label` names, and comment the design and the question on it (the Escalate paragraph of `agreement/lead.md`). Mark the design complete when the owner has approved it. The expert consulting review for such an item is `alfred-agent:ecr`; run it as that skill describes.
+
 ## Step 5: Prerequisites
 
 Before any implementation, present this checklist and complete each item:

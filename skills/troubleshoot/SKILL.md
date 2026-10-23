@@ -120,6 +120,15 @@ Execute the cleanup contract from Step 0:
 
 Leave the system in the same state it was in before diagnosis began (or better, never worse).
 
+## Incident handling (hub)
+
+A separate path for the hub. The flow above is the lead's and is unchanged; this section does not change it. The order is: diagnose, mitigate, `incident-reviewer`, then a sized fix.
+
+- **Diagnose.** Find the cause from the actual state, as in the steps above.
+- **Mitigate.** The hub chooses the mitigation from the diagnosis. A mitigation stops the harm; it is not the fix.
+- **`incident-reviewer`.** Before the mitigation is applied, start a fresh `incident-reviewer` specialist (`agents/incident-reviewer.md`) with the Agent tool. The brief links the alert or the work item and carries the diagnosis and the chosen mitigation. Apply the mitigation only on the reviewer's go, or go with conditions that you have met; on stop, choose again.
+- **A sized fix.** The fix is a work item of its own. "Sized" means sized under the Size paragraph of `agreement/lead.md`: give it a complexity class by its effect, and it then follows `alfred-agent:develop` for that class.
+
 ## Rules
 
 - **Never implement a fix during troubleshoot** — that is develop's job
