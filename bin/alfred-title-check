@@ -98,21 +98,21 @@ reg_state() {
 JQ_VERDICT='
 def epoch: sub("\\.[0-9]+"; "") | fromdateiso8601;
 def chain($rows; $x; $d):
-  if $d >= 10 then null
+  if $d >= 10 then "!"
   else ([$rows[] | select(.aliasOf == $x)] | .[0]) as $s
     | if $s == null then null
       elif $s.retiredAt == null then $s.code
       else chain($rows; $s.code; $d + 1) end
   end;
 def warn($r; $e): {v: "warn", reason: $r, expected: $e};
-($reg[0].codes // []) as $all
+([($reg[0].codes // [])[] | select((.code | type) == "string" and (.code | test("\\A[A-Z][A-Z0-9]{1,5}\\z")))]) as $all
 | $it[0] as $i
 | ($i.createdAt // "") as $created
 | ($i.title // "") as $title
 | $i.number as $num
 | ([$all[] | select(((.repo // "") | ascii_downcase) == $repo)]) as $mine
 | ([$mine[] | select(.retiredAt == null)] | .[0].code) as $live
-| ([$title | capture("^(?<c>[A-Z][A-Z0-9]*)-(?<n>[0-9]+)[: ]")] | .[0]) as $t
+| ([$title | capture("\\A(?<c>[A-Z][A-Z0-9]*)-(?<n>[0-9]+)[: ]")] | .[0]) as $t
 | if ($mine | length) == 0 then {v: "silent", why: "repo has no code in the registry"}
   elif ($num | type) != "number" or $created == "" then {v: "silent", why: "item unreadable"}
   elif $kind == "issue" then
@@ -122,12 +122,13 @@ def warn($r; $e): {v: "warn", reason: $r, expected: $e};
           (if ($all | map(.code) | index($t.c)) != null then warn("othercode"; $live) else warn("unregistered"; $live) end)
         elif $row.retiredAt == null or ($created | fromdateiso8601) < ($row.retiredAt | epoch) then
           (if ($t.n | tonumber) == $num then {v: "ok"} else warn("wrongnum"; $row.code) end)
-        else warn("retired"; chain($mine; $row.code; 0))
+        else chain($mine; $row.code; 0) as $s
+          | if $s == "!" then {v: "silent", why: "alias chain too deep or cyclic"} else warn("retired"; $s) end
         end
     end
   else
     if $t == null then
-      (if $repo == "screenfields/alfred-cc-tools" and ($title | test("^[a-z][a-z0-9-]*: bump pin")) then warn("cache-only-bump"; $live) else warn("nocode"; $live) end)
+      (if $repo == "screenfields/alfred-cc-tools" and ($title | test("\\A[a-z][a-z0-9-]*: bump pin")) then warn("cache-only-bump"; $live) else warn("nocode"; $live) end)
     elif ($all | map(.code) | index($t.c)) == null then warn("unregistered"; $live)
     elif ($mine | map(.code) | index($t.c)) != null and ($t.n | tonumber) == $num then warn("ownnumber"; $live)
     else {v: "ok"} end
