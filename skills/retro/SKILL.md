@@ -14,7 +14,7 @@ Structured reflection at the end of a session to capture learnings and improve f
 
 ## The agenda
 
-One agenda for every level, lighter going down (AP-ADR0020, AP-ADR0029). Answer each point in the retro comment:
+One agenda for every level, lighter going down (AP-ADR0020, AP-ADR0029). Answer each point, where the next section says:
 
 - results, end states reached and reviews failed.
 - cost, actual against estimate (AP-ADR0028).
@@ -24,13 +24,13 @@ One agenda for every level, lighter going down (AP-ADR0020, AP-ADR0029). Answer 
 - improvement proposals for what lies outside the level's layer.
 - the loop itself (AP-ADR0031).
 
-The steps and the output format below stay as they are.
+The steps stay. The output format gains the agenda answers.
 
 ### Where the retro goes
 
 The Learn paragraph of `agreement/lead.md` says: "A small item's friction line is its retro. A medium or larger item, or a reached limit, gets a retro comment on the repo's standing retro item. Propose plugin changes to the hub; change your own repo rules yourself."
 
-The friction line is the "friction" part of an item's closing comment (the Done paragraph of `agreement/lead.md`). The standing retro item is "the repo's standing retro item" of the Learn paragraph. The skill, rule and document edits of Step 3 and Step 4 apply to the repo's own files. A change to a plugin is proposed to the hub, not made here.
+A small item answers the agenda in its friction line, the "friction" part of its closing comment (the Done paragraph of `agreement/lead.md`). A medium or larger item, or a reached limit, answers in a retro comment on the repo's standing retro item (AP-1145). Until that item exists in the repo, the retro comment goes on the work item itself. The skill, rule and document edits of Step 3 and Step 4 apply to the repo's own files. A change to a plugin is proposed to the hub, not made here.
 
 ## When to Use
 
@@ -121,7 +121,7 @@ If you find yourself drafting a "next steps" or "what to pick up" memory block â
 
 ## Output Format
 
-Answer each agenda point in the retro comment (the agenda above), then present the retro as:
+Answer each agenda point (the agenda above), then present the retro as:
 
 ```
 ## Session Retrospective â€” {date}

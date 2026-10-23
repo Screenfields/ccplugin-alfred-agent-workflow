@@ -120,7 +120,7 @@ Scaffold all sections first with placeholders, then fill from Step 2 answers. As
 
 If there are open questions or significant design decisions, ask: "Want to run an ECR on this?"
 
-Recommend ECR when multiple valid approaches exist or the technology is unfamiliar. Skip if the design follows an established pattern exactly.
+Recommend ECR when multiple valid approaches exist or the technology is unfamiliar. Skip if the design follows an established pattern exactly. For a large or very large item the ECR is required, see the design review below.
 
 ## Step 4.5: Coupled-ADR review gate
 
@@ -207,7 +207,7 @@ Start a fresh `design-reviewer` specialist (`agents/design-reviewer.md`) with th
 
 Act on the reviewer's `Precedent:` and `Real alternatives:` lines as `agents/design-reviewer.md` defines them. `Real alternatives: yes` with no valid precedent sends the item to the owner for architectural review (AP-ADR0035, item two).
 
-Following Size in `agreement/lead.md` ("Large and very large need the owner at ready and at designed, and an expert consulting review"), a large or very large item needs the owner's approval of the design before it is marked complete. After the reviewer passes the design, run `alfred-agent:ecr` as that skill describes and add its verdict to the Decision Log. Then park the item with the status that `alfred-config get waiting-label` names, and comment the design and the question on it (the Escalate paragraph of `agreement/lead.md`). When the owner answers, remove the status and record the decision on the item. Mark the design complete after the approval.
+Following Size in `agreement/lead.md` ("Large and very large need the owner at ready and at designed, and an expert consulting review"), a large or very large item needs the owner's approval of the design before it is marked complete. After the reviewer passes the design, run `alfred-agent:ecr` as that skill describes and add its verdict to the Decision Log. Then park the item with the status that `alfred-config get waiting-label` names, and comment the design and the question on it (the Escalate paragraph of `agreement/lead.md`). An item with `Real alternatives: yes` and no valid precedent is parked the same way and goes to the owner, and when it is also large or very large, both asks go in the same owner turn. When the owner answers, remove the status and record the decision on the item. Mark the design complete after the approval.
 
 ## Step 5: Prerequisites
 

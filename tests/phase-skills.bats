@@ -135,7 +135,7 @@ gate2_range() { sect "$README" "$GATE2"; }
   [ -n "$s" ]
   has "$s" '`design-reviewer`'
   has "$s" 'Start a fresh `design-reviewer` specialist (`agents/design-reviewer.md`) with the Agent tool'
-  has "$s" 'large or very large'
+  has "$s" "a large or very large item needs the owner's approval of the design before it is marked complete"
   has "$s" '`alfred-config get waiting-label`'
   has "$s" '`alfred-agent:ecr`'
   has "$s" 'Large and very large need the owner at ready and at designed, and an expert consulting review'
@@ -153,6 +153,15 @@ gate2_range() { sect "$README" "$GATE2"; }
   before=${s%%park the item with the status*}
   [ "$before" != "$s" ] || { echo "no parking sentence"; return 1; }
   has "$before" 'run `alfred-agent:ecr`'
+}
+
+@test "design: Step 4 makes the ECR required for a large item, and the review parks a real-alternatives item" {
+  s=$(sect "$DESIGN" '## Step 4: Validate')
+  has "$s" 'For a large or very large item the ECR is required, see the design review below.'
+  r=$(sect "$DESIGN" "## Design review and the owner's approval")
+  has "$r" 'An item with `Real alternatives: yes` and no valid precedent is parked the same way and goes to the owner, and when it is also large or very large, both asks go in the same owner turn'
+  # one parking sentence, so the status is named once
+  [ "$(grep -oF 'alfred-config get waiting-label' <<<"$r" | wc -l)" -eq 1 ]
 }
 
 @test "design: Step 4.5 exits go to the design review and completion needs its pass" {
@@ -187,7 +196,8 @@ gate2_range() { sect "$README" "$GATE2"; }
   has "$s" 'The brief links the work item and carries the purpose'
   has "$s" 'commit on the branch, do not push, because `agents/builder.md` otherwise ends with a push'
   has "$s" "Every push stays the lead's (Step 6)"
-  has "$s" 'The lead does the role switch and the `git checkout main` steps of Step 2 first'
+  has "$s" 'The lead does the role switch of Step 2 first. The lead creates the branch with `git worktree add -b <branch> <path> origin/main`, and the builder works in that worktree'
+  has "$s" "The lead's main tree is never on that branch"
   lacks "$s" "are the builder's work"
   lacks "$s" 'no design document'
   [ "$(grep -oF 'same builder' <<<"$s" | wc -l)" -eq 1 ]
@@ -213,7 +223,13 @@ gate2_range() { sect "$README" "$GATE2"; }
   has "$s" 'the Size paragraph of `agreement/lead.md`'
   has "$s" 'Effort is passed as is, except `highest`, which is `max`'
   has "$s" 'Add `model` and `effort` to the Agent call in review-panel Step 3'
-  has "$s" 'Fix rounds follow the loop above, with the builder committing and the lead pushing'
+  has "$s" 'Step 7 applies unchanged, and fix rounds follow the loop above'
+  # the light path is said once: the quoted Small work sentence, no bullet repeating it
+  [ "$(grep -c 'designed state' <<<"$s")" -eq 1 ]
+  [ "$(grep -c 'still passes a review' <<<"$s")" -eq 1 ]
+  c=$(sect "$DEVELOP" '## Step 6.5: When CI fails')
+  has "$c" 'The builder commits the fix, the lead pushes it with the lead role'
+  lacks "$c" 'Commit the fix, then push'
 }
 
 @test "develop light-path text: no digit follows the words tier or effort" {
@@ -281,18 +297,23 @@ gate2_range() { sect "$README" "$GATE2"; }
   has "$s" 'gets a retro comment on the repo'"'"'s standing retro item'
   has "$s" 'Propose plugin changes to the hub'
   has "$s" 'change your own repo rules yourself'
-  has "$s" 'The friction line is the "friction" part of an item'"'"'s closing comment (the Done paragraph of `agreement/lead.md`)'
-  has "$s" 'The standing retro item is "the repo'"'"'s standing retro item" of the Learn paragraph'
+  has "$s" 'A small item answers the agenda in its friction line, the "friction" part of its closing comment (the Done paragraph of `agreement/lead.md`)'
+  has "$s" 'A medium or larger item, or a reached limit, answers in a retro comment on the repo'"'"'s standing retro item (AP-1145)'
+  has "$s" 'Until that item exists in the repo, the retro comment goes on the work item itself'
+  lacks "$s" 'The standing retro item is'
+  lacks "$s" 'title'
   has "$s" 'apply to the repo'"'"'s own files'
   has "$s" 'A change to a plugin is proposed to the hub, not made here'
 }
 
 @test "retro: each agenda point is answered in the retro comment, and the output format says so" {
   s=$(sect "$RETRO" '## The agenda')
-  has "$s" 'Answer each point in the retro comment'
+  has "$s" 'Answer each point, where the next section says:'
+  has "$s" 'The steps stay. The output format gains the agenda answers.'
+  lacks "$s" 'stay as they are'
   lacks "$s" 'nothing'
   o=$(sect "$RETRO" '## Output Format')
-  has "$o" 'Answer each agenda point in the retro comment'
+  has "$o" 'Answer each agenda point (the agenda above), then present the retro as:'
 }
 
 # --- criterion 7: waiting ----------------------------------------------------------
@@ -313,7 +334,8 @@ gate2_range() { sect "$README" "$GATE2"; }
   has "$s" 'This applies when something has to reach the owner outside this walkthrough'
   has "$s" 'the item format of Step 3 governs'
   has "$s" 'the owner-communication text injected at SessionStart governs owner-joins and questions'
-  has "$s" 'send an owner-join only if the decision blocks you and a written question is not enough'
+  has "$s" 'An owner decision that blocks you goes as `[owner-join]` when a written question is not enough (the Escalate paragraph of `agreement/lead.md`)'
+  [ "$(grep -oF 'owner-join]' <<<"$s" | wc -l)" -eq 1 ]
   lacks "$s" 'A lead is not the hub or Alfred'
   a=$(grep -nxF '## Owner-join, owner questions and urgent requests' "$WAITING" | cut -d: -f1)
   c=$(grep -nxF '## Step 6: Closing summary' "$WAITING" | cut -d: -f1)
@@ -363,7 +385,10 @@ gate2_range() { sect "$README" "$GATE2"; }
   [ "$g" -lt "$f" ]
   has "$s" 'The order is: diagnose, choose the mitigation, the incident reviewer reviews it, apply it on go, then a sized fix.'
   has "$s" 'Step 0'"'"'s cleanup contract applies'
-  has "$s" '"Never implement a fix" does not apply to an approved mitigation'
+  lacks "$s" 'Never implement a fix'
+  has "$s" "Step 5's thresholds apply too, for diagnosis only"
+  has "$s" "Step 6's teardown cleans up diagnostic leftovers and never reverts the approved mitigation"
+  has "$s" 'escalate to Alfred with an agent-messaging direct message to `alfred`, with the subject prefix `[escalate]`, linking the item and the round findings'
   has "$s" 'the production evidence the reviewer cannot read'
   has "$s" 'send the new mitigation to the same reviewer with SendMessage to its agent ID'
   has "$s" 'After `alfred-config get failed-review-max` rounds that end in stop, escalate to Alfred'
