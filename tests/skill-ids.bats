@@ -66,9 +66,10 @@ has() { grep -qF -- "$2" "$1"; }
 
 @test "init: strips userinfo, handles a missing origin, removes its temp file" {
   f="$ROOT/commands/init.md"
-  has "$f" "sed -E 's#//[^@/]*@#//#'"
+  has "$f" "sed -E 's#^(https?://)[^@/]*@#\\1#'"
   has "$f" 'no origin remote'
-  has "$f" 'rm -f "$ERRF"'
+  has "$f" "trap 'rm -f \"\$ERRF\"' EXIT"
+  has "$f" 'ERR=$(cat "$ERRF")'
 }
 
 @test "merge and review name PRs as <CODE>#<n>; no old forms" {
