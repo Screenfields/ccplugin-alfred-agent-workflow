@@ -5,7 +5,7 @@ description: >
   analyst for a work item, sends the result to a fresh readiness reviewer, loops the findings
   to the same pair until the reviewer passes or the failed-review-max limit sends it to the hub,
   then hands the pass to the lead. Edits nothing.
-allowed-tools: Agent, SendMessage, Bash, Read
+allowed-tools: Agent, SendMessage, Skill, Bash, Read
 ---
 
 # Refine — the analyst and readiness reviewer pair, new to ready
@@ -36,7 +36,7 @@ Start a fresh `readiness-reviewer` specialist (`agents/readiness-reviewer.md`) w
 
 On each fail, first count the failed rounds, before sending any findings. Read the limit with `alfred-config get failed-review-max`. The fail that reaches that number escalates instead of looping: stop, and send the escalation to the hub with the messaging skill. This is the "hit a review or overrun limit" case in the Escalate paragraph of `agreement/lead.md`. The escalation carries the item reference, the last body, and every finding. Do not hand over a fail as a pass.
 
-For a large or very large item, a fail whose only failed check is the missing owner approval is not looped and does not count toward the limit. Hand it to the lead, who obtains the approval under Size in `agreement/lead.md`.
+For a large or very large item, a fail whose only failed check is the missing owner approval is not looped and does not count toward the limit. Hand it to the lead with the reviewer's output, the body and the open questions. The lead obtains the approval under Size in `agreement/lead.md`, and the lead re-runs the reviewer after the approval.
 
 Below the limit, send the reviewer's findings to the same analyst with SendMessage to the analyst's agent ID. Do not start a new analyst: the analyst keeps its context for the fix. Send the analyst's revised body to the same reviewer with SendMessage to the reviewer's agent ID, because the reviewer checks against its own findings. Repeat until the reviewer passes.
 

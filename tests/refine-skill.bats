@@ -28,6 +28,7 @@ fm_key() {
   t=$(fm_key allowed-tools)
   [[ "$t" =~ (:|,)\ *Agent(,|$) ]] || { echo "no Agent: $t"; return 1; }
   [[ "$t" =~ (:|,)\ *SendMessage(,|$) ]] || { echo "no SendMessage: $t"; return 1; }
+  [[ "$t" =~ (:|,)\ *Skill(,|$) ]] || { echo "no Skill: $t"; return 1; }
 }
 
 @test "the README slash-commands table has the refine row" {
@@ -80,8 +81,11 @@ fm_key() {
 @test "the loop counts before it sends, and large items missing only approval are not looped" {
   c=$(grep -n -m1 'first count the failed rounds, before sending any findings' "$SKILL" | cut -d: -f1)
   m=$(grep -n -m1 'send the reviewer.s findings to the same analyst' "$SKILL" | cut -d: -f1)
-  [ -n "$c" ] && [ -n "$m" ] && [ "$c" -lt "$m" ]
+  [ -n "$c" ] || { echo "no count-first sentence"; return 1; }
+  [ -n "$m" ] || { echo "no findings-to-analyst sentence"; return 1; }
+  [ "$c" -lt "$m" ] || { echo "count comes after send"; return 1; }
   grep -q 'only failed check is the missing owner approval is not looped' "$SKILL"
+  grep -q 'the lead re-runs the reviewer after the approval' "$SKILL"
   grep -q 'checks the carried body and not the item' "$SKILL"
   grep -q "analyst's latest open questions and split proposals" "$SKILL"
 }
