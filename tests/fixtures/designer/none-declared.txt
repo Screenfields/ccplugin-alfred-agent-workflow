@@ -1,0 +1,8 @@
+## Design
+
+checked: the thresholds file holds the feature switches | grep loop-check-enabled config/thresholds.json | found, a boolean
+checked: no baseline doc describes a retry queue | grep -rn "retry queue" docs/baseline | no match
+Precedent: none declared
+
+Alternatives: a queue in the hub, or a queue in each lead. Recommendation: a queue in each lead.
+Owner triggers found: no precedent with real alternatives.

@@ -9,7 +9,7 @@ setup() {
   ROOT="$BATS_TEST_DIRNAME/.."
   AGENTS="$ROOT/agents"
   CFG="$ROOT/config/thresholds.json"
-  ROLES="analyst readiness-reviewer design-reviewer builder code-reviewer technical-writer document-reviewer acceptance-reviewer incident-reviewer investigator"
+  ROLES="analyst designer readiness-reviewer design-reviewer builder code-reviewer technical-writer document-reviewer acceptance-reviewer incident-reviewer investigator"
   REVIEWERS="readiness design code document acceptance incident"
   PRECEDENT_CASES="code-only doctrine-only missing none-alternatives none-one-option not-covering owner-decision valid"
   PDIR="$ROOT/tests/specialists/design-precedent"
@@ -22,6 +22,7 @@ fm() { awk -v k="$2" '/^---$/ {n++; next} n == 1 && index($0, k ": ") == 1 {sub(
 config_role() {
   case "$1" in
     analyst) echo analyst ;;
+    designer) echo designer ;;
     builder) echo builder ;;
     technical-writer) echo technical-writer ;;
     incident-reviewer) echo incident-reviewer ;;
@@ -47,8 +48,8 @@ effort_to_field() {
   esac
 }
 
-@test "there are exactly the ten definitions" {
-  [ "$(ls "$AGENTS" | wc -l)" -eq 10 ]
+@test "there are exactly the eleven definitions" {
+  [ "$(ls "$AGENTS" | wc -l)" -eq 11 ]
   for r in $ROLES; do [ -f "$AGENTS/$r.md" ]; done
 }
 
@@ -828,4 +829,128 @@ phrase_result() {
   cp "$BATS_TEST_TMPDIR/x.md" "$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
   run check_env
   [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+}
+
+# --- CCW-158: the designer and the platform-design-basis skill ---------------
+
+DESIGNER="$BATS_TEST_DIRNAME/../agents/designer.md"
+DESIGN_SKILL="$BATS_TEST_DIRNAME/../skills/platform-design-basis/SKILL.md"
+
+@test "designer: preloads platform-design-basis and is read-only except through Bash" {
+  [ "$(fm designer skills)" = platform-design-basis ]
+  [[ ", $(fm designer tools)," == *", Bash,"* ]]
+  for t in Edit Write NotebookEdit; do
+    if [[ ", $(fm designer tools)," == *", $t,"* ]]; then echo "tool $t"; return 1; fi
+  done
+}
+
+@test "designer: the read-only sentence, the Bash limit and the fallback path are in the body" {
+  grep -qxF 'Read-only by instruction, except the `## Design` section of the work item named in the brief: never change other files, branches, issues or other state.' "$DESIGNER"
+  [ "$(grep -cF 'Use Bash for anything but that edit and read-only checks.' "$DESIGNER")" = 1 ]
+  grep -qF 'the brief names `skills/platform-design-basis/SKILL.md`: read it first.' "$DESIGNER"
+  [ -f "$ROOT/skills/platform-design-basis/SKILL.md" ]
+}
+
+@test "designer: the body ends with the Pairs-with paragraph naming the design reviewer" {
+  [ "$(tail -n 1 "$DESIGNER")" = '**Pairs with.** The design reviewer.' ]
+}
+
+@test "design reviewer: Pairs with reads designer (when enabled), otherwise the lead or Alfred" {
+  [ "$(tail -n 1 "$AGENTS/design-reviewer.md")" = '**Pairs with.** designer (when enabled), otherwise the lead or Alfred.' ]
+  for f in "$AGENTS/design-reviewer.md" "$ROOT/README.md"; do
+    if grep -qF 'who keep design' "$f"; then echo "old wording in $f"; return 1; fi
+  done
+}
+
+@test "platform-design-basis: frontmatter name and description, and eight bullets" {
+  [ "$(sed -n 's/^name: //p' "$DESIGN_SKILL" | head -1)" = platform-design-basis ]
+  grep -qxF "description: \"Load when writing or checking a design for the Alfred platform: what counts as a precedent, the doctrines to read, the platform's patterns, the loop, the owner triggers and how to write.\"" "$DESIGN_SKILL"
+  [ "$(grep -c '^- \*\*' "$DESIGN_SKILL")" -eq 8 ]
+}
+
+@test "platform-design-basis: the doctrine sentence appears once across agents and skills" {
+  cd "$ROOT"
+  [ "$(grep -rF 'Doctrines inform a design but are not a precedent' agents skills | wc -l)" -eq 1 ]
+  grep -qF 'Doctrines inform a design but are not a precedent' "$DESIGN_SKILL"
+}
+
+@test "platform-design-basis: the Doctrines bullet points at the brief's path, not the session-start index" {
+  grep -qF 'the doctrines at the path the brief names' "$DESIGN_SKILL"
+  [ "$(grep -c 'doctrine index the plugin injects' "$DESIGN_SKILL" || true)" = 0 ]
+}
+
+@test "designer fixtures: a link with a passage and none declared pass the format helper" {
+  for f in precedent none-declared; do
+    run design_format_ok "$ROOT/tests/fixtures/designer/$f.txt"
+    [ "$status" -eq 0 ] || { echo "$f: $output"; return 1; }
+  done
+}
+
+@test "designer fixtures: a Precedent line without a passage and a two-field checked line fail" {
+  run design_format_ok "$ROOT/tests/fixtures/designer/bad-precedent.txt"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"bad Precedent line"* ]] || { echo "$output"; return 1; }
+  run design_format_ok "$ROOT/tests/fixtures/designer/bad-checked.txt"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"bad checked line"* ]] || { echo "$output"; return 1; }
+}
+
+@test "designer-enabled is read by no skill, command, hook, script or agent" {
+  cd "$ROOT"
+  if grep -rn designer-enabled skills commands hooks bin agents; then return 1; fi
+}
+
+# readme_rows — "name|model|effort" for each row of the README Specialists table.
+readme_rows() {
+  awk '/^## Specialists/ {on = 1; next} /^### / && on {exit}
+    on && /^\| `[a-z-]+` \|/ {
+      n = split($0, c, "|"); name = c[2]; cell = c[n - 1]
+      gsub(/[ `]/, "", name); gsub(/^ +| +$/, "", cell); split(cell, me, ", ")
+      print name "|" me[1] "|" me[2] }' "$ROOT/README.md"
+}
+
+@test "README lists every definition with its model and effort" {
+  rows=$(readme_rows)
+  [ "$(wc -l <<<"$rows")" -eq 11 ]
+  for r in $ROLES; do
+    row=$(grep -E "^$r\|" <<<"$rows") || { echo "no README row for $r"; return 1; }
+    [ "$row" = "$r|$(fm "$r" model)|$(fm "$r" effort)" ] || { echo "$row"; return 1; }
+  done
+}
+
+@test "README count sentence says Eleven and the designer row and note are present" {
+  grep -qF 'Eleven specialist definitions' "$ROOT/README.md"
+  if grep -qF 'Ten specialist definitions' "$ROOT/README.md"; then return 1; fi
+  grep -qF '| `designer` | `design-reviewer` | read-only, edits the `## Design` section named in the brief | opus, high |' "$ROOT/README.md"
+  grep -qF '| `design-reviewer` | designer (when enabled), otherwise the lead or Alfred | read-only | sonnet, high |' "$ROOT/README.md"
+  grep -qF '`designer` writes the design for a ready item, naming its precedent or the alternatives; pairs with the design reviewer; opt-in (`designer-enabled`).' "$ROOT/README.md"
+}
+
+# --- CCW-158 document review: the designer note in the README ----------------
+
+# designer_note — the README note under the Specialists table, without Alfred's row sentence.
+designer_note() {
+  grep -F '`designer` writes the design for a ready item' "$ROOT/README.md" \
+    | sed 's/^`designer` writes the design for a ready item, naming its precedent or the alternatives; pairs with the design reviewer; opt-in (`designer-enabled`)\.//'
+}
+
+@test "README designer note: what opt-in means today" {
+  designer_note | grep -qF 'Until `skills/design` reads the switch, a lead uses the designer by starting `alfred-agent:designer` with the Agent tool. The switch changes nothing yet.'
+}
+
+@test "README designer note: what the brief carries" {
+  designer_note | grep -qF "The designer's brief carries the work item, whose \`## Design\` section is the write target, the precedent link with its passage, the installed \`doctrines/\` path, the absolute path to \`skills/platform-design-basis/SKILL.md\` as the fallback, and passages for any platform references the skill points at."
+}
+
+@test "README designer note: the lead adds no Precedent line" {
+  designer_note | grep -qF 'A lead that uses the designer does not add its own `Precedent:` line. The designer writes it.'
+}
+
+@test "README: the lines added for the designer carry no semicolon" {
+  note=$(designer_note)
+  [ -n "$note" ]
+  if grep -q ';' <<<"$note"; then echo "semicolon in the designer note"; return 1; fi
+  line=$(grep -F 'The designer may edit the `## Design` section of that item.' "$ROOT/README.md")
+  [ -n "$line" ]
+  if grep -q ';' <<<"$line"; then echo "semicolon in the read-only paragraph"; return 1; fi
 }

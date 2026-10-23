@@ -668,7 +668,7 @@ lead's devbox, and this plugin version installed. Turning the repo's ruleset off
 
 ## Specialists (`agents/`)
 
-Ten specialist definitions (ccplugin#128, AP-ADR0030, AP-ADR0031). A lead starts a specialist by
+Eleven specialist definitions (ccplugin#128, AP-ADR0030, AP-ADR0031). A lead starts a specialist by
 name instead of writing role text into each brief. Each definition holds the role's job, order,
 what it never does, and what its output carries. The work-and-review pattern (author, then paired
 reviewer, then the fix to the same pair) is the routed rule `work-and-review-in-pairs`.
@@ -677,7 +677,8 @@ reviewer, then the fix to the same pair) is the routed rule `work-and-review-in-
 |---|---|---|---|
 | `analyst` | `readiness-reviewer` | read-only, edits the item body in the brief | sonnet, high |
 | `readiness-reviewer` | `analyst` | read-only | sonnet, high |
-| `design-reviewer` | the lead or Alfred, who keep design | read-only | sonnet, high |
+| `designer` | `design-reviewer` | read-only, edits the `## Design` section named in the brief | opus, high |
+| `design-reviewer` | designer (when enabled), otherwise the lead or Alfred | read-only | sonnet, high |
 | `builder` | `code-reviewer` (code), `document-reviewer` (docs only) | read and write | sonnet, medium |
 | `code-reviewer` | `builder` | read-only | sonnet, high |
 | `technical-writer` | `document-reviewer` | read and write | sonnet, medium |
@@ -685,6 +686,8 @@ reviewer, then the fix to the same pair) is the routed rule `work-and-review-in-
 | `acceptance-reviewer` | the lead, who claims done | read-only | sonnet, high |
 | `incident-reviewer` | the hub, who chooses the mitigation | read-only | opus, max |
 | `investigator` | none | `Read, Grep, Glob, WebFetch`, read-only Metis tools | haiku, low |
+
+`designer` writes the design for a ready item, naming its precedent or the alternatives; pairs with the design reviewer; opt-in (`designer-enabled`). The switch `designer-enabled` is a boolean in `config/thresholds.json`, default `false`, read with `alfred-config get designer-enabled` like `loop-check-enabled`. Until `skills/design` reads the switch, a lead uses the designer by starting `alfred-agent:designer` with the Agent tool. The switch changes nothing yet. The designer's brief carries the work item, whose `## Design` section is the write target, the precedent link with its passage, the installed `doctrines/` path, the absolute path to `skills/platform-design-basis/SKILL.md` as the fallback, and passages for any platform references the skill points at. A lead that uses the designer does not add its own `Precedent:` line. The designer writes it. The designer preloads the core skill `skills/platform-design-basis/SKILL.md`. Its model and effort (`opus`, `high`) are an unmeasured starting candidate with no source.
 
 `model` and `effort` follow `model-setting-per-role` in `config/thresholds.json`
 (`light`/`medium`/`strong` are `haiku`/`sonnet`/`opus`; effort `highest` is `max`). A role whose
@@ -728,11 +731,11 @@ no alias names. Where no Metis tool is available the investigator reports "Metis
 ### Read-only by instruction
 
 Only the investigator is read-only by tool list: it has no `Bash`, `Edit`, `Write` or
-`NotebookEdit`, and a `tools:` allowlist leaves out every MCP tool it does not name. The analyst and the
+`NotebookEdit`, and a `tools:` allowlist leaves out every MCP tool it does not name. The analyst, the designer and the
 reviewers keep `Bash` because they need `gh`, `git log` and the test runner to check claims, so
 they are read-only by instruction: the definition says not to change files, branches, issues or
 other state, and nothing in the tool list stops it. The analyst may edit the body of the item named in the
-brief. The code reviewer may run tests in its own scratch worktree and commit nothing.
+brief. The designer may edit the `## Design` section of that item. The code reviewer may run tests in its own scratch worktree and commit nothing.
 
 ### House style
 

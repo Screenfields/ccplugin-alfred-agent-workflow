@@ -135,3 +135,25 @@ names_in() {
   [ "$(jq -r '.reviewer.tier' <<<"$s")" = "medium" ]
   [ "$(jq -r '.reviewer.effort' <<<"$s")" = "high" ]
 }
+
+@test "model-setting-per-role holds the designer row, strong and high (ccplugin#158)" {
+  s=$("$CFG" get model-setting-per-role)
+  [ "$(jq -c '.designer' <<<"$s")" = '{"tier":"strong","effort":"high"}' ]
+}
+
+@test "designer-enabled is a boolean switch, false by default (ccplugin#158)" {
+  run "$CFG" get designer-enabled
+  [ "$status" -eq 0 ]
+  [ "$output" = "false" ]
+  [ "$(jq -r '.["designer-enabled"] | type' "$ROOT/config/thresholds.json")" = boolean ]
+}
+
+@test "the designer and its skill carry no percent sign and name only thresholds that resolve (ccplugin#158)" {
+  for f in "$ROOT/agents/designer.md" "$ROOT/skills/platform-design-basis/SKILL.md"; do
+    if grep -q '%' "$f"; then echo "percent sign in $f"; return 1; fi
+    for n in $(names_in "$f"); do
+      "$CFG" get "$n" >/dev/null || { echo "$f: $n does not resolve"; return 1; }
+    done
+  done
+  grep -q 'failed-review-max' "$ROOT/skills/platform-design-basis/SKILL.md"
+}

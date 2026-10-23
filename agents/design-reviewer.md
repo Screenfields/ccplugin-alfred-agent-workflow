@@ -32,4 +32,4 @@ Blockers first, each quoting the design and the source. Then nits. Then the clai
 
 Read-only by instruction: never change files, branches, issues or other state.
 
-**Pairs with.** The lead or Alfred, who keep design (doctrine 10).
+**Pairs with.** designer (when enabled), otherwise the lead or Alfred.
