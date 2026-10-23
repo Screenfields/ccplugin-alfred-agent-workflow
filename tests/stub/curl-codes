@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Test double for curl, for bin/alfred-code-lookup (CCW-122) and the title
+# check (CCW-140). Mode from $STUB_DIR/mode (default ok):
+#   ok           200 and tests/fixtures/codes-export.json
+#   401, 403     that code, empty body
+#   5xx          503, empty body
+#   garbage      200 and a body that is not JSON
+#   unreachable  prints 000, exits 7 like curl
+#   slow         never answers; exec sleep so the caller's timeout kills it
+# Appends to $STUB_DIR/calls.log one "url <url>" line per call and one
+# "hdr <line>" line per header line passed with -H @file.
+out="" hdrfile="" url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -H) case "$2" in @*) hdrfile="${2#@}" ;; esac; shift 2 ;;
+    -w|--max-time) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+{
+  echo "url $url"
+  [ -n "$hdrfile" ] && sed 's/^/hdr /' "$hdrfile"
+} >> "$STUB_DIR/calls.log"
+mode=$(cat "$STUB_DIR/mode" 2>/dev/null || echo ok)
+fixture="$(dirname "$(readlink -f "$0")")/../fixtures/codes-export.json"
+body() { [ -n "$out" ] && printf '%s' "$1" > "$out"; }
+case "$mode" in
+  ok) [ -n "$out" ] && cp "$fixture" "$out"; printf 200 ;;
+  401|403) body ''; printf '%s' "$mode" ;;
+  5xx) body ''; printf 503 ;;
+  garbage) body '<html>not json</html>'; printf 200 ;;
+  unreachable) printf 000; exit 7 ;;
+  slow) exec sleep 30 ;;
+esac

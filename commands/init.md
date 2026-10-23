@@ -88,6 +88,25 @@ fi
 
 - Set permissions: `chmod 600 .alfred/config.json`
 
+### 5b. Write the Project Code
+
+The project code (AP-ADR0021) names issues and PRs. The registry is authoritative, so look it up from the `origin` remote and keep a copy in the config. A failed lookup never fails init.
+
+```bash
+CL=$(command -v alfred-code-lookup || echo "${CLAUDE_PLUGIN_ROOT:-}/bin/alfred-code-lookup")
+ERRF=$(mktemp)
+if [ -x "$CL" ]; then
+  CODE=$("$CL" "$(git remote get-url origin 2>/dev/null)" 2>"$ERRF"); RC=$?
+else
+  CODE=""; RC=2; echo "alfred-code-lookup not found" > "$ERRF"
+fi
+```
+
+- **Exit 0:** write `"code": "<CODE>"` into `.alfred/config.json`, merging like step 5 (keep every other key). An existing `code` that equals the lookup is left alone. A different one is updated, with a one-line note such as `code updated: OLD -> NEW (registry wins)`.
+- **Exit 1 or 2:** write no `code`, say the one stderr line from `$ERRF` in one line (for example `no code registered for <owner/repo>` or `registry unreachable`), and carry on. An existing `code` stays as it is.
+
+`code` is a convenience copy. The project manager stays authoritative, and the skills use the config `code` only as the fallback for this session's own repo when the registry fails.
+
 ### 6. Update .gitignore
 
 - Check if `.alfred/` is in .gitignore
