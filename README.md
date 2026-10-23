@@ -765,6 +765,32 @@ stores `"theme": "custom:alfred-agent:owner-prompts"` in the user `settings.json
 Owner suggestion (via zeus and the hub), 2026-10-15. Hooks and status lines cannot recolour
 prompts; a theme can.
 
+## Charter template and check (`templates/CHARTER.md`, `bin/alfred-charter-check`)
+
+Every repo has a `CHARTER.md` in its root (AP-ADR0024). The leads add theirs from this template (AP-1280). Copy the template, fill the five sections, and run the check on the file:
+
+```bash
+cp "${CLAUDE_PLUGIN_ROOT}/templates/CHARTER.md" CHARTER.md
+"${CLAUDE_PLUGIN_ROOT}/bin/alfred-charter-check" CHARTER.md
+```
+
+If the plugin's `bin/` is on your `PATH`, or `CLAUDE_PLUGIN_ROOT` is not set in your shell, resolve the script first:
+
+```bash
+CC=$(command -v alfred-charter-check || echo "${CLAUDE_PLUGIN_ROOT}/bin/alfred-charter-check")
+"$CC" CHARTER.md
+```
+
+The five headings are `## Repo owner`, `## Objective`, `## Business case`, `## Merge rule` and `## Scope`, in that order, each once. The first four have exactly one non-blank line each. `## Scope` has at least one. Extra `##` headings are allowed only after `## Scope`. A heading needs a space, a tab or the end of the line after the hashes, so `##Notes` and `#764 ...` are ordinary lines. HTML comments are removed first, and an unclosed `<!--` fails. A fence opens on a line whose trimmed start is three backticks or three tildes. An unterminated fence runs to the end of the file, and a tilde line does not close a backtick fence. The header of `bin/alfred-charter-check` has the full rules.
+
+The check fails on a placeholder: a line under a heading that starts with `TODO:`.
+
+The `TODO:` match is case-insensitive, allows leading whitespace, and counts lines inside fences. It looks only under the five headings, not under extra headings after `## Scope`.
+
+Where the register has no objective for the project, write the project's own objective as one line; the check accepts any single line under `## Objective` that does not start with `TODO:`.
+
+The check prints `ok: <file>` and exits 0 when the charter is valid. It prints one line per fault, `<file>: <fault>: ## <Heading>` (except the unclosed-comment fault, which names the line), and exits 1 when it is not. It exits 2, with an error line and a usage line, for no argument, more than one argument, a missing or unreadable file, or a directory.
+
 ## Agent identity convention
 
 Each agent has a unique `agent_id` set via the `AGENT_ID` env var. Choose a stable identifier — other agents will address you by that name.

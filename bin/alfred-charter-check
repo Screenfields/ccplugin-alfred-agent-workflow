@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# alfred-charter-check — check a repo's CHARTER.md against the template
+# (templates/CHARTER.md, AP-ADR0024, AP-1280).
+#
+#   alfred-charter-check <file>
+#
+# Rules:
+#   - A heading is a line equal to "## <name>" once trailing whitespace is
+#     removed. Names are exact, case included. The five names, in order:
+#     Repo owner, Objective, Business case, Merge rule, Scope. Each once.
+#     A level-1 or level-2 heading needs a space, a tab or the end of the line
+#     after the hashes, so `##Notes`, `#764 ...` and `###` are not headings.
+#   - Fences: a line whose trimmed start (leading spaces and tabs removed) is
+#     three backticks or three tildes opens a fence; it closes at the next such
+#     line with the same character, so a tilde line does not close a backtick
+#     fence; an unterminated fence runs to the end of the file. A line inside
+#     a fence is not a heading. An indented fence line is a fence
+#     (project-manager#764 reads it so).
+#   - Order: the first five level-2 headings (outside a fence) are the five
+#     names, in order. Extra level-2 headings are allowed only after Scope.
+#     Text before the first heading, including a "# Title", is allowed.
+#   - Lines: a heading's lines are the non-blank lines after it and before the
+#     next level-1 or level-2 heading (outside a fence) or the end of the
+#     file; lines inside a fence count. Each of the first four has exactly
+#     one. Scope has at least one.
+#   - HTML comments: <!-- ... --> (also across lines) are removed from the
+#     whole file first, before headings, fences and lines are looked at, so a
+#     heading inside a comment is not a heading. An unclosed <!-- is a fault
+#     ("unclosed HTML comment: line <n>").
+#   - Placeholder: a line under one of the five headings that starts with
+#     "TODO:" (optional leading whitespace, any case) fails. Lines inside a
+#     fence are checked too; lines under extra headings after Scope are not.
+#
+# Output: "ok: <file>" and exit 0; or one stdout line per fault,
+# "<file>: <fault>: ## <Heading>" (except the unclosed-comment fault, which
+# names the line), and exit 1. Faults are reported in this order: unclosed
+# comment; missing or repeated headings; then, only if all five occur once,
+# relative order, then any other level-2 heading before Scope; then line
+# counts and placeholders. A blank line is whitespace only (space, tab, CR).
+# The fence close rule is deliberately simple: the next line that begins with
+# three of the opening character closes, whatever follows them. The content
+# of "## Objective" is not checked beyond the rules above.
+# Exit 2, "alfred-charter-check: <error>" and the usage line on stderr: no
+# argument, more than one, no such file, unreadable file, or a directory.
+
+usage="usage: alfred-charter-check <file>   (CHARTER.md to check)"
+err=""
+if [ $# -eq 0 ]; then err="no file given"
+elif [ $# -gt 1 ]; then err="expected one file, got $#"
+elif [ -d "$1" ]; then err="is a directory: $1"
+elif [ ! -e "$1" ]; then err="no such file: $1"
+elif [ ! -f "$1" ] || [ ! -r "$1" ]; then err="cannot read: $1"
+fi
+if [ -n "$err" ]; then
+  printf 'alfred-charter-check: %s\n%s\n' "$err" "$usage" >&2
+  exit 2
+fi
+
+# awk gets the name through the environment, never as an operand (a=b would be
+# an assignment) and never as a bare "-" (getline < "-" reads stdin): a path
+# without a slash is read as ./<name>.
+case $1 in */*) path=$1 ;; *) path=./$1 ;; esac
+CHARTER_FILE="$1" CHARTER_PATH="$path" exec awk '
+function nlcount(x) { return gsub(/\n/, "\n", x) }
+function fault(msg, h) { print file ": " msg ": " h; bad = 1 }
+# Remove every complete <!-- ... --> from t. An unclosed <!-- stays in the text
+# and its line number goes to unclosed.
+function strip(t,    out, a, rest, b, pre) {
+  out = ""
+  while ((a = index(t, "<!--")) > 0) {
+    rest = substr(t, a + 4); b = index(rest, "-->")
+    pre = substr(t, 1, a - 1)
+    if (b == 0) {
+      if (unclosed == 0) unclosed = lineno + nlcount(pre) + 1
+      break
+    }
+    out = out pre
+    lineno += nlcount(pre) + nlcount(substr(rest, 1, b - 1))
+    t = substr(rest, b + 3)
+  }
+  return out t
+}
+function close_sec() {
+  if (sec != "") { ns++; sname[ns] = sec; sbuf[ns] = buf }
+  sec = ""; buf = ""
+}
+function feed(raw,    line, t, c, infence) {
+  line = raw
+  sub(/[ \t\r]+$/, "", line)
+  t = line; sub(/^[ \t]+/, "", t)
+  c = substr(t, 1, 3)
+  infence = 0
+  if (fence != "") {
+    infence = 1
+    if (c == fence) fence = ""
+  } else if (c == "```" || c == "~~~") { fence = c; infence = 1 }
+  if (!infence && (line ~ /^#([ \t]|$)/ || line ~ /^##([ \t]|$)/)) {
+    close_sec()
+    if (line ~ /^##([ \t]|$)/) {
+      nh++; head[nh] = line
+      if (line in idx) { seen[line]++; sec = line }
+    }
+    return
+  }
+  if (sec != "") buf = buf line "\n"
+}
+function report(    i, h, k, j, m, sp, kk, cnt, nl, L) {
+  close_sec()
+  if (unclosed > 0) { print file ": unclosed HTML comment: line " unclosed; bad = 1 }
+  allok = 1
+  for (i = 1; i <= n; i++) {
+    h = "## " want[i]
+    if (seen[h] == 0) { fault("missing heading", h); allok = 0 }
+    else if (seen[h] > 1) { fault("repeated heading", h); allok = 0 }
+  }
+  if (allok) {
+    k = 0
+    for (j = 1; j <= nh; j++) {
+      if (!(head[j] in idx)) continue
+      k++
+      if (head[j] != "## " want[k]) {
+        fault("out of order, found " head[j] " where expected", "## " want[k])
+        break
+      }
+    }
+    for (j = 1; j <= nh; j++) if (head[j] == "## Scope") sp = j
+    for (j = 1; j < sp; j++) {
+      if (head[j] in idx) continue
+      for (m = j + 1; !(head[m] in idx); m++) ;
+      fault("extra heading before " head[m], head[j])
+    }
+  }
+  for (kk = 1; kk <= ns; kk++) {
+    h = sname[kk]
+    cnt = 0
+    nl = split(sbuf[kk], L, "\n")
+    for (j = 1; j <= nl; j++) {
+      if (L[j] ~ /^[ \t\r]*$/) continue
+      cnt++
+      if (tolower(L[j]) ~ /^[ \t]*todo:/) fault("placeholder (line starts with TODO:)", h)
+    }
+    if (cnt < 1) fault("empty heading, no line under it", h)
+    else if (cnt > 1 && h != "## Scope") fault("too many lines (" cnt ", expected one)", h)
+  }
+  if (!bad) print "ok: " file
+}
+BEGIN {
+  file = ENVIRON["CHARTER_FILE"]; path = ENVIRON["CHARTER_PATH"]
+  n = split("Repo owner|Objective|Business case|Merge rule|Scope", want, "|")
+  for (i = 1; i <= n; i++) idx["## " want[i]] = i
+  fence = ""; sec = ""; buf = ""; nh = 0; ns = 0; bad = 0; unclosed = 0; lineno = 0
+  all = ""; first = 1
+  while ((getline ln < path) > 0) { all = all (first ? "" : "\n") ln; first = 0 }
+  close(path)
+  nl2 = split(strip(all), LN, "\n")
+  for (q = 1; q <= nl2; q++) feed(LN[q])
+  report()
+  exit bad
+}
+'
