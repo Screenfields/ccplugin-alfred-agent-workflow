@@ -713,7 +713,9 @@ reviewer passes when it finds every seeded defect and leaves the sound part alon
 ```bash
 tests/specialists/run.sh probe                    # prove the answer files are unreachable; run first
 tests/specialists/run.sh code --runs 2            # one reviewer
-tests/specialists/run.sh all                      # all six reviewers, two runs each
+tests/specialists/run.sh design-precedent --runs 2  # the eight precedent cases against the design reviewer
+tests/specialists/run.sh all                      # the six reviewers and the design-precedent cases, two runs each
+tests/specialists/run.sh check design-precedent   # compare the Precedent lines of the results with expected.json
 ```
 
 `run.sh` is a live runner (`claude -p`), not part of the bats job. It copies only `case.md` into
@@ -724,6 +726,21 @@ open). Outputs go to `tests/specialists/results/<role>-reviewer-run<N>.md`, with
 in the matching `.json`. The runner only collects; the starting session compares each output with
 `expected.json` and records found or missed per defect and run. Run it from a commit that includes the
 definitions: the plugin copy is built from `HEAD`.
+
+`tests/specialists/design-precedent/<case>/` holds the eight precedent cases of the design
+reviewer (`valid`, `missing`, `code-only`, `not-covering`, `owner-decision`, `doctrine-only`,
+`none-alternatives`, `none-one-option`), each with `case.md` and `expected.json`
+(`precedent`, `alternatives`, `verdict`, `blocker`, `source_note`, `sound`). `run.sh all` runs the
+six reviewers and then these cases, with the same `--runs`. Result files are
+`design-precedent-<case>-run<N>.md` and `.json` in `tests/specialists/results/`; a run that fails
+prints `FAILED design-precedent/<case> run <N>` and the loop goes on.
+`run.sh check design-precedent` needs no network and no `claude`: for each result file it
+compares the `Precedent:` and `Real alternatives:` lines with `expected.json` (lines that start with
+`> ` are quotes of the design note and are ignored), and for `valid` it looks for `passage carried,
+not read at source` on the `Precedent:` line. It prints `MATCH` or `MISMATCH` per case and run and
+exits non-zero on any mismatch or any case without a result file; `--runs N` also requires
+`run1` to `runN`. The verdict, the blocker text and the sound part stay with the starting session.
+The format of the `Precedent:` line is defined once, in `tests/helpers/design-format.bash`.
 
 ## Theme: owner prompts stand out (`themes/owner-prompts.json`)
 

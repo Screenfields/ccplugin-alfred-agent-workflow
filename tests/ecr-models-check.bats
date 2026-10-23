@@ -121,8 +121,8 @@ models_json() { # ids... -> {"data":[{"id":..}]}
   grep -q '^MAX_TOKENS=8000 .*32000 glm-5.3 and kimi-k3' "$SKILL"
 }
 
-@test "plugin version is 2.31.0" {
-  [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = 2.31.0 ]
+@test "plugin version is 2.32.0" {
+  [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = 2.32.0 ]
 }
 
 # --- parser strictness: a reworded table must fail loudly, never drop models ---
