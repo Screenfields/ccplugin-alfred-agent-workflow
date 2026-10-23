@@ -223,16 +223,16 @@ Example: `CCW-106: bump alfred-agent pin 2.29.0 -> 2.30.0`. The commit message i
 
 ```bash
 CL=$(command -v alfred-code-lookup || echo "${CLAUDE_PLUGIN_ROOT:-}/bin/alfred-code-lookup")
-CODE=$("$CL" {upstream owner}/{upstream repo})
+CODE=$("$CL" {upstream owner}/{upstream repo}); RC=$?
 ```
 
-CODE comes from alfred-code-lookup `<owner/repo>`; the `code` in `.alfred/config.json` is the fallback for the session's own repo only. A code is never taken from memory. A `CL` that is not executable counts as exit 2. Outcomes:
+CODE comes from alfred-code-lookup `<owner/repo>`, and here `<owner/repo>` is the upstream repo. The `code` in `.alfred/config.json` is this repo's own code, not the upstream's, so it never applies in this step. A code is never taken from memory. Branch on RC. A `CL` that is not executable, or any RC other than 0 or 1, counts as exit 2. Outcomes:
 
-- exit 0: use the code.
-- exit 1 (no code, for example an ops repo): title without a prefix, plus one line in the PR or issue body, "repo has no registry code".
-- exit 2 (registry failure): use the config `code` if present for the own repo, otherwise no prefix plus the body line "registry unreachable; title not coded".
+- exit 0 (RC=0): use the code.
+- exit 1 (RC=1, no code, for example an ops repo): title without a prefix, plus one line in the PR body, "repo has no registry code".
+- exit 2 (any other RC, registry failure): open the PR without a prefix and add the body line "registry unreachable; title not coded". Do not substitute the config `code`.
 
-For a cache-only bump the title falls back to `{plugin-name}: bump pin {old-version} → {new-version}` and the lookup is not needed.
+For a cache-only bump the lookup is not needed.
 
 ```bash
 cd "$CATALOG_DIR"
@@ -240,6 +240,9 @@ cd "$CATALOG_DIR"
 command -v switch-role >/dev/null 2>&1 && switch-role lead
 git push -u origin "$BRANCH"
 
+# Coded title: <CODE>-<n> is the upstream item found above.
+# Cache-only bump with no item: the title is "{plugin-name}: bump pin {old-version} -> {new-version}"
+# instead (accepted as a CCW-140 warning).
 gh pr create \
   --repo Screenfields/alfred-cc-tools \
   --base main \

@@ -54,6 +54,23 @@ has() { grep -qF -- "$2" "$1"; }
   done
 }
 
+@test "the five creating skills capture RC right after the lookup; release never uses the config code" {
+  for k in $FIVE; do
+    grep -qE 'CODE=\$\("\$CL" .*\); RC=\$\?$' "$S/$k/SKILL.md" || { echo "$k"; return 1; }
+    has "$S/$k/SKILL.md" 'Branch on RC'
+  done
+  has "$S/release/SKILL.md" 'never applies in this step'
+  has "$S/release/SKILL.md" 'Do not substitute the config `code`'
+  has "$S/release/SKILL.md" 'Cache-only bump with no item'
+}
+
+@test "init: strips userinfo, handles a missing origin, removes its temp file" {
+  f="$ROOT/commands/init.md"
+  has "$f" "sed -E 's#//[^@/]*@#//#'"
+  has "$f" 'no origin remote'
+  has "$f" 'rm -f "$ERRF"'
+}
+
 @test "merge and review name PRs as <CODE>#<n>; no old forms" {
   has "$S/merge/SKILL.md" '<CODE>#<n>'
   if has "$S/merge/SKILL.md" 'PR #{N}'; then false; fi

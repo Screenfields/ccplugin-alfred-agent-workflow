@@ -64,14 +64,14 @@ Commit, push, and open a PR. The PR title is `<CODE>-<n>: <task title>`, where `
 
 ```bash
 CL=$(command -v alfred-code-lookup || echo "${CLAUDE_PLUGIN_ROOT:-}/bin/alfred-code-lookup")
-CODE=$("$CL" {owner}/{repo})
+CODE=$("$CL" {owner}/{repo}); RC=$?
 ```
 
-CODE comes from alfred-code-lookup `<owner/repo>`; the `code` in `.alfred/config.json` is the fallback for the session's own repo only. A code is never taken from memory. A `CL` that is not executable counts as exit 2. Outcomes:
+CODE comes from alfred-code-lookup `<owner/repo>`; the `code` in `.alfred/config.json` is the fallback for the session's own repo only. A code is never taken from memory. Branch on RC. A `CL` that is not executable, or any RC other than 0 or 1, counts as exit 2. Outcomes:
 
-- exit 0: use the code.
-- exit 1 (no code, for example an ops repo): title without a prefix, plus one line in the PR or issue body, "repo has no registry code".
-- exit 2 (registry failure): use the config `code` if present for the own repo, otherwise no prefix plus the body line "registry unreachable; title not coded".
+- exit 0 (RC=0): use the code.
+- exit 1 (RC=1, no code, for example an ops repo): title without a prefix, plus one line in the PR or issue body, "repo has no registry code".
+- exit 2 (any other RC, registry failure): use the config `code` if present for the own repo, otherwise no prefix plus the body line "registry unreachable; title not coded".
 
 ```bash
 git add -A
