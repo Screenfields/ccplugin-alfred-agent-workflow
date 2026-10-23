@@ -2,27 +2,24 @@
 
 **Blockers**
 
-1. The precedent is invalid.
+1. The precedent is not an accepted ADR or a baseline doc.
 
-> Precedent: https://github.com/Screenfields/ccplugin-alfred-agent-workflow/blob/main/bin/alfred-config | "# names [--json]: print the config keys, as a JSON array with --json"
+> Precedent: https://github.com/Screenfields/ccplugin-alfred-agent-workflow/blob/main/bin/alfred-alfred-config | "# names [--json]: print the config keys, as a JSON array with --json"
 
-The link points to `bin/alfred-config`, which is code. It is not an accepted ADR under `docs/adr/` or `docs/decisions/`, and not a baseline doc under `docs/baseline/`. Code counts only when a baseline doc describes it, and the note cites no such doc. The passage is a code comment. It shows that another command has a `--json` flag, and it does not record a decision that covers this work. I could not read the link. The brief carries the passage, so I record it as "passage carried, not read at source".
-
-Precedent: invalid — the link is a code file, not an accepted ADR or a baseline doc, and no baseline doc is cited that describes it; passage carried, not read at source.
-
-Real alternatives: no — the work item itself fixes a `--json` flag on `list` and puts `--format` and a new subcommand out of scope. The note's reasons for dismissing those two hold. The "quote tabs" alternative is also dismissed for a reason that holds, because every script would have to undo the `@tsv` escapes. I see no plausible missing alternative inside the bounds. The item can go ahead, and its design is recorded in a baseline doc (AP-ADR0035 item 7). It does not need an owner review.
+The link points to `bin/alfred-config`, a code file. Code counts as precedent only when a baseline doc under `docs/baseline/` describes it, and the note cites no such doc. I could not read the link here, so this is "passage carried, not read at source". The carried passage is a comment about `names [--json]` in another tool. It would not cover this work even if the file were readable. The precedent is therefore invalid.
 
 **Nits**
 
-- **Test setup unclear.** The note says the tests "run `cmd_list` with a stubbed `gh`". In `bin/alfred-workitem`, sourcing the script runs the bottom `case`, and with no argument that calls `usage`. `$REPO` is also not set. The note should say whether the tests call `alfred-workitem list [--json]` with a stub `gh` on `PATH` (and `REPO` set), or source the functions some other way. A builder would otherwise have to guess.
-- **No-flag test is loose.** AC 2 says "exactly the text it prints today". The note should say the test compares against the literal tab-separated lines (`number`, `state`, `title` order) for the fixed fixture.
-- **Expected effect is weak.** "`jq length` equals the number of open issues the API returned" checks the script against its own input. The `gh api` call has no pagination (`per_page=100`), and the issues endpoint also returns pull requests. Both behaviours already exist and are out of scope. The note should either say so or word the effect against the fixture.
-- **Flag position.** The note tests only the first argument. That is fine for the AC, but it should say that `list` with extra or unknown arguments is ignored as it is today.
-- **Weak reason for the first alternative.** "The array is already built as JSON inside `cmd_list`" says the flag is easy to add. It is not a reason to reject quoting.
+- The note says `cmd_list` tests only its first argument. `list foo --json` would print text without any error. Say whether that is intended.
+- The design does not say how the bats tests load `cmd_list`. The source runs `case "${1:-}"` at the bottom of `bin/alfred-workitem`, so sourcing the file triggers `usage`. State how the tests avoid that.
+- The `gh api repos/$REPO/issues` endpoint also returns pull requests. The `per_page=100` limit also cuts the list at 100. Both already apply today. The expected effect, "equals the number of open issues the API returned", is measurable, but the work item says "open items", which is ambiguous.
+- The first rejection reason has two parts. "Every script would have to undo the escapes" holds. "The array is already built as JSON" is a reason for the chosen design, not against the alternative.
 
 **Claims I could not verify**
 
-- I could not read the repo or the link. The state of `bin/alfred-workitem` is checked only against the source quoted in the brief. It matches the note's "Current state": `jq 'map({number, title, state})'`, the `@tsv` line, and `cmd_list "$@"` with no argument use.
-- That `bin/alfred-config` exists and contains the quoted comment is unverified.
-- That `tests/workitem.bats` exists and has a `gh` stub pattern is unverified.
-- That `jq .` on `[]` prints `[]` is standard `jq` behaviour that I did not run.
+- I did not read `bin/alfred-workitem`, `tests/workitem.bats` or `bin/alfred-config` in the repo. I checked the `cmd_list` description only against the quoted source, and it matches: it reads no arguments and builds `{number, title, state}`.
+- I did not check whether any ADR constrains CLI output flags.
+
+Precedent: invalid — the link is code with no baseline doc describing it, and the passage was carried, not read at source.
+
+Real alternatives: no — the work item rules out `--format` and a new subcommand, and the note's rejection of quoting tabs in titles holds. The only open choice is how `--json` is parsed (first argument versus any position), which is a nit and not an architectural alternative. The item can go ahead once its design is recorded in a baseline doc, per AP-ADR0035 item 7.

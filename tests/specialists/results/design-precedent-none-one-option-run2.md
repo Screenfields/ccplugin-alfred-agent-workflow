@@ -1,36 +1,35 @@
 **Pass**
 
-Precedent: none declared — the note carries `Precedent: none declared`, so there is no link to check.
+Precedent: none declared — the note declares none.
 
-Real alternatives: no — The note lists three alternatives. The `--format` option and the new subcommand are rejected because the work item puts them out of scope, and that holds. "Keep the text output and quote tabs" is rejected with a reason that holds. A more direct reason also exists: changing the text output would break acceptance criterion 2. The success state names `list --json`, so the flag is the only form the work item allows. The item goes ahead and its design is recorded in a baseline doc (AP-ADR0035 item 7).
+Real alternatives: no — The work item names the `--json` flag on `list` as the success state and rules out `--format` and a new subcommand. Those two are dismissed on scope, and the reason holds. The third alternative, quoting tabs in titles, is dismissed because every script would have to undo the `@tsv` escapes. That holds, and the change would also break acceptance criterion 2. I found no viable alternative inside the bounds. An environment variable could be named, but it would not meet the stated success state. The item goes ahead and its design is recorded in a baseline doc.
 
 **Blockers**
 
-None. I checked the claims about state against the quoted source:
+None.
 
-> `cmd_list` in `bin/alfred-workitem` already builds the open items as a JSON array of `{number, title, state}` and then prints them as tab-separated text.
+The quoted source supports the state claims:
+- `cmd_list` builds `map({number, title, state})`.
+- It prints with `@tsv`.
+- It reads no arguments.
+- `list` passes them with `shift; cmd_list "$@"`.
 
-This matches the source. `$items` comes from `jq 'map({number, title, state})'` and is printed by `jq -r '.[] | [.number, .state, .title] | @tsv'`.
+The design covers each criterion:
+- **Criterion 1:** `jq .` on `$items` prints the array of `{number, title, state}`.
+- **Criterion 2:** the existing `jq -r` line stays unchanged.
+- **Criterion 3:** an empty `$items` prints `[]`.
+- **Criterion 4:** the three tests are named.
 
-> `list` takes its arguments through `cmd_list "$@"`, and `cmd_list` reads none of them.
-
-This matches the source. `list) shift; cmd_list "$@" ;;` is there, and `cmd_list` has no `$1`.
-
-The design meets the acceptance criteria:
-- **Criteria 1 and 3:** `jq . <<<"$items"` prints the array. For `[]` it prints `[]`.
-- **Criterion 2:** the existing `jq -r` line is left untouched.
-- **Criterion 4:** the three named tests map to the three behaviours.
-- **Bounds:** no other subcommand, `--format`, or sorting is touched.
+Sorting is not added, which matches the bounds.
 
 **Nits**
 
-1. The note says the tests "run `cmd_list` with a stubbed `gh`", but the script ends in a `case` that runs `usage` when there are no arguments. A builder has to guess whether the tests source the script or run `bin/alfred-workitem list --json` with a stub `gh` on `PATH`. The note should say which.
-2. "Tests whether its first argument is `--json`" leaves open what happens with `list foo --json` or `list --json extra`. Today extra arguments are ignored. The note should say that only the first argument counts, so the builder doesn't have to decide.
-3. The expected effect says `list --json | jq length` equals "the number of open issues the API returned". The `issues` endpoint also returns pull requests, and `per_page=100` caps the result at 100 items. Both behaviours already exist and are out of scope. The note should say the check is against the API response, not the repository's open-issue count, so it doesn't read as a claim about the repository.
-4. The `@tsv` problem statement doesn't affect the design. A short note that the text output keeps its escapes by design, because of criterion 2, would remove any doubt.
+- The note says the tests "run `cmd_list` with a stubbed `gh`". In the quoted source the `case` dispatch sits at file level. Sourcing the file to call `cmd_list` directly would run `usage`, because `${1:-}` is empty. A builder should run `alfred-workitem list [--json]` with a stub `gh` first on `PATH`. The note should say so, and also how `$REPO` is set in the tests.
+- "Equals the number of open issues the API returned" is the right wording, and it is as far as the claim can go. The endpoint is `issues?state=open&per_page=100`, so the result is capped at 100 and includes pull requests. This is existing behaviour and out of scope, but the note should not suggest the count matches all open issues.
+- The note does not say what `list --other` does. By the design it behaves as `list` does today, which is fine. One line would settle it.
 
-**Claims I could not verify**
+**Could not verify**
 
-- I could only read the quoted `list` part of `bin/alfred-workitem`. I did not see the rest of the file (`usage`, `REPO`, the other commands) or `tests/workitem.bats`. How the existing tests invoke the script, and whether a `gh` stub already exists, are unchecked.
-- I did not check that issue #162 matches the quoted work item.
-- I did not check what the GitHub API returns for the `issues?state=open` call. That includes the pull-request and pagination behaviour in nit 3.
+- The current `bin/alfred-workitem` and `tests/workitem.bats` in the repo. I checked only the quoted source, and the working directory is not a git repository.
+- Issue #162 itself. I used the quoted text.
+- Whether `tests/workitem.bats` already has a `gh` stub helper, and how `$REPO` is set there.

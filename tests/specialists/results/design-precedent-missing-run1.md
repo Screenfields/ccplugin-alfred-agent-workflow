@@ -1,36 +1,36 @@
 **Fail**
 
-**Blockers**
+Precedent: invalid — the design note has no `Precedent:` line, so it declares neither a link nor "none declared".
 
-1. The note has no `Precedent:` line, so the precedent is invalid. Step 4 requires either a link with a quoted passage or `Precedent: none declared`. The note has neither. It goes from "Recommendation: A" straight to "Design".
+Real alternatives: yes — B is dismissed only by effort, which does not hold as a reason. Details are in blocker 2.
 
-Precedent: invalid — the design note carries no `Precedent:` line, so there is no link or passage to check.
+## Blockers
 
-Real alternatives: yes — The note lists two viable options, A (`--json` flag) and B (`list-json` subcommand). B is dismissed only on effort:
-> Recommendation: A, because the array is already built in `cmd_list` and B needs a helper first.
+1. **No precedent line.** The note has no line beginning `Precedent: `. A note without one has an invalid precedent, and that blocks it. The note must declare either a link with a quoted passage or `Precedent: none declared`.
 
-That is a cost argument, not a reason B cannot work. B has a real advantage the note concedes: "the text output cannot regress", which bears on acceptance criterion 2. The choice between a flag and a subcommand also sets the interface that later subcommands will follow. Nothing in the note shows that only A is viable, so the item goes to the owner for architectural review (AP-ADR0035 item 2).
+2. **B's dismissal does not hold.** The note says:
+   > Recommendation: A, because the array is already built in `cmd_list` and B needs a helper first.
 
-2. The expected effect is partly circular and partly wrong.
-> `alfred-workitem list --json | jq length` equals the number of open issues the API returned.
+   B's own listed con is only that "the fetch code is shared through a helper that does not exist yet". That is a small amount of work, not a barrier. B also has a pro that A lacks and that matters here. It leaves `list` untouched, so criterion 2 ("prints exactly the text it prints today") cannot regress. The note does not weigh that against A. Because the choice rests on effort alone, the item goes to the owner for architectural review.
 
-   - The source uses `gh api repos/$REPO/issues?state=open&per_page=100`. That endpoint also returns open pull requests. It returns at most 100 items, with no pagination.
-   - So "the open items" in the work item's success state can differ from "open issues", and the output is silently truncated above 100.
-   - The note does not say whether this is accepted as existing behaviour or in scope. A builder cannot tell what "one object per open item" (criterion 1) means beyond 100 items or when PRs are open.
-   - The "number the API returned" wording makes the check trivially true. The note should either state that the limit and PR inclusion are unchanged, or say how the count is checked against a known number of open items.
+3. **The test setup cannot be built as written.** The note says:
+   > Three new tests in `tests/workitem.bats` run `cmd_list` with a stubbed `gh`
 
-3. The test setup is underspecified. The note says the tests "run `cmd_list` with a stubbed `gh`". In the source, `cmd_list` sits in a script that runs `case "${1:-}"` at load time, and `usage` runs on no match. The note does not say whether the tests source the file, run the script as a whole, or use a guard. It also does not say how `gh` is stubbed, or how `REPO` is set. A builder would have to guess how to meet criterion 4.
+   The source ends with a top-level `case "${1:-}" in … *) usage ;; esac`. Sourcing the script to call `cmd_list` directly would run that dispatch with an empty `$1` and hit `usage`. The note does not say how the tests call it. It could be by running the script with a stub `gh` on `PATH`, or by a source guard. It also does not say where `$REPO` comes from, since the quoted part of the script never sets it. A builder would have to ask.
 
-**Nits**
+4. **The no-flag test has no stated assertion.** Criterion 2 requires "exactly the text it prints today". The note gives no expected output for the stubbed array, such as the exact tab-separated lines. Without it, the third test could pass without proving the criterion.
 
-- Argument handling is only "tests whether its first argument is `--json`". The note does not say what happens with other arguments, such as `list --jsno`, or with `--json` in a later position. As written, the flag is ignored and text is printed. State that choice, or reject unknown arguments.
-- `jq .` prints pretty-printed multi-line JSON. That is fine for a parser, but say so, because "one JSON array" could also be read as a single line. Criterion 3 expects exactly `[]`, which `jq .` does print.
-- Alternative A's stated con, "every later subcommand that wants JSON needs its own flag", is not weighed against the `--format` option the work item puts out of scope. Say that this is why the flag is kept minimal.
-- Alternative B's con, "the fetch code is shared through a helper that does not exist yet", names a small extraction. Its size is not estimated.
+## Nits
 
-**Could not verify**
+- **Expected effect.** The note says:
+  > `alfred-workitem list --json | jq length` equals the number of open issues the API returned.
 
-- I could not read the repo `Screenfields/ccplugin-alfred-agent-workflow`, issue #162, or `tests/workitem.bats`. This session has no repo checkout and no GitHub access.
-- The `cmd_list` behaviour, the `cmd_list "$@"` dispatch and the "reads none of them" claim are checked only against the source quoted in the brief. They are consistent with it.
-- Whether `tests/workitem.bats` already has a `gh` stub or helper, and what the current text output looks like, are unchecked.
-- Whether any ADR covers the CLI output conventions for `alfred-workitem` is unchecked. I found no ADR cited in the note.
+  This only checks the output against the API response. The source fetches `per_page=100` with no pagination. Past 100 open issues the array is truncated, which breaks criterion 1 ("one object per open item"). The endpoint also returns pull requests. Both behaviours already exist, but the note should either state them as known limits or state that they are outside the bounds.
+- **Unknown arguments.** Today `list` ignores all arguments. The design checks only the first argument. `list foo --json` therefore prints text, and `list --json foo` prints JSON. Say whether that is intended.
+- **Output format.** `jq .` pretty-prints. Criterion 1 only requires a parseable array, so this is fine, but state it so the test can compare the output.
+
+## Not verified
+
+- **Repo state.** I did not read the repo or the issue. I checked the "Current state" claims only against the quoted source, and they match it. That covers the array of `{number, title, state}`, `cmd_list "$@"`, and `cmd_list` reading no arguments.
+- **The rest of `bin/alfred-workitem`.** I did not see where `$REPO` is set, what `usage` does, or whether `tests/workitem.bats` already has a stub pattern for `gh`.
+- **The `@tsv` escaping claim.** I took the claim in the Problem section as stated. It is standard jq behaviour.

@@ -1,14 +1,14 @@
 {
-  "session_id": "8d6ab9f8-0f00-47d8-a540-9cdac91c239e",
-  "num_turns": 3,
-  "total_cost_usd": 0.05304400000000001,
+  "session_id": "e22e5bd0-6bf4-4ca9-abc7-a6cac88dc506",
+  "num_turns": 1,
+  "total_cost_usd": 0.0416716,
   "usage": {
-    "input_tokens": 4,
-    "cache_creation_input_tokens": 7935,
-    "cache_read_input_tokens": 12860,
-    "output_tokens": 2001,
+    "input_tokens": 2,
+    "cache_creation_input_tokens": 5199,
+    "cache_read_input_tokens": 5716,
+    "output_tokens": 2030,
     "output_tokens_details": {
-      "thinking_tokens": 81
+      "thinking_tokens": 619
     },
     "server_tool_use": {
       "web_search_requests": 0,
@@ -16,19 +16,19 @@
     },
     "service_tier": "standard",
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 7935,
+      "ephemeral_1h_input_tokens": 5199,
       "ephemeral_5m_input_tokens": 0
     },
     "inference_geo": "global",
     "iterations": [
       {
         "input_tokens": 2,
-        "output_tokens": 1804,
-        "cache_read_input_tokens": 10256,
-        "cache_creation_input_tokens": 283,
+        "output_tokens": 2030,
+        "cache_read_input_tokens": 5716,
+        "cache_creation_input_tokens": 5199,
         "cache_creation": {
           "ephemeral_5m_input_tokens": 0,
-          "ephemeral_1h_input_tokens": 283
+          "ephemeral_1h_input_tokens": 5199
         },
         "type": "message"
       }
@@ -38,15 +38,15 @@
   },
   "modelUsage": {
     "claude-sonnet-5-5": {
-      "inputTokens": 4,
-      "outputTokens": 2001,
-      "cacheReadInputTokens": 12860,
-      "cacheCreationInputTokens": 7935,
+      "inputTokens": 2,
+      "outputTokens": 2030,
+      "cacheReadInputTokens": 5716,
+      "cacheCreationInputTokens": 5199,
       "webSearchRequests": 0,
-      "costUSD": 0.05304400000000001,
+      "costUSD": 0.0416716,
       "contextWindow": 1000000,
       "maxOutputTokens": 128000,
-      "thinkingTokens": 81,
+      "thinkingTokens": 619,
       "canonicalModel": "claude-sonnet-5-5",
       "provider": "firstParty",
       "costBasis": "list"

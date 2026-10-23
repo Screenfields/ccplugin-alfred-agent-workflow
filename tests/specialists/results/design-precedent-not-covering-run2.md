@@ -1,27 +1,30 @@
 **Fail**
 
-Blockers:
+**Blockers**
 
-1. The precedent does not cover the work.
+1. The precedent is invalid. The note says:
 
-> Precedent: https://github.com/Screenfields/alfred-platform/blob/main/docs/adr/0038-retry-policy-for-github-calls.md | "Decision: A call to the GitHub API that fails with HTTP 5xx is retried up to 3 times with a pause of 2 seconds."
+> Precedent: https://github.com/Screenfields/alfred-platform/blob/main/docs/adr/0038-retry-policy-for-github-calls.md | "Status: Accepted (2026-07-02). Decision: A call to the GitHub API that fails with HTTP 5xx is retried up to 3 times with a pause of 2 seconds. Other failures are not retried."
 
-   I could not read the link, because I have no network access here. The brief carries the passage, so the check below uses that. The carried passage reads "Status: Accepted (2026-07-02)" and "Decision: A call to the GitHub API that fails with HTTP 5xx is retried up to 3 times with a pause of 2 seconds. Other failures are not retried." This ADR is about retrying failed GitHub calls. It says nothing about the output format of `alfred-workitem list`, a `--json` flag, or machine-readable output. The passage does not cover this work.
+I have no network or GitHub access in this session. I could not read the link, so I checked the passage the brief carries. That passage reads Accepted and sits at a `docs/adr/` path. It decides a retry policy for failing GitHub API calls. It says nothing about CLI output formats, a `--json` flag, or `alfred-workitem list`. So the passage does not cover this work, and it is not a precedent for it. Passage carried, not read at source.
 
-Precedent: invalid — passage carried, not read at source; the passage is a retry policy for GitHub API 5xx failures and does not cover JSON output for `list`.
+**Real alternatives:** yes. Alternative A (a `--json` flag on `list`) and alternative B (a `list-json` subcommand) are both viable. The note dismisses neither with a reason that rules it out. It only recommends A on cost. The recommendation of A also leaves "every later subcommand that wants JSON needs its own flag" open. Because the precedent is invalid, the item goes to the owner for architectural review (AP-ADR0035 item 2).
 
-Real alternatives: yes — the note lists A (`--json` flag) and B (`list-json` subcommand). B is dismissed with "B needs a helper first." That reason is weak. The helper is small, and the note itself concedes that B's strength is that "the text output cannot regress", which bears directly on acceptance criterion 2. A plausible third option is missing: an environment variable or another way for a script to ask for the JSON form. The bounds put "the way a script asks for the JSON form" in scope. Because a real alternative exists, the item goes to the owner for architectural review (AP-ADR0035 item 2).
+**Nits**
 
-Nits:
+- The test setup is unspecified. The note says the tests "run `cmd_list` with a stubbed `gh`". The `case` dispatch at the bottom of `bin/alfred-workitem` runs when the file is sourced. With no argument it calls `usage`. The builder has to choose between sourcing the file and running the script with a stub `gh` on `PATH`. The note should say which. It should also say how `$REPO` is set in the tests.
+- "Tests whether its first argument is `--json`" leaves other arguments undefined. Examples are `list foo` and `list --json extra`. Say whether they are ignored, as today, or rejected.
+- `issues?state=open&per_page=100` has two effects that predate this change. It returns pull requests as well as issues. It also stops at 100 items with no pagination. The expected effect words this carefully ("the number of open issues the API returned"). The success state says "the open items", which is wider. Name the limit or accept it explicitly.
+- Alternative B is dismissed because "the fetch code is shared through a helper that does not exist yet". That is weak. Writing the helper is a small change. The stronger argument for A is the one already given: one command to document.
 
-- **Argument handling is incomplete.** The note only says `cmd_list` "tests whether its first argument is `--json`". It does not say what happens with `list --foo`, `list --json extra`, or `--json` in a later position. As written, an unknown argument silently falls through to text output. A builder would have to guess.
-- **Item count above 100.** The source has `per_page=100` and no pagination. Criterion 1 asks for "one object per open item", and the expected effect says `jq length` "equals the number of open issues the API returned". With more than 100 open items, the output would stop at 100. This is existing behaviour, but the note should state it as a limit or bound.
-- **Pull requests.** `repos/$REPO/issues` also returns pull requests. The note says "open issues" and "open items" without saying whether PRs are included.
-- **Test design.** The note says the tests "run `cmd_list` with a stubbed `gh`". The source ends with a top-level `case "${1:-}"` dispatch, so sourcing the script in bats would run that dispatch. The note does not say how the tests invoke `cmd_list`. It also does not say that the no-flag test compares against the exact current TSV text, which criterion 2 requires.
-- **`$REPO` is not defined** in the quoted part of the script. I assume it is set elsewhere.
+**Claims I could not verify**
 
-Could not verify:
+- The `bin/alfred-workitem` source was only available as quoted in the brief. I did not check it against the repo.
+- The existence and status of ADR 0038 at the link.
+- That `tests/workitem.bats` exists and which stub conventions it uses.
 
-- The ADR file and its status at the link. Only the carried passage was checked.
-- `tests/workitem.bats` and the rest of `bin/alfred-workitem` (`$REPO`, `usage`, how the script is sourced or run in tests). I only had the quoted `list` part.
-- That the quoted source matches the repo now. I could not read the repo, so I checked the "Current state" claims against the quoted source only. They match it: `cmd_list` builds the `{number, title, state}` array, prints TSV, and ignores its arguments.
+I checked these claims against the quoted source, and they hold:
+- `cmd_list` builds `{number, title, state}` as a JSON array.
+- `cmd_list` prints it with `@tsv`.
+- `list` passes `"$@"` to `cmd_list`, which reads none of it.
+- `jq .` on `[]` prints `[]`, so acceptance criterion 3 is met.
