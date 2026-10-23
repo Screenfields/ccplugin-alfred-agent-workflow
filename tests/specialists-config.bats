@@ -568,14 +568,42 @@ check_env() { env SPECIALISTS_RESULTS="$BATS_TEST_TMPDIR/res" "$ROOT/tests/speci
   [[ "$output" == *"MISMATCH design-precedent/code-only run 1"* ]] || { echo "$output"; return 1; }
 }
 
-@test "check design-precedent: a duplicated Precedent line is a MISMATCH" {
+@test "check design-precedent: identical repeated Precedent lines count as one" {
   make_results "$BATS_TEST_TMPDIR/res"
-  f="$BATS_TEST_TMPDIR/res/design-precedent-not-covering-run1.md"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-none-alternatives-run1.md"
   grep '^Precedent: ' "$f" > "$f.dup"
   cat "$f.dup" >> "$f"
   run check_env
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"MATCH design-precedent/none-alternatives run 1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: two different Precedent values fail closed as invalid" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
+  echo 'Precedent: invalid — the link could not be read.' >> "$f"
+  run check_env
   [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
-  [[ "$output" == *"MISMATCH design-precedent/not-covering run 1"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/valid run 1: expected: Precedent=valid; got: Precedent=invalid"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"conflicting Precedent lines"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: a conflict with none declared also reads as invalid" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-none-alternatives-run1.md"
+  echo 'Precedent: valid — the link is an accepted ADR.' >> "$f"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/none-alternatives run 1: expected: Precedent=none declared;Real alternatives=yes; got: Precedent=invalid;Real alternatives=yes;"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: a conflicting pair is invalid, so an invalid case still matches" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-code-only-run1.md"
+  echo 'Precedent: valid — looks fine.' >> "$f"
+  run check_env
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"MATCH design-precedent/code-only run 1"* ]] || { echo "$output"; return 1; }
 }
 
 @test "check design-precedent: a result whose only Precedent line is quoted is a MISMATCH (no Precedent line)" {
@@ -597,12 +625,37 @@ check_env() { env SPECIALISTS_RESULTS="$BATS_TEST_TMPDIR/res" "$ROOT/tests/speci
   [[ "$output" == *"MATCH design-precedent/owner-decision run 1"* ]] || { echo "$output"; return 1; }
 }
 
-@test "check design-precedent: an unexpected Real alternatives line on valid is a MISMATCH" {
+@test "check design-precedent: every Real alternatives line is ignored when the precedent is valid" {
   make_results "$BATS_TEST_TMPDIR/res"
-  echo 'Real alternatives: no — reason.' >> "$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
+  printf '%s\n' 'Real alternatives: no — reason.' 'Real alternatives: not applicable, the precedent is valid.' >> "$f"
+  run check_env
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"MATCH design-precedent/valid run 1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: the first Real alternatives line with a value wins" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-code-only-run1.md"
+  echo 'Real alternatives: yes — a later line.' >> "$f"
+  run check_env
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"MATCH design-precedent/code-only run 1"* ]] || { echo "$output"; return 1; }
+  g="$BATS_TEST_TMPDIR/res/design-precedent-code-only-run1.md"
+  { echo 'Real alternatives: yes — first.'; cat "$g"; } > "$g.new"
+  mv "$g.new" "$g"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0 with a first line of yes"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/code-only run 1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: a value must be a whole word (not applicable is no value)" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-code-only-run1.md"
+  sed -i 's/^Real alternatives: .*/Real alternatives: not applicable./' "$f"
   run check_env
   [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
-  [[ "$output" == *"MISMATCH design-precedent/valid run 1"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/code-only run 1"* ]] || { echo "$output"; return 1; }
 }
 
 @test "check design-precedent: a missing Real alternatives line is a MISMATCH" {

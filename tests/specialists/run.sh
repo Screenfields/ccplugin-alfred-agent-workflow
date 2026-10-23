@@ -10,6 +10,9 @@
 #                              network and no claude
 #                              (reads indentation, one list marker, backticks and **/__ emphasis
 #                              loosely; ignores "> " quotes; see normalize_result)
+#                              (then by meaning: repeats merge, conflicting Precedent
+#                              values read as invalid, Real alternatives is ignored
+#                              for valid, first value wins; see check_result)
 #   run.sh probe
 #   run.sh deny-rules          print the deny rules the runs use
 #
@@ -159,19 +162,46 @@ normalize_result() {
 
 # check_result <result.md> <expected.json>: the mechanical part of a
 # design-precedent comparison. Prints the reason and returns 1 on a mismatch.
-# Only the Precedent and Real alternatives lines are read (see
-# normalize_result for what is tolerated).
+# It parses by meaning (Alfred, CCW-157 comment 6356942867), on the lines that
+# normalize_result leaves:
+#   1. markup is stripped (normalize_result);
+#   2. identical repeated lines are one: two "Precedent: valid" lines count as
+#      one Precedent;
+#   3. two Precedent lines with different values conflict, and the result is
+#      "invalid" (fail closed); the consumers do the same;
+#   4. when the precedent is "valid", every "Real alternatives:" line is
+#      ignored (the expected set has none);
+#   5. otherwise the first "Real alternatives:" line with a value wins.
+# A value is valid|invalid|none declared (or yes|no) as a whole word, so
+# "Real alternatives: not applicable" has no value. A Precedent line with no
+# value is not a Precedent line.
 check_result() {
-  local f=$1 e=$2 got want norm
+  local f=$1 e=$2 norm pvals np p="" a="" got want note=""
   norm=$(normalize_result "$f")
-  got=$({ grep -E '^Precedent: |^Real alternatives: ' <<<"$norm" || true; } |
-    sed -E 's/^(Precedent|Real alternatives): (valid|invalid|none declared|yes|no).*/\1=\2/' | sort)
-  want=$(jq -r '"Precedent=\(.precedent)", (if .alternatives == null then empty else "Real alternatives=\(.alternatives)" end)' "$e" | sort)
+  pvals=$({ grep -E '^Precedent: ' <<<"$norm" || true; } |
+    sed -nE 's/^Precedent: (valid|invalid|none declared)([^[:alnum:]].*)?$/\1/p' | sort -u)
+  np=$(grep -c . <<<"$pvals" || true)
+  if [ "$np" -eq 0 ]; then
+    p=""
+  elif [ "$np" -gt 1 ]; then
+    p=invalid
+    note=" (conflicting Precedent lines: $(tr '\n' ',' <<<"$pvals"), read as invalid)"
+  else
+    p=$pvals
+  fi
+  if [ -n "$p" ] && [ "$p" != valid ]; then
+    a=$({ grep -E '^Real alternatives: ' <<<"$norm" || true; } |
+      sed -nE 's/^Real alternatives: (yes|no)([^[:alnum:]].*)?$/\1/p' | sed -n 1p)
+  fi
+  got=""
+  if [ -n "$p" ]; then got="Precedent=$p"; fi
+  if [ -n "$a" ]; then got="$got"$'\n'"Real alternatives=$a"; fi
+  want=$(jq -r '"Precedent=\(.precedent)", (if .alternatives == null then empty else "Real alternatives=\(.alternatives)" end)' "$e")
   if [ "$got" != "$want" ]; then
-    if ! grep -q '^Precedent' <<<"$got"; then
+    if [ -z "$p" ]; then
       echo "no Precedent line (expected: $(tr '\n' ';' <<<"$want"))"
     else
-      echo "expected: $(tr '\n' ';' <<<"$want") got: $(tr '\n' ';' <<<"$got")"
+      echo "expected: $(tr '\n' ';' <<<"$want") got: $(tr '\n' ';' <<<"$got")$note"
     fi
     return 1
   fi
