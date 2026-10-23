@@ -213,6 +213,27 @@ Where `{pr-number}` is the merged PR number found in Step 1, or `upstream merged
 
 ## Step 6 — Push and open PR
 
+**Title.** The pin PR title starts with the ID of the upstream item, found in this order:
+
+1. The upstream PR title's prefix matching `^[A-Z]{2,5}-[0-9]+: `.
+2. Else the upstream PR body's `Closes #N`, written `<upstream CODE>-N`, where the upstream CODE is the lookup of the upstream repo.
+3. Else (a cache-only bump with no item) the old title `alfred-agent: bump pin ...`, which is accepted as a CCW-140 warning.
+
+Example: `CCW-106: bump alfred-agent pin 2.29.0 -> 2.30.0`. The commit message in Step 5 is unchanged, because commits are not title-checked.
+
+```bash
+CL=$(command -v alfred-code-lookup || echo "${CLAUDE_PLUGIN_ROOT:-}/bin/alfred-code-lookup")
+CODE=$("$CL" {upstream owner}/{upstream repo})
+```
+
+CODE comes from alfred-code-lookup `<owner/repo>`; the `code` in `.alfred/config.json` is the fallback for the session's own repo only. A code is never taken from memory. A `CL` that is not executable counts as exit 2. Outcomes:
+
+- exit 0: use the code.
+- exit 1 (no code, for example an ops repo): title without a prefix, plus one line in the PR or issue body, "repo has no registry code".
+- exit 2 (registry failure): use the config `code` if present for the own repo, otherwise no prefix plus the body line "registry unreachable; title not coded".
+
+For a cache-only bump the title falls back to `{plugin-name}: bump pin {old-version} → {new-version}` and the lookup is not needed.
+
 ```bash
 cd "$CATALOG_DIR"
 # The lead role pushes and opens the PR (the review identity must not be the author or last pusher).
@@ -223,7 +244,7 @@ gh pr create \
   --repo Screenfields/alfred-cc-tools \
   --base main \
   --head "$BRANCH" \
-  --title "{plugin-name}: bump pin {old-version} → {new-version}" \
+  --title "<CODE>-<n>: bump {plugin-name} pin {old-version} -> {new-version}" \
   --body "$(cat <<'EOF'
 Bump {plugin-name} from {old-version} to {new-version}.
 
