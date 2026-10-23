@@ -29,7 +29,7 @@ body() { awk 'c >= 2 {print} /^---$/ {c++}' "$ROOT/rules/routed/$1.md" | tr '\n'
 tag() { sed -n "s/^$2: *//p" "$ROOT/rules/routed/$1.md" | head -1; }
 
 ALL_RULES="deployment-is-not-evidence parallel-only-when-independent wait-for-the-decider report-failing-platform-services"
-LEAD_RULES="memory-holds-only-lessons message-hub-for-cross-project-results feedback-and-bugs-become-work-items work-and-review-in-pairs author-gitops-pr-never-self-approve"
+LEAD_RULES="memory-holds-only-lessons message-hub-for-cross-project-results feedback-and-bugs-become-work-items work-and-review-in-pairs author-gitops-pr-never-self-approve issue-and-pr-titles-carry-codes"
 WORKER_RULES="unclear-brief-goes-back workers-change-rules-only-when-briefed hand-back-fields workers-never-merge-or-delegate"
 
 @test "lead: the agreement in full, then the all and lead rules in full (AC 1)" {
@@ -122,8 +122,9 @@ workers-change-rules-only-when-briefed|worker|work item|major
 hand-back-fields|worker|work item|minor
 workers-never-merge-or-delegate|worker|code, work item|major
 work-and-review-in-pairs|lead|code, design, work item|major
-author-gitops-pr-never-self-approve|lead|operations|critical'
-  [ "$(ls "$ROOT"/rules/routed/*.md | wc -l)" -eq 13 ]
+author-gitops-pr-never-self-approve|lead|operations|critical
+issue-and-pr-titles-carry-codes|lead|work item|minor'
+  [ "$(ls "$ROOT"/rules/routed/*.md | wc -l)" -eq 14 ]
   while IFS='|' read -r name roles work sev; do
     f="$ROOT/rules/routed/$name.md"
     [ -f "$f" ] || { echo "no file for $name"; return 1; }
