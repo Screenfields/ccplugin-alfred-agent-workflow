@@ -155,6 +155,46 @@ STUB
   expect 2 "" "registry reply has no codes list"
 }
 
+# serve_json <json> — replace the curl stub with one that answers 200 and that body.
+serve_json() {
+  rm -f "$BATS_TEST_TMPDIR/bin/curl"
+  printf '%s' "$1" > "$BATS_TEST_TMPDIR/served.json"
+  cat > "$BATS_TEST_TMPDIR/bin/curl" <<STUB
+#!/usr/bin/env bash
+while [ \$# -gt 0 ]; do case "\$1" in -o) o="\$2"; shift 2 ;; *) shift ;; esac; done
+cp "$BATS_TEST_TMPDIR/served.json" "\$o"; printf 200
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin/curl"
+}
+
+@test "a live row whose code is null, empty, lowercase or has a newline: exit 2, nothing on stdout" {
+  for c in null '""' '"abc"' '"A\nB"' '"AB CD"' '"A"' '"ABCDEFG"' '"AB\n"'; do
+    serve_json "{\"codes\":[{\"code\":$c,\"repo\":\"acme/x\",\"assignedAt\":\"2026-01-01\"}]}"
+    lookup acme/x
+    expect 2 "" "registry reply has an invalid code" || { echo "code $c"; return 1; }
+  done
+}
+
+@test "a bad successor code in a chain: exit 2" {
+  serve_json '{"codes":[{"code":"OLD","repo":"acme/x","assignedAt":"1","retiredAt":"2"},{"code":"bad","repo":"acme/x","assignedAt":"3","aliasOf":"OLD"}]}'
+  lookup acme/x
+  expect 2 "" "registry reply has an invalid code"
+}
+
+@test "a valid 2- and 6-character code passes" {
+  serve_json '{"codes":[{"code":"CC","repo":"acme/x","assignedAt":"1"},{"code":"AB12CD","repo":"acme/y","assignedAt":"1"}]}'
+  lookup acme/x; expect 0 CC ""
+  lookup acme/y; expect 0 AB12CD ""
+}
+
+@test "userinfo in PROJECT_MANAGER_URL is never echoed in the unreachable line" {
+  mode unreachable
+  export PROJECT_MANAGER_URL="http://user:pw-SECRET@pm.invalid"
+  lookup acme/live-repo
+  expect 2 "" "registry unreachable (http://pm.invalid/api/codes/export)"
+  [[ "$err" != *SECRET* ]]
+}
+
 @test "call log: bearer header only when PM_TOKEN_RO is set" {
   lookup acme/live-repo
   [ "$(grep -c '^hdr ' "$STUB_DIR/calls.log")" -eq 0 ]
