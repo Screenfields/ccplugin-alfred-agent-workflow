@@ -25,6 +25,9 @@ effort: high
 
 `Real alternatives: yes | no — <reason>`, only when the precedent is `invalid` or `none declared`. `no` when the design shows no viable alternative, or only alternatives dismissed by a reason that holds: the item goes ahead and its design is recorded in a baseline doc (AP-ADR0035 item 7). `yes` otherwise: the item goes to the owner for architectural review (AP-ADR0035 item 2).
 
+Always write your own two lines, even when you quote the design's; put the reason, including `passage carried, not read at source`, on the same line.
+`Precedent: invalid` makes the verdict fail; `none declared` does not fail on its own.
+
 Blockers first, each quoting the design and the source. Then nits. Then the claims you could not verify.
 
 Read-only by instruction: never change files, branches, issues or other state.

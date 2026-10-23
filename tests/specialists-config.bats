@@ -296,6 +296,36 @@ WORDING
   [ "$n" -eq 0 ] || { echo "found an 'authorised by' line"; return 1; }
 }
 
+sentence_always_own_lines() {
+  cat <<'WORDING'
+Always write your own two lines, even when you quote the design's; put the reason, including `passage carried, not read at source`, on the same line.
+WORDING
+}
+
+sentence_invalid_fails() {
+  cat <<'WORDING'
+`Precedent: invalid` makes the verdict fail; `none declared` does not fail on its own.
+WORDING
+}
+
+@test "design-reviewer: the sentence 'Always write your own two lines' follows the two Output lines, verbatim, once" {
+  f="$AGENTS/design-reviewer.md"
+  want=$(sentence_always_own_lines)
+  [ "$(grep -F -x -c -- "$want" "$f")" -eq 1 ] || { echo "sentence differs or is not once"; return 1; }
+  n=$(grep -n -F -x -- "$want" "$f" | cut -d: -f1)
+  m=$(grep -n -F -x -- "$(alternatives_output_line)" "$f" | cut -d: -f1)
+  [ "$n" -gt "$m" ] || { echo "sentence is not after the Real alternatives line"; return 1; }
+}
+
+@test "design-reviewer: the sentence 'Precedent: invalid makes the verdict fail' follows the first sentence, verbatim, once" {
+  f="$AGENTS/design-reviewer.md"
+  want=$(sentence_invalid_fails)
+  [ "$(grep -F -x -c -- "$want" "$f")" -eq 1 ] || { echo "sentence differs or is not once"; return 1; }
+  n=$(grep -n -F -x -- "$want" "$f" | cut -d: -f1)
+  m=$(grep -n -F -x -- "$(sentence_always_own_lines)" "$f" | cut -d: -f1)
+  [ "$n" -gt "$m" ] || { echo "sentence is not after the first sentence"; return 1; }
+}
+
 # --- CCW-157: the eight design-precedent cases -----------------------------
 
 @test "design-precedent: exactly the eight cases, each with a case.md and an expected.json" {
