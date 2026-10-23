@@ -18,15 +18,18 @@
 #     Text before the first heading, including a "# Title", is allowed.
 #   - Lines: a heading's lines are the non-blank lines after it and before the
 #     next level-1 or level-2 heading (outside a fence) or the end of the
-#     file; lines inside a fence count. HTML comments (<!-- ... -->, also
-#     across lines) are removed first; a line left empty is blank. Each of the first four has exactly
+#     file; lines inside a fence count.
+#   - HTML comments: <!-- ... --> (also across lines) are removed from the
+#     whole file first, before headings, fences and lines are looked at, so a
+#     heading inside a comment is not a heading. An unclosed <!-- is a fault
+#     ("unclosed HTML comment: line <n>").
 #     one. Scope has at least one.
 #   - Placeholder: a line under one of the five headings that starts with
 #     "TODO:" (optional leading whitespace, any case) fails.
 #
 # Output: "ok: <file>" and exit 0; or one stdout line per fault,
 # "<file>: <fault>: ## <Heading>", and exit 1. Faults are reported in this
-# order: missing or repeated headings; then, only if all five occur once,
+# order: unclosed comment; missing or repeated headings; then, only if all five occur once,
 # relative order, then any other level-2 heading before Scope; then line
 # counts and placeholders. A blank line is whitespace only (space, tab, CR).
 # The fence close rule is deliberately simple: the next line that begins with
@@ -48,20 +51,27 @@ if [ -n "$err" ]; then
   exit 2
 fi
 
-CHARTER_FILE="$1" exec awk '
-BEGIN {
-  file = ENVIRON["CHARTER_FILE"]
-  n = split("Repo owner|Objective|Business case|Merge rule|Scope", want, "|")
-  for (i = 1; i <= n; i++) idx["## " want[i]] = i
-  fence = ""; sec = ""; buf = ""; nh = 0; ns = 0; bad = 0
-}
+# awk gets the name through the environment, never as an operand (a=b would be
+# an assignment) and never as a bare "-" (getline < "-" reads stdin): a path
+# without a slash is read as ./<name>.
+case $1 in */*) path=$1 ;; *) path=./$1 ;; esac
+CHARTER_FILE="$1" CHARTER_PATH="$path" exec awk '
+function nlcount(x) { return gsub(/\n/, "\n", x) }
 function fault(msg, h) { print file ": " msg ": " h; bad = 1 }
-function strip(t,    out, a, rest, b) {
+# Remove every complete <!-- ... --> from t. An unclosed <!-- stays in the text
+# and its line number goes to unclosed.
+function strip(t,    out, a, rest, b, pre) {
   out = ""
   while ((a = index(t, "<!--")) > 0) {
     rest = substr(t, a + 4); b = index(rest, "-->")
-    if (b == 0) break
-    out = out substr(t, 1, a - 1); t = substr(rest, b + 3)
+    pre = substr(t, 1, a - 1)
+    if (b == 0) {
+      if (unclosed == 0) unclosed = lineno + nlcount(pre) + 1
+      break
+    }
+    out = out pre
+    lineno += nlcount(pre) + nlcount(substr(rest, 1, b - 1))
+    t = substr(rest, b + 3)
   }
   return out t
 }
@@ -69,8 +79,8 @@ function close_sec() {
   if (sec != "") { ns++; sname[ns] = sec; sbuf[ns] = buf }
   sec = ""; buf = ""
 }
-{
-  line = $0
+function feed(raw,    line, t, c, infence) {
+  line = raw
   sub(/[ \t\r]+$/, "", line)
   t = line; sub(/^[ \t]+/, "", t)
   c = substr(t, 1, 3)
@@ -85,12 +95,13 @@ function close_sec() {
       nh++; head[nh] = line
       if (line in idx) { seen[line]++; sec = line }
     }
-    next
+    return
   }
   if (sec != "") buf = buf line "\n"
 }
-END {
+function report(    i, h, k, j, m, sp, kk, cnt, nl, L) {
   close_sec()
+  if (unclosed > 0) { print file ": unclosed HTML comment: line " unclosed; bad = 1 }
   allok = 1
   for (i = 1; i <= n; i++) {
     h = "## " want[i]
@@ -114,10 +125,10 @@ END {
       fault("extra heading before " head[m], head[j])
     }
   }
-  for (k = 1; k <= ns; k++) {
-    h = sname[k]
+  for (kk = 1; kk <= ns; kk++) {
+    h = sname[kk]
     cnt = 0
-    nl = split(strip(sbuf[k]), L, "\n")
+    nl = split(sbuf[kk], L, "\n")
     for (j = 1; j <= nl; j++) {
       if (L[j] ~ /^[ \t\r]*$/) continue
       cnt++
@@ -127,6 +138,18 @@ END {
     else if (cnt > 1 && h != "## Scope") fault("too many lines (" cnt ", expected one)", h)
   }
   if (!bad) print "ok: " file
+}
+BEGIN {
+  file = ENVIRON["CHARTER_FILE"]; path = ENVIRON["CHARTER_PATH"]
+  n = split("Repo owner|Objective|Business case|Merge rule|Scope", want, "|")
+  for (i = 1; i <= n; i++) idx["## " want[i]] = i
+  fence = ""; sec = ""; buf = ""; nh = 0; ns = 0; bad = 0; unclosed = 0; lineno = 0
+  all = ""; first = 1
+  while ((getline ln < path) > 0) { all = all (first ? "" : "\n") ln; first = 0 }
+  close(path)
+  nl2 = split(strip(all), LN, "\n")
+  for (q = 1; q <= nl2; q++) feed(LN[q])
+  report()
   exit bad
 }
-' "$1"
+'

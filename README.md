@@ -767,7 +767,7 @@ prompts; a theme can.
 
 ## Charter template and check (`templates/CHARTER.md`, `bin/alfred-charter-check`)
 
-Every repo with a lead has a `CHARTER.md` in its root (AP-ADR0024, AP-1280). Copy the template, fill the five sections, and run the check on the file:
+Every repo has a `CHARTER.md` in its root (AP-ADR0024). The leads add theirs from this template (AP-1280). Copy the template, fill the five sections, and run the check on the file:
 
 ```bash
 cp "${CLAUDE_PLUGIN_ROOT}/templates/CHARTER.md" CHARTER.md
@@ -781,11 +781,11 @@ CC=$(command -v alfred-charter-check || echo "${CLAUDE_PLUGIN_ROOT}/bin/alfred-c
 "$CC" CHARTER.md
 ```
 
-The five headings are `## Repo owner`, `## Objective`, `## Business case`, `## Merge rule` and `## Scope`, in that order, each once. The first four have exactly one non-blank line each; `## Scope` has at least one. Extra `##` headings are allowed only after `## Scope`; text before the first heading, such as a `#` title, is allowed. A heading needs a space after the hashes: `##Notes` and `#764 ...` are ordinary lines. Headings inside a fenced block (a line whose trimmed start is three backticks or three tildes) are ignored, and lines inside a fence count as lines. HTML comments (`<!-- ... -->`, also across lines) are removed before lines are counted.
+The five headings are `## Repo owner`, `## Objective`, `## Business case`, `## Merge rule` and `## Scope`, in that order, each once. The first four have exactly one non-blank line each. `## Scope` has at least one. Extra `##` headings are allowed only after `## Scope`. A heading needs a space, a tab or the end of the line after the hashes, so `##Notes` and `#764 ...` are ordinary lines. HTML comments are removed first, and an unclosed `<!--` fails. A fence opens on a line whose trimmed start is three backticks or three tildes. An unterminated fence runs to the end of the file, and a tilde line does not close a backtick fence. The header of `bin/alfred-charter-check` has the full rules.
 
 The check fails on a placeholder: a line under a heading that starts with `TODO:`.
 
-The `TODO:` match is case-insensitive, allows leading whitespace, and counts lines inside fences.
+The `TODO:` match is case-insensitive, allows leading whitespace, and counts lines inside fences. It looks only under the five headings, not under extra headings after `## Scope`.
 
 Where the register has no objective for the project, write the project's own objective as one line; the check accepts any single line under `## Objective` that does not start with `TODO:`.
 

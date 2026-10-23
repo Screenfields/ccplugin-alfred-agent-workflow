@@ -350,6 +350,63 @@ gen_objective() {
   passes "$C"
 }
 
+@test "case v: a heading inside a comment that spans sections is not a heading" {
+  C="$BATS_TEST_TMPDIR/case.md"
+  awk '$0 == "## Objective" { print "<!--" } { print } $0 == "O2, A way of working that is enforced and improves itself" { print "-->" }' "$FIX/valid.md" > "$C"
+  fails "$C" "missing heading: ## Objective"
+}
+
+@test "case w: an unclosed <!-- under Repo owner fails with its line number" {
+  C="$BATS_TEST_TMPDIR/case.md"
+  sed 's/^example-lead$/example-lead <!-- x/' "$FIX/valid.md" > "$C"
+  fails "$C" "unclosed HTML comment: line 2"
+}
+
+@test "case x: O1 <!-- x on the Objective line fails with its line number" {
+  gen_objective 'O1 <!-- x'
+  fails "$C" "unclosed HTML comment: line 5"
+}
+
+@test "case y: a level-1 heading ends the Merge rule section" {
+  C="$BATS_TEST_TMPDIR/case.md"
+  awk '$0 == "## Scope" { print "# Later"; print "Some text."; print "" } { print }' "$FIX/valid.md" > "$C"
+  passes "$C"
+}
+
+@test "a file named a=b and a file named - are read as files" {
+  cp "$FIX/valid.md" "$BATS_TEST_TMPDIR/a=b"
+  cp "$FIX/valid.md" "$BATS_TEST_TMPDIR/-"
+  cd "$BATS_TEST_TMPDIR"
+  run "$CHECK" a=b < /dev/null
+  [ "$status" -eq 0 ]
+  [ "$output" = "ok: a=b" ]
+  run "$CHECK" - < /dev/null
+  [ "$status" -eq 0 ]
+  [ "$output" = "ok: -" ]
+}
+
+@test "a CRLF file passes" {
+  C="$BATS_TEST_TMPDIR/case.md"
+  sed 's/$/\r/' "$FIX/valid.md" > "$C"
+  [ "$(grep -c $'\r' "$C")" = "$(wc -l < "$FIX/valid.md")" ]
+  passes "$C"
+}
+
+@test "an empty file fails with five missing headings" {
+  C="$BATS_TEST_TMPDIR/case.md"
+  : > "$C"
+  fails "$C" "missing heading: ## Repo owner" "missing heading: ## Objective" "missing heading: ## Business case" "missing heading: ## Merge rule" "missing heading: ## Scope"
+  [ "${#lines[@]}" -eq 5 ]
+}
+
+@test "no final newline: the last line still counts" {
+  C="$BATS_TEST_TMPDIR/case.md"
+  gen_scope 'The only Scope line.'
+  printf '%s' "$(cat "$C")" > "$C.nonl"
+  [ "$(tail -c1 "$C.nonl" | wc -l)" = "0" ]
+  passes "$C.nonl"
+}
+
 # --- criterion 11: the first real charter ---
 
 @test "real-alfred-platform.md starts with Repo owner and passes (comment 6360086722)" {
