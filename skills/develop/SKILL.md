@@ -14,7 +14,7 @@ Standard workflow for implementing features in a devbox. Every code change follo
 
 ## The builder and code reviewer pair
 
-The lead keeps design, choices, combining results and merging. Workers build, each in its own worktree. The lead does the role switch of Step 2 first. The lead creates the branch with `git worktree add -b <branch> <path> origin/main`, and the builder works in that worktree. The lead's main tree is never on that branch. The lead then briefs a `builder` (`agents/builder.md`). The brief links the work item and carries the purpose (the issue's acceptance criteria), the end state (tests first, then the implementation and the commit, as Steps 3 to 5 describe), the worktree path and branch, and the bounds. One bound is: commit on the branch, do not push, because `agents/builder.md` otherwise ends with a push. Every push stays the lead's (Step 6).
+The lead keeps design, choices, combining results and merging. Workers build, each in its own worktree. The lead does the role switch of Step 2 first. The lead creates the branch and its worktree as Step 2 shows, and the builder works in that worktree. The lead's main tree is never on that branch. The lead then briefs a `builder` (`agents/builder.md`). The brief links the work item and carries the purpose (the issue's acceptance criteria), the end state (tests first, then the implementation and the commit, as Steps 3 to 5 describe), the worktree path and branch, and the bounds. One bound is: commit on the branch, do not push, because `agents/builder.md` otherwise ends with a push. Every push stays the lead's (Step 6).
 
 The `code-reviewer` (`agents/code-reviewer.md`, or the `document-reviewer` for documents only) reviews the builder's output. Step 7 starts it. Findings go back to the same builder with SendMessage to its agent ID, and the fix goes to the same reviewer, until the reviewer passes it or `alfred-config get failed-review-max` failed rounds have failed. After that the lead escalates to the hub (routed rule `work-and-review-in-pairs`, the Review paragraph of `agreement/lead.md`). The builder commits each fix and the lead pushes it. For each re-review, refresh the Head SHA and the diff as in review-panel Step 1, then send the new brief to the same reviewer with SendMessage to its agent ID.
 
@@ -44,19 +44,19 @@ A small item (the Size paragraph of `agreement/lead.md`) takes the light path. S
 **If multi-role devbox** (`switch-role` is installed):
 ```bash
 switch-role build
-git checkout main && git pull
-git checkout -b feature/issue-{N}-{short-description}
+git fetch origin
+git worktree add -b feature/issue-{N}-{short-description} <path> origin/main
 ```
 
 **If single-role devbox** (`switch-role` is not installed — skip the role switch):
 ```bash
-git checkout main && git pull
-git checkout -b feature/issue-{N}-{short-description}
+git fetch origin
+git worktree add -b feature/issue-{N}-{short-description} <path> origin/main
 ```
 
 This is a single-role devbox — `switch-role` is not installed. Use the same token throughout.
 
-Always branch from up-to-date main. Use `feature/` prefix for new work, `fix/` for bug fixes.
+Always branch from up-to-date main: fetch first, then add the worktree from `origin/main`. The branch lives in the worktree at `<path>`, and the main tree is never on it. Run the commands of Steps 3 to 5 from `<path>`, and use `git -C <path>` for git commands run from elsewhere. Use `feature/` prefix for new work, `fix/` for bug fixes.
 
 ## Step 3: Write tests first
 
@@ -99,8 +99,8 @@ Use the `/commit` skill or follow commit conventions:
 **If multi-role devbox** (`switch-role` is installed):
 ```bash
 switch-role lead
-git push -u origin feature/issue-{N}-{short-description}
-gh pr create --title "{short title}" --body "Closes #{N}
+git -C <path> push -u origin feature/issue-{N}-{short-description}
+gh pr create --head feature/issue-{N}-{short-description} --title "{short title}" --body "Closes #{N}
 
 ## Changes
 - {what changed}
@@ -111,8 +111,8 @@ gh pr create --title "{short title}" --body "Closes #{N}
 
 **If single-role devbox** (`switch-role` is not installed):
 ```bash
-git push -u origin feature/issue-{N}-{short-description}
-gh pr create --title "{short title}" --body "Closes #{N}
+git -C <path> push -u origin feature/issue-{N}-{short-description}
+gh pr create --head feature/issue-{N}-{short-description} --title "{short title}" --body "Closes #{N}
 
 ## Changes
 - {what changed}
@@ -150,12 +150,12 @@ The fix for a red check is a push, and a push is the lead's. The builder commits
 **If multi-role devbox:**
 ```bash
 switch-role lead
-git push
+git -C <path> push
 ```
 
 **If single-role devbox:**
 ```bash
-git push
+git -C <path> push
 ```
 
 ### Before patching a scaffold-generated or platform-owned file
@@ -211,17 +211,17 @@ Merge only if CI is green. A review at the final head comes first; GitHub's verd
 
 **1. Review after the final push.** Run the review as in `/alfred-agent:review-panel` and post it at the head with `alfred-review post` (review-panel, Step 4, "Posting the review"). The review is posted with the `review` identity through `gh-as review`, which does not change the active role. The `no review token` rule of review-panel applies: on exit 4, `alfred-review check` decides whether the flow continues (`not-required`) or stops (ask the hub).
 
-**2. Fix rounds.** The loop is review, fix, review again. After a REQUEST_CHANGES, commit the fix, then push with the lead role (each fix push is a new head, and the old approval or request is stale):
+**2. Fix rounds.** The loop is review, fix, review again. After a REQUEST_CHANGES, the builder commits the fix and the lead pushes it with the lead role (each fix push is a new head, and the old approval or request is stale):
 
 **If multi-role devbox:**
 ```bash
 switch-role lead
-git push
+git -C <path> push
 ```
 
 **If single-role devbox:**
 ```bash
-git push
+git -C <path> push
 ```
 
 Review the new head and post again. The new APPROVE supersedes the old CHANGES_REQUESTED of the same login.
@@ -243,12 +243,14 @@ Then clean up:
 **If multi-role devbox:**
 ```bash
 switch-role build
+git worktree remove <path>
 git checkout main && git pull
 git branch -d feature/issue-{N}-{short-description}
 ```
 
 **If single-role devbox:**
 ```bash
+git worktree remove <path>
 git checkout main && git pull
 git branch -d feature/issue-{N}-{short-description}
 ```
@@ -262,9 +264,11 @@ There is no bulk migration. A PR opened before this rule is handled here, before
 ```bash
 switch-role lead
 gh pr close {old} --comment "Recreated as lead-authored PR"
-git checkout {branch} && git pull
-git commit --allow-empty -m "<CODE>-<n>: lead re-push for review"
-git push
+git fetch origin
+git worktree add <path> {branch}   # skip when the branch already has a worktree
+git -C <path> pull
+git -C <path> commit --allow-empty -m "<CODE>-<n>: lead re-push for review"
+git -C <path> push
 gh pr create --title "{same title}" --body "{same body}
 
 Replaces #{old}."
@@ -275,9 +279,11 @@ gh pr comment {old} --body "Recreated as #{new}"
 
 ```bash
 switch-role lead
-git checkout {branch} && git pull
-git commit --allow-empty -m "<CODE>-<n>: lead re-push for review"
-git push
+git fetch origin
+git worktree add <path> {branch}   # skip when the branch already has a worktree
+git -C <path> pull
+git -C <path> commit --allow-empty -m "<CODE>-<n>: lead re-push for review"
+git -C <path> push
 ```
 
 ## Rules

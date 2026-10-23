@@ -47,6 +47,17 @@ literals_in() {
 # semis_in <text> — lines with a semicolon outside double quotes (quoted text is verbatim).
 semis_in() { sed -E 's/"[^"]*"//g' <<<"$1" | grep -n ';' || true; }
 
+# before_in_block <file> <first-regex> <second-regex> — prints each line matching the second
+# regex that has no line matching the first earlier in the same code block. Prints a marker
+# line "none" when there is no line matching the second regex at all.
+before_in_block() {
+  awk -v a="$2" -v b="$3" '
+    /^[[:space:]]*```/ { if (inf) { inf = 0 } else { inf = 1; seen = 0 } next }
+    inf && $0 ~ a { seen = 1 }
+    inf && $0 ~ b { hits++; if (!seen) print NR": "$0 }
+    END { if (!hits) print "none" }' "$1"
+}
+
 # line_of <literal> <file> — the first line number holding the literal.
 line_of() { grep -nF -m1 -- "$1" "$2" | cut -d: -f1; }
 
@@ -196,7 +207,8 @@ gate2_range() { sect "$README" "$GATE2"; }
   has "$s" 'The brief links the work item and carries the purpose'
   has "$s" 'commit on the branch, do not push, because `agents/builder.md` otherwise ends with a push'
   has "$s" "Every push stays the lead's (Step 6)"
-  has "$s" 'The lead does the role switch of Step 2 first. The lead creates the branch with `git worktree add -b <branch> <path> origin/main`, and the builder works in that worktree'
+  has "$s" 'The lead does the role switch of Step 2 first. The lead creates the branch and its worktree as Step 2 shows, and the builder works in that worktree'
+  lacks "$s" 'git worktree add'
   has "$s" "The lead's main tree is never on that branch"
   lacks "$s" "are the builder's work"
   lacks "$s" 'no design document'
@@ -488,4 +500,60 @@ gate2_range() { sect "$README" "$GATE2"; }
     c=$(grep -cE "^\| \`$k\` " <<<"$s")
     [ "$c" -eq 1 ] || { echo "rows for $k: $c"; return 1; }
   done
+}
+
+# --- develop: the branch lives in a worktree (CCW-166) -----------------------------------
+
+@test "develop has no bare git push, and every push runs against the worktree" {
+  run grep -nF 'git push' "$DEVELOP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  bad=$(grep -E '^[[:space:]]*git .*[[:space:]]push' "$DEVELOP" | grep -vF 'git -C <path> push' || true)
+  [ -z "$bad" ] || { echo "$bad"; return 1; }
+  [ "$(grep -cF 'git -C <path> push' "$DEVELOP")" -eq 8 ]
+  # the planted bare form is found by the same pattern
+  run grep -nF 'git push' <<<'git push -u origin x'
+  [ "$status" -eq 0 ]
+}
+
+@test "develop has no other bare checkout of the branch or bare commit in the main tree" {
+  run grep -nE 'git checkout -b|git checkout \{branch\}|^git commit' "$DEVELOP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [ "$(grep -cF 'git -C <path> commit --allow-empty' "$DEVELOP")" -eq 2 ]
+  [ "$(grep -cF 'git -C <path> pull' "$DEVELOP")" -eq 2 ]
+}
+
+@test "develop fetches before every worktree add, and Step 2 adds the worktree from origin/main" {
+  [ "$(grep -cF 'git worktree add' "$DEVELOP")" -eq 4 ]
+  out=$(before_in_block "$DEVELOP" '^git fetch origin$' '^git worktree add')
+  [ -z "$out" ] || { echo "$out"; return 1; }
+  [ "$(grep -cF 'git worktree add -b feature/issue-{N}-{short-description} <path> origin/main' "$DEVELOP")" -eq 2 ]
+  s=$(sect "$DEVELOP" '## Step 2: Create a branch')
+  [ "$(grep -cF 'git worktree add -b' <<<"$s")" -eq 2 ]
+  has "$s" 'The branch lives in the worktree at `<path>`, and the main tree is never on it'
+  # the control: a block with the add and no fetch is reported
+  printf '```bash\ngit worktree add x\n```\n' > "$BATS_TEST_TMPDIR/nofetch.md"
+  [ -n "$(before_in_block "$BATS_TEST_TMPDIR/nofetch.md" '^git fetch origin$' '^git worktree add')" ]
+}
+
+@test "develop removes the worktree before it deletes the branch, in both clean-up blocks" {
+  s=$(sect "$DEVELOP" '## Step 7: Review, then merge')
+  [ "$(grep -cF 'git worktree remove <path>' <<<"$s")" -eq 2 ]
+  [ "$(grep -cF 'git branch -d' <<<"$s")" -eq 2 ]
+  printf '%s\n' "$s" > "$BATS_TEST_TMPDIR/s7.md"
+  out=$(before_in_block "$BATS_TEST_TMPDIR/s7.md" '^git worktree remove <path>$' '^git branch -d')
+  [ -z "$out" ] || { echo "$out"; return 1; }
+  # the main tree is still updated by checkout main there
+  [ "$(grep -cF 'git checkout main && git pull' <<<"$s")" -eq 2 ]
+}
+
+@test "develop Step 7 fix rounds: the builder commits and the lead pushes, in the worktree" {
+  s=$(sect "$DEVELOP" '## Step 7: Review, then merge')
+  has "$s" 'the builder commits the fix and the lead pushes it with the lead role'
+  [ "$(grep -cF 'git -C <path> push' <<<"$s")" -eq 2 ]
+  c=$(sect "$DEVELOP" '## Step 6.5: When CI fails')
+  [ "$(grep -cF 'git -C <path> push' <<<"$c")" -eq 2 ]
+  # not sect: the PR body in the code block holds a line that starts with ## Changes
+  p=$(sed -n '/^## Step 6: Push and create PR/,/^## Step 6.5/p' "$DEVELOP")
+  [ "$(grep -cF 'git -C <path> push -u origin feature/issue-{N}-{short-description}' <<<"$p")" -eq 2 ]
+  [ "$(grep -cF 'gh pr create --head feature/issue-{N}-{short-description}' <<<"$p")" -eq 2 ]
 }

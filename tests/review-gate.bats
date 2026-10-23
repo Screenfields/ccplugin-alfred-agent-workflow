@@ -952,19 +952,19 @@ line_of() { grep -n -m1 -- "$1" "$2" | cut -d: -f1; }
 
 @test "develop switches to lead before every git push" {
   f=$(DEV)
-  awk_check "$f" 'git push'
+  awk_check "$f" 'git -C <path> push'
 }
 
 @test "develop creates the PR with the lead role" {
   f=$(DEV)
   awk_check "$f" 'gh pr create'
   # in the multi-role Step 6 block, the role switch is the line before the push
-  grep -B1 -m1 'git push -u origin' "$f" | head -1 | grep -q 'switch-role lead'
+  grep -B1 -m1 'git -C <path> push -u origin' "$f" | head -1 | grep -q 'switch-role lead'
 }
 
 @test "develop review comes after the final push" {
   f=$(DEV)
-  push6=$(line_of 'git push -u origin' "$f"); rev=$(line_of 'alfred-review post' "$f"); mrg=$(line_of '/alfred-agent:merge {PR}' "$f")
+  push6=$(line_of 'git -C <path> push -u origin' "$f"); rev=$(line_of 'alfred-review post' "$f"); mrg=$(line_of '/alfred-agent:merge {PR}' "$f")
   [ -n "$push6" ] && [ -n "$rev" ] && [ -n "$mrg" ]
   [ "$push6" -lt "$rev" ] && [ "$rev" -lt "$mrg" ]
   grep -q 'The loop is review, fix, review again' "$f"
@@ -1005,7 +1005,7 @@ line_of() { grep -n -m1 -- "$1" "$2" | cut -d: -f1; }
 @test "develop has the author case sequence" {
   f=$(DEV)
   sec=$(sed -n '/^\*\*The PR author is the review identity\*\*/,/^\*\*Only the last push/p' "$f")
-  for needle in 'switch-role lead' 'gh pr close {old} --comment "Recreated as lead-authored PR"' 'git commit --allow-empty' 'git push' 'gh pr create' 'Replaces #{old}' 'gh pr comment {old}'; do
+  for needle in 'switch-role lead' 'gh pr close {old} --comment "Recreated as lead-authored PR"' 'git -C <path> commit --allow-empty' 'git -C <path> push' 'gh pr create' 'Replaces #{old}' 'gh pr comment {old}'; do
     grep -qF -- "$needle" <<<"$sec"
   done
 }
@@ -1013,7 +1013,7 @@ line_of() { grep -n -m1 -- "$1" "$2" | cut -d: -f1; }
 @test "develop has the last-pushed case sequence" {
   f=$(DEV)
   sec=$(sed -n '/^\*\*Only the last push was made by/,/^## Rules/p' "$f")
-  for needle in 'switch-role lead' 'git checkout {branch} && git pull' 'git commit --allow-empty' 'git push'; do
+  for needle in 'switch-role lead' 'git worktree add <path> {branch}' 'git -C <path> pull' 'git -C <path> commit --allow-empty' 'git -C <path> push'; do
     grep -qF -- "$needle" <<<"$sec"
   done
   grep -q '^## PRs already in flight' "$f"
@@ -1093,7 +1093,7 @@ awk_check() { # <file> <pattern>: every site has switch-role lead before it in i
 @test "every push and pr create site is classified" {
   list="$FIX/push-sites.txt"
   # found: file|command|count over the directories the item names (and lib/, which holds shared shell)
-  found=$(cd "$ROOT" && for cmd in 'git push' 'gh pr create'; do
+  found=$(cd "$ROOT" && for cmd in 'git push' 'git -C <path> push' 'gh pr create'; do
       grep -rIcF -- "$cmd" skills commands agents hooks lib bin 2>/dev/null | grep -v ':0$' | while IFS=: read -r f n; do echo "$f|$cmd|$n"; done
     done | sort)
   listed=$(grep -v '^#' "$list" | awk -F'|' '{print $1"|"$2"|"$3}' | sort)
