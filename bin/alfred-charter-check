@@ -18,18 +18,19 @@
 #     Text before the first heading, including a "# Title", is allowed.
 #   - Lines: a heading's lines are the non-blank lines after it and before the
 #     next level-1 or level-2 heading (outside a fence) or the end of the
-#     file; lines inside a fence count.
+#     file; lines inside a fence count. Each of the first four has exactly
+#     one. Scope has at least one.
 #   - HTML comments: <!-- ... --> (also across lines) are removed from the
 #     whole file first, before headings, fences and lines are looked at, so a
 #     heading inside a comment is not a heading. An unclosed <!-- is a fault
 #     ("unclosed HTML comment: line <n>").
-#     one. Scope has at least one.
 #   - Placeholder: a line under one of the five headings that starts with
 #     "TODO:" (optional leading whitespace, any case) fails.
 #
 # Output: "ok: <file>" and exit 0; or one stdout line per fault,
-# "<file>: <fault>: ## <Heading>", and exit 1. Faults are reported in this
-# order: unclosed comment; missing or repeated headings; then, only if all five occur once,
+# "<file>: <fault>: ## <Heading>" (except the unclosed-comment fault, which
+# names the line), and exit 1. Faults are reported in this order: unclosed
+# comment; missing or repeated headings; then, only if all five occur once,
 # relative order, then any other level-2 heading before Scope; then line
 # counts and placeholders. A blank line is whitespace only (space, tab, CR).
 # The fence close rule is deliberately simple: the next line that begins with

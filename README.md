@@ -789,7 +789,7 @@ The `TODO:` match is case-insensitive, allows leading whitespace, and counts lin
 
 Where the register has no objective for the project, write the project's own objective as one line; the check accepts any single line under `## Objective` that does not start with `TODO:`.
 
-The check prints `ok: <file>` and exits 0 when the charter is valid. It prints one line per fault, `<file>: <fault>: ## <Heading>`, and exits 1 when it is not. It exits 2, with an error line and a usage line, for no argument, more than one argument, a missing or unreadable file, or a directory.
+The check prints `ok: <file>` and exits 0 when the charter is valid. It prints one line per fault, `<file>: <fault>: ## <Heading>` (except the unclosed-comment fault, which names the line), and exits 1 when it is not. It exits 2, with an error line and a usage line, for no argument, more than one argument, a missing or unreadable file, or a directory.
 
 ## Agent identity convention
 
