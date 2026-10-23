@@ -20,7 +20,7 @@ Review the design note below. It serves the work item quoted first. The sources 
 
 ## Design note: JSON output for list
 
-Precedent: https://github.com/Screenfields/alfred-platform/blob/main/docs/adr/0041-machine-readable-cli-output.md | "Decision: A command that prints a list offers a `--json` flag that prints one JSON array on standard output."
+Precedent: https://github.com/Screenfields/alfred-platform/blob/main/docs/adr/0041-machine-readable-cli-output.md | "Status: Accepted (2026-08-14). Decision: A command that prints a list offers a `--json` flag. With the flag it prints one JSON array on standard output, one object per entry. Without the flag its text output does not change."
 
 **Problem.** Scripts that read the output of `alfred-workitem list` split it on tabs. `@tsv` writes a tab, a newline or a backslash in a title as `\t`, `\n` or `\\`, and most scripts do not undo that, so those titles come back wrong.
 
@@ -60,6 +60,4 @@ esac
 
 ## Precedent passage carried in the brief
 
-> Status: Accepted (2026-08-14)
->
-> Decision: A command that prints a list offers a `--json` flag. With the flag it prints one JSON array on standard output, one object per entry. Without the flag its text output does not change.
+> Status: Accepted (2026-08-14). Decision: A command that prints a list offers a `--json` flag. With the flag it prints one JSON array on standard output, one object per entry. Without the flag its text output does not change.

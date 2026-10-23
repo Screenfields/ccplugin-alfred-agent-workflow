@@ -20,7 +20,7 @@ Review the design note below. It serves the work item quoted first. The sources 
 
 ## Design note: JSON output for list
 
-Precedent: https://github.com/Screenfields/alfred-platform/blob/main/docs/adr/0038-retry-policy-for-github-calls.md | "Decision: A call to the GitHub API that fails with HTTP 5xx is retried up to 3 times with a pause of 2 seconds."
+Precedent: https://github.com/Screenfields/alfred-platform/blob/main/docs/adr/0038-retry-policy-for-github-calls.md | "Status: Accepted (2026-07-02). Decision: A call to the GitHub API that fails with HTTP 5xx is retried up to 3 times with a pause of 2 seconds. Other failures are not retried."
 
 **Problem.** Scripts that read the output of `alfred-workitem list` split it on tabs. `@tsv` writes a tab, a newline or a backslash in a title as `\t`, `\n` or `\\`, and most scripts do not undo that, so those titles come back wrong.
 
@@ -59,6 +59,4 @@ esac
 
 ## Precedent passage carried in the brief
 
-> Status: Accepted (2026-07-02)
->
-> Decision: A call to the GitHub API that fails with HTTP 5xx is retried up to 3 times with a pause of 2 seconds. Other failures are not retried.
+> Status: Accepted (2026-07-02). Decision: A call to the GitHub API that fails with HTTP 5xx is retried up to 3 times with a pause of 2 seconds. Other failures are not retried.
