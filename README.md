@@ -541,7 +541,7 @@ merge skill asks GitHub for its own verdict and merges pinned to that head. This
 `lead-review` ruleset (AP-1230) run on a repo without blocking its lead. `bin/alfred-review` is bash,
 `gh` and `jq`, with no model call.
 
-`review/verdict` (Gate 1 and Gate 2 of `change-gates.md` in alfred-platform) applies to alfred-platform and alfred-platform-docs only (v1 scope), and for lead repos AP-1230 is the review gate: the `lead-review` ruleset plus `reviewDecision`, as `alfred-review` and the merge skill implement it. The table "Gate 2 mapping (lead repos)" below shows how each Gate 2 requirement is met there.
+Gate 1 and Gate 2 of `change-gates.md` in alfred-platform, including `review/verdict`, apply to alfred-platform and alfred-platform-docs only (v1 scope), and for lead repos AP-1230 is the review gate: the `lead-review` ruleset plus `reviewDecision`, as `alfred-review` and the merge skill implement it. The table "Gate 2 mapping (lead repos)" below shows how each Gate 2 requirement is met there.
 
 ```bash
 alfred-review post <owner>/<repo>#<n> --sha <40-hex> --verdict approve|request-changes --body-file <file>
@@ -625,7 +625,7 @@ any lead. The hub merges a PR labelled `requires-elevated-merge` outside the ski
 
 ### Gate 2 mapping (lead repos)
 
-One row per requirement of Gate 2 in `change-gates.md`, with the AP-1230 mechanism and its evidence. Evidence is a `tests/review-gate.bats` test title, a live step of the CCW-145 closing comment, or `gap`; a gap is accepted by the owner's option A (ccplugin#129, 2026-10-23).
+One row per requirement of Gate 2 in `change-gates.md`, with the AP-1230 mechanism and its evidence. Evidence is a `tests/review-gate.bats` test title, a live step of the CCW-145 closing comment, or `gap`. A gap is accepted by the owner's option A (ccplugin#129, 2026-10-23).
 
 | # | Keyword | AP-1230 mechanism | Evidence |
 |---|---|---|---|
@@ -693,17 +693,17 @@ when a definition drifts from the config.
 
 ### Phase skills and their pairs
 
-Each phase skill names the specialist or the format that belongs to its phase. The rule for the pair lives in the routed rule `work-and-review-in-pairs` and the lead agreement; the skill carries the steps.
+Each phase skill names the specialist or the format that belongs to its phase. The rule for the pair lives in the routed rule `work-and-review-in-pairs` and the lead agreement. The skill carries the steps.
 
 | Skill | Gains | Specialists it names |
 |---|---|---|
 | `refine` | the analyst and readiness reviewer pair, new to ready | `analyst`, `readiness-reviewer` |
-| `design` | the design reviewer pair; the owner's approval of a large item's design before it is marked complete, with `alfred-agent:ecr` for the expert consulting review | `design-reviewer` |
-| `develop` | the builder and code reviewer pair; the light path for small items, which starts the reviewer with the `reviewer-light` setting | `builder`, `code-reviewer`, `document-reviewer` |
+| `design` | the design reviewer pair, and the owner's approval of a large item's design before it is marked complete, with `alfred-agent:ecr` for the expert consulting review | `design-reviewer` |
+| `develop` | the builder and code reviewer pair, and the light path for small items, which starts the reviewer with the `reviewer-light` setting | `builder`, `code-reviewer`, `document-reviewer` |
 | `merge` | the review-record check (`alfred-review check`, see "Review gate") | none |
-| `retro` | one agenda for every level; the friction line for small items | none |
-| `waiting` (`/alfred-agent:waiting`) | the owner-join and owner-question format, by reference to `hooks/owner-communication.md`; urgent requests for the hub and Alfred | none |
-| `troubleshoot` | the section "Incident handling (hub)": diagnose, mitigate, incident reviewer, then a sized fix | `incident-reviewer` |
+| `retro` | one agenda for every level, and the friction line for small items | none |
+| `waiting` (`/alfred-agent:waiting`) | the owner-join and owner-question format, by reference to `hooks/owner-communication.md`, and urgent requests for the hub and Alfred | none |
+| `troubleshoot` | the section "Incident handling (hub)", with diagnose, mitigate, incident reviewer, then a sized fix | `incident-reviewer` |
 
 ### Starting one
 

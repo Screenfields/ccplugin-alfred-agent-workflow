@@ -14,19 +14,19 @@ Standard workflow for implementing features in a devbox. Every code change follo
 
 ## The builder and code reviewer pair
 
-The lead keeps design, choices, combining results and merging; workers build, each in its own worktree. So Steps 2 to 5 are the builder's work, and the lead briefs a `builder` (`agents/builder.md`) for them. The brief links the work item and states purpose, end state and bounds. The builder commits and does not push: every push stays the lead's (Step 6).
+The lead keeps design, choices, combining results and merging. Workers build, each in its own worktree. The lead does the role switch and the `git checkout main` steps of Step 2 first, then briefs a `builder` (`agents/builder.md`). The brief links the work item and carries the purpose (the issue's acceptance criteria), the end state (tests first, then the implementation and the commit, as Steps 3 to 5 describe), the branch it works on, and the bounds. One bound is: commit on the branch, do not push, because `agents/builder.md` otherwise ends with a push. Every push stays the lead's (Step 6).
 
-The `code-reviewer` (`agents/code-reviewer.md`; the `document-reviewer` for documents only) reviews the builder's output; Step 7 starts it. Findings go back to the same builder with SendMessage to its agent ID, and the fix goes to the same reviewer, until the reviewer passes it or `alfred-config get failed-review-max` failed rounds have failed. After that limit the lead escalates to the hub (routed rule `work-and-review-in-pairs`, the Review paragraph of `agreement/lead.md`). The builder commits each fix; the lead pushes it.
+The `code-reviewer` (`agents/code-reviewer.md`, or the `document-reviewer` for documents only) reviews the builder's output. Step 7 starts it. Findings go back to the same builder with SendMessage to its agent ID, and the fix goes to the same reviewer, until the reviewer passes it or `alfred-config get failed-review-max` failed rounds have failed. After that the lead escalates to the hub (routed rule `work-and-review-in-pairs`, the Review paragraph of `agreement/lead.md`). The builder commits each fix and the lead pushes it. For each re-review, refresh the Head SHA and the diff as in review-panel Step 1, then send the new brief to the same reviewer with SendMessage to its agent ID.
 
 ### The light path
 
-Small work (AP-ADR0017) skips the designed state and has a lighter reviewer, but every transition it does take still passes a review (AP-ADR0022, Sizing). For a small item:
+A small item (the Size paragraph of `agreement/lead.md`) takes the light path. Small work (AP-ADR0017) skips the designed state and has a lighter reviewer, but every transition it does take still passes a review (AP-ADR0022, Sizing). For a small item:
 
-- The designed state is skipped: no design document.
-- A worker still builds: the lead briefs a `builder` as above.
-- The reviewer is started with the tier and effort that `reviewer-light` gives in `model-setting-per-role`. Read them with `alfred-config get model-setting-per-role`, never from memory. The tier maps to a model through the tier map in the README (section "Specialists (`agents/`)"; medium is sonnet), and the effort maps through the same map. Pass that model and that effort as the `model` and `effort` parameters of the Agent call that starts the reviewer.
-- Every transition it does take still passes a review: Step 7 applies unchanged.
-- The fix rounds of Step 7 go back to the same builder: the builder commits, and the lead pushes.
+- The designed state is skipped.
+- A worker still builds. The lead briefs a `builder` as above.
+- The reviewer is started with the tier and effort that `reviewer-light` gives in `model-setting-per-role`. Read them with `alfred-config get model-setting-per-role`, never from memory. The tier maps to a model through the tier map in the README (section "Specialists (`agents/`)", where medium is sonnet). Effort is passed as is, except `highest`, which is `max`. Add `model` and `effort` to the Agent call in review-panel Step 3.
+- Every transition it does take still passes a review, so Step 7 applies unchanged.
+- Fix rounds follow the loop above, with the builder committing and the lead pushing.
 
 ## Step 1: Pick up the issue
 
