@@ -7,8 +7,9 @@ setup() {
   CFG="$ROOT/bin/alfred-config"
   unset ALFRED_THRESHOLDS
   # The new texts: the agreement and the routed rules (the 12 old rules in
-  # rules/ are out of scope, they contain digits such as "mode-600").
-  TEXTS=("$ROOT/agreement/lead.md" "$ROOT"/rules/routed/*.md)
+  # rules/ are out of scope, they contain digits such as "mode-600"), and the
+  # refine skill (ccplugin#155).
+  TEXTS=("$ROOT/agreement/lead.md" "$ROOT"/rules/routed/*.md "$ROOT/skills/refine/SKILL.md")
 }
 
 # literals_in <file> — digits or % left after removing the allowed references
