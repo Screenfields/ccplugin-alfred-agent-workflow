@@ -237,3 +237,20 @@ STUB
   grep -q 'updated' "$f"
   grep -q '"code"' "$f"
 }
+
+# strip_userinfo <url> — the init.md userinfo strip, taken from the file itself.
+strip_userinfo() {
+  printf '%s' "$1" | sed -E 's#^(https?://)[^@/]*@#\1#'
+}
+
+@test "init's userinfo strip: ssh:// origin keeps git@ and resolves; an https token is stripped" {
+  grep -qF "sed -E 's#^(https?://)[^@/]*@#\\1#'" "$BATS_TEST_DIRNAME/../commands/init.md"
+  o=$(strip_userinfo ssh://git@github.com/acme/live-repo)
+  [ "$o" = "ssh://git@github.com/acme/live-repo" ]
+  lookup "$o"
+  expect 0 LVE ""
+  o=$(strip_userinfo https://x-access-token:ghs_SECRET@github.com/acme/live-repo.git)
+  [ "$o" = "https://github.com/acme/live-repo.git" ]
+  lookup "$o"
+  expect 0 LVE ""
+}

@@ -98,16 +98,17 @@ ERRF=$(mktemp); trap 'rm -f "$ERRF"' EXIT
 if ! ORIGIN=$(git remote get-url origin 2>/dev/null) || [ -z "$ORIGIN" ]; then
   CODE=""; RC=2; echo "no origin remote" > "$ERRF"
 elif [ -x "$CL" ]; then
-  # Strip userinfo (an embedded token) before the URL goes anywhere.
-  CODE=$("$CL" "$(printf '%s' "$ORIGIN" | sed -E 's#//[^@/]*@#//#')" 2>"$ERRF"); RC=$?
+  # Strip userinfo (an embedded token) from https URLs only; ssh keeps git@.
+  CODE=$("$CL" "$(printf '%s' "$ORIGIN" | sed -E 's#^(https?://)[^@/]*@#\1#')" 2>"$ERRF"); RC=$?
 else
   CODE=""; RC=2; echo "alfred-code-lookup not found" > "$ERRF"
 fi
-# Use $RC, $CODE and $ERRF below, then: rm -f "$ERRF"
+ERR=$(cat "$ERRF")   # read the stderr line now; the trap removes the file on exit
+# Use $RC, $CODE and $ERR below.
 ```
 
 - **Exit 0:** write `"code": "<CODE>"` into `.alfred/config.json`, merging like step 5 (keep every other key). An existing `code` that equals the lookup is left alone. A different one is updated, with a one-line note such as `code updated: OLD -> NEW (registry wins)`.
-- **Exit 1 or 2:** write no `code`, say the one stderr line from `$ERRF` in one line (for example `no code registered for <owner/repo>` or `registry unreachable`), and carry on. An existing `code` stays as it is.
+- **Exit 1 or 2:** write no `code`, say the one stderr line from `$ERR` in one line (for example `no code registered for <owner/repo>` or `registry unreachable`), and carry on. An existing `code` stays as it is.
 
 `code` is a convenience copy. The project manager stays authoritative, and the skills use the config `code` only as the fallback for this session's own repo when the registry fails.
 
