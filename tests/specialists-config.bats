@@ -413,3 +413,209 @@ fmt() { printf '%s\n' "$@" > "$BATS_TEST_TMPDIR/note.md"; design_format_ok "$BAT
   [ "$status" -ne 0 ] || { echo "accepted a two-part checked line"; return 1; }
   [[ "$output" == *"line 2"* ]] || { echo "$output"; return 1; }
 }
+
+# --- CCW-157: run.sh design-precedent and run.sh check design-precedent ----
+
+# A recording stub claude: it logs its arguments and the listing of its working
+# directory (one line per call), then answers like make_stub.
+make_recording_stub() {
+  STUB="$BATS_TEST_TMPDIR/claude-rec-stub"
+  STUB_ARGS="$BATS_TEST_TMPDIR/stub-args.log"
+  STUB_LS="$BATS_TEST_TMPDIR/stub-ls.log"
+  export STUB_ARGS STUB_LS
+  cat > "$STUB" <<'STUBEOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' "$*" >> "$STUB_ARGS"
+ls -A | tr '\n' ' ' >> "$STUB_LS"
+echo >> "$STUB_LS"
+echo '{"result":"found things","is_error":false,"session_id":"s1","num_turns":1,"usage":{}}'
+STUBEOF
+  chmod +x "$STUB"
+}
+
+@test "run.sh design-precedent: a good run with --runs 1 writes sixteen result files and exits 0" {
+  make_stub
+  R="$BATS_TEST_TMPDIR/results"
+  run env CLAUDE_BIN="$STUB" STUB_MODE=ok SPECIALISTS_RESULTS="$R" "$ROOT/tests/specialists/run.sh" design-precedent --runs 1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  for c in $PRECEDENT_CASES; do
+    [ "$(cat "$R/design-precedent-$c-run1.md")" = "found things" ] || { echo "no .md for $c"; return 1; }
+    [ "$(jq -r .session_id "$R/design-precedent-$c-run1.json")" = s1 ] || { echo "no .json for $c"; return 1; }
+  done
+  [ "$(ls "$R" | wc -l)" -eq 16 ] || { echo "not sixteen files: $(ls "$R")"; return 1; }
+}
+
+@test "run.sh design-precedent: error, empty and fail print FAILED for all eight cases, leave no result file and exit non-zero" {
+  make_stub
+  R="$BATS_TEST_TMPDIR/results"
+  for mode in error empty fail; do
+    mkdir -p "$R"
+    echo stale > "$R/design-precedent-valid-run1.md"
+    echo stale > "$R/design-precedent-valid-run1.json"
+    run env CLAUDE_BIN="$STUB" STUB_MODE=$mode SPECIALISTS_RESULTS="$R" "$ROOT/tests/specialists/run.sh" design-precedent --runs 1
+    [ "$status" -ne 0 ] || { echo "$mode: exit 0"; return 1; }
+    for c in $PRECEDENT_CASES; do
+      [[ "$output" == *"FAILED design-precedent/$c run 1"* ]] || { echo "$mode: no FAILED line for $c"; return 1; }
+    done
+    [ "$(ls "$R" | wc -l)" -eq 0 ] || { echo "$mode: result files left: $(ls "$R")"; return 1; }
+  done
+}
+
+@test "run.sh all: with every run failing, FAILED lines for the six reviewers and the eight cases, exit non-zero" {
+  make_stub
+  run env CLAUDE_BIN="$STUB" STUB_MODE=error SPECIALISTS_RESULTS="$BATS_TEST_TMPDIR/results" "$ROOT/tests/specialists/run.sh" all --runs 1
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  for r in $REVIEWERS; do
+    [[ "$output" == *"FAILED $r run 1"* ]] || { echo "no FAILED line for $r"; return 1; }
+  done
+  for c in $PRECEDENT_CASES; do
+    [[ "$output" == *"FAILED design-precedent/$c run 1"* ]] || { echo "no FAILED line for $c"; return 1; }
+  done
+}
+
+@test "run.sh design-precedent: the agent is alfred-agent:design-reviewer and the run directory holds only case.md" {
+  make_recording_stub
+  run env CLAUDE_BIN="$STUB" SPECIALISTS_RESULTS="$BATS_TEST_TMPDIR/results" "$ROOT/tests/specialists/run.sh" design-precedent --runs 1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$STUB_ARGS")" -eq 8 ] || { echo "not eight calls"; return 1; }
+  [ "$(grep -c -F -e '--agent alfred-agent:design-reviewer' "$STUB_ARGS")" -eq 8 ] || { echo "agent argument differs: $(cat "$STUB_ARGS")"; return 1; }
+  [ "$(sort -u "$STUB_LS")" = "case.md " ] || { echo "listing differs: $(sort -u "$STUB_LS")"; return 1; }
+}
+
+@test "run.sh design-precedent: the default is two runs per case" {
+  make_recording_stub
+  run env CLAUDE_BIN="$STUB" SPECIALISTS_RESULTS="$BATS_TEST_TMPDIR/results" "$ROOT/tests/specialists/run.sh" design-precedent
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$STUB_ARGS")" -eq 16 ] || { echo "not sixteen calls"; return 1; }
+}
+
+# make_results <dir>: one hand-written result per case that matches its
+# expected.json, with a quoted design line above the reviewer's own lines.
+make_results() {
+  local dir=$1 c p a s
+  mkdir -p "$dir"
+  for c in $PRECEDENT_CASES; do
+    p=$(jq -r .precedent "$PDIR/$c/expected.json")
+    a=$(jq -r '.alternatives // empty' "$PDIR/$c/expected.json")
+    s=$(jq -r .source_note "$PDIR/$c/expected.json")
+    {
+      echo "Verdict: fine."
+      if [ "$s" = true ]; then
+        echo "Precedent: $p — the ADR is accepted; passage carried, not read at source."
+      else
+        echo "Precedent: $p — reason."
+      fi
+      if [ -n "$a" ]; then echo "Real alternatives: $a — reason."; fi
+    } > "$dir/design-precedent-$c-run1.md"
+  done
+}
+
+check_env() { env SPECIALISTS_RESULTS="$BATS_TEST_TMPDIR/res" "$ROOT/tests/specialists/run.sh" check design-precedent "$@"; }
+
+@test "check design-precedent: a matching set exits 0 and prints eight MATCH lines" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  run check_env
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c '^MATCH design-precedent/' <<<"$output")" -eq 8 ] || { echo "$output"; return 1; }
+  [ "$(grep -c MISMATCH <<<"$output" || true)" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: a wrong Precedent value is a MISMATCH naming the case" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  sed -i 's/^Precedent: valid/Precedent: invalid/' "$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/valid run 1"* ]] || { echo "$output"; return 1; }
+  [ "$(grep -c '^MATCH ' <<<"$output")" -eq 7 ] || { echo "the other seven should match: $output"; return 1; }
+}
+
+@test "check design-precedent: a missing Precedent line is a MISMATCH" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  sed -i '/^Precedent: /d' "$BATS_TEST_TMPDIR/res/design-precedent-code-only-run1.md"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/code-only run 1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: a duplicated Precedent line is a MISMATCH" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-not-covering-run1.md"
+  grep '^Precedent: ' "$f" > "$f.dup"
+  cat "$f.dup" >> "$f"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/not-covering run 1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: a result whose only Precedent line is quoted is a MISMATCH (no Precedent line)" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-missing-run1.md"
+  sed -i 's/^Precedent: /> Precedent: /' "$f"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/missing run 1: no Precedent line"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: a quoted Precedent line besides the reviewer's own correct one still matches" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-owner-decision-run1.md"
+  { echo '> Precedent: https://h/p | "the note says"'; cat "$f"; } > "$f.new"
+  mv "$f.new" "$f"
+  run check_env
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"MATCH design-precedent/owner-decision run 1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: an unexpected Real alternatives line on valid is a MISMATCH" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  echo 'Real alternatives: no — reason.' >> "$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/valid run 1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: a missing Real alternatives line is a MISMATCH" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  sed -i '/^Real alternatives: /d' "$BATS_TEST_TMPDIR/res/design-precedent-doctrine-only-run1.md"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/doctrine-only run 1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: a valid result without the phrase is a MISMATCH" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  printf '%s\n' 'Precedent: valid — the ADR is accepted and covers the work.' > "$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/valid run 1: the Precedent line lacks"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: the phrase is read on the Precedent line only" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  printf '%s\n' 'Precedent: valid — the ADR is accepted.' 'Elsewhere: passage carried, not read at source' > "$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/valid run 1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: a case with no result file is a MISMATCH" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  rm "$BATS_TEST_TMPDIR/res/design-precedent-none-one-option-run1.md"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/none-one-option: no result file"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent --runs 2: a run that has no file is a MISMATCH" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  run check_env --runs 2
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/valid run 2: no result file"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: does not call claude" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  run env CLAUDE_BIN=/nonexistent SPECIALISTS_RESULTS="$BATS_TEST_TMPDIR/res" "$ROOT/tests/specialists/run.sh" check design-precedent
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}

@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Planted-defect runner for the six reviewers (ccplugin#128, AC 2).
 #
-#   run.sh <readiness|design|code|document|acceptance|incident|all> [--runs N]
+#   run.sh <readiness|design|code|document|acceptance|incident> [--runs N]
+#   run.sh design-precedent [--runs N]   the eight precedent cases (CCW-157)
+#   run.sh all [--runs N]                the six reviewers, then design-precedent
+#   run.sh check design-precedent [--runs N]
+#                              compare the Precedent and Real alternatives lines
+#                              of the result files with expected.json; no
+#                              network and no claude
 #   run.sh probe
 #   run.sh deny-rules          print the deny rules the runs use
 #
@@ -22,7 +28,8 @@
 # temp one so they never touch the committed evidence).
 # CLAUDE_BIN overrides the claude binary (the bats tests use a stub).
 # Results: tests/specialists/results/<role>-run<N>.md (the answer) and .json
-# (usage and session id).
+# (usage and session id); design-precedent-<case>-run<N>.md and .json for the
+# precedent cases.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
@@ -79,32 +86,117 @@ warn_dirty() {
   fi
 }
 
-# run_reviewer <reviewer> <runs>: returns non-zero when any run failed.
-run_reviewer() {
-  local r=$1 runs=$2 case_dir="$HERE/$1" n plugin tmp raw rc failed=0
-  [ -f "$case_dir/case.md" ] || die "no case for $r"
+# run_case <label> <agent> <case_dir> <stem> <runs> <plugin>: runs one case
+# <runs> times. The result files are $RESULTS/<stem>-run<N>.md and .json.
+# Returns non-zero when any run failed.
+run_case() {
+  local label=$1 agent=$2 case_dir=$3 stem=$4 runs=$5 plugin=$6 n tmp raw rc failed=0
+  [ -f "$case_dir/case.md" ] || die "no case for $label"
   mkdir -p "$RESULTS"
-  make_plugin_copy
-  plugin=$PLUGIN_COPY
   for ((n = 1; n <= runs; n++)); do
     tmp=$(mktemp -d)
     TMPS+=("$tmp")
     cp "$case_dir/case.md" "$tmp/case.md"
-    raw="$tmp/raw.json"
+    # The raw output goes outside the run directory, which holds only case.md.
+    raw=$(mktemp)
+    TMPS+=("$raw")
     rc=0
-    claude_run "$r-reviewer" "$tmp" "$plugin" "$(cat "$case_dir/case.md")" json >"$raw" || rc=$?
+    claude_run "$agent" "$tmp" "$plugin" "$(cat "$case_dir/case.md")" json >"$raw" || rc=$?
     if [ "$rc" -ne 0 ] || ! jq -e '(.result | length > 0) and (.is_error | not)' "$raw" >/dev/null 2>&1; then
-      rm -f "$RESULTS/$r-reviewer-run$n.md" "$RESULTS/$r-reviewer-run$n.json"
-      echo "FAILED $r run $n (claude exit $rc)"
+      rm -f "$RESULTS/$stem-run$n.md" "$RESULTS/$stem-run$n.json"
+      echo "FAILED $label run $n (claude exit $rc)"
       failed=1
       continue
     fi
-    jq -r '.result' "$raw" >"$RESULTS/$r-reviewer-run$n.md"
+    jq -r '.result' "$raw" >"$RESULTS/$stem-run$n.md"
     jq '{session_id, num_turns, total_cost_usd, usage, modelUsage, is_error}' "$raw" \
-      >"$RESULTS/$r-reviewer-run$n.json"
-    echo "$r run $n: $RESULTS/$r-reviewer-run$n.md"
+      >"$RESULTS/$stem-run$n.json"
+    echo "$label run $n: $RESULTS/$stem-run$n.md"
   done
   return "$failed"
+}
+
+# run_reviewer <reviewer> <runs>: returns non-zero when any run failed.
+run_reviewer() {
+  local r=$1 runs=$2
+  [ -f "$HERE/$r/case.md" ] || die "no case for $r"
+  make_plugin_copy
+  run_case "$r" "$r-reviewer" "$HERE/$r" "$r-reviewer" "$runs" "$PLUGIN_COPY"
+}
+
+# run_precedent <runs>: the design-precedent cases in sorted order, one plugin
+# copy for all. A failed run does not stop the loop.
+run_precedent() {
+  local runs=$1 d c failed=0
+  make_plugin_copy
+  for d in "$HERE"/design-precedent/*/; do
+    c=$(basename "$d")
+    run_case "design-precedent/$c" design-reviewer "${d%/}" "design-precedent-$c" "$runs" "$PLUGIN_COPY" || failed=1
+  done
+  return "$failed"
+}
+
+# check_result <result.md> <expected.json>: the mechanical part of a
+# design-precedent comparison. Prints the reason and returns 1 on a mismatch.
+# Only the Precedent and Real alternatives lines are read. A line that starts
+# with "> " is a quote of the design note and never matches the anchors.
+check_result() {
+  local f=$1 e=$2 got want
+  got=$({ grep -E '^Precedent: |^Real alternatives: ' "$f" || true; } |
+    sed -E 's/^(Precedent|Real alternatives): (valid|invalid|none declared|yes|no).*/\1=\2/' | sort)
+  want=$(jq -r '"Precedent=\(.precedent)", (if .alternatives == null then empty else "Real alternatives=\(.alternatives)" end)' "$e" | sort)
+  if [ "$got" != "$want" ]; then
+    if ! grep -q '^Precedent' <<<"$got"; then
+      echo "no Precedent line (expected: $(tr '\n' ';' <<<"$want"))"
+    else
+      echo "expected: $(tr '\n' ';' <<<"$want") got: $(tr '\n' ';' <<<"$got")"
+    fi
+    return 1
+  fi
+  if [ "$(jq -r .source_note "$e")" = true ]; then
+    if ! { grep '^Precedent: ' "$f" || true; } | grep -qF 'passage carried, not read at source'; then
+      echo "the Precedent line lacks 'passage carried, not read at source'"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# check_precedent <runs>: <runs> is 0 for "the result files that are present"
+# (at least one per case), else run1..runN must all be present.
+check_precedent() {
+  local want_runs=$1 d c f n bad=0 reason nums
+  for d in "$HERE"/design-precedent/*/; do
+    c=$(basename "$d")
+    nums=()
+    if [ "$want_runs" -gt 0 ]; then
+      for ((n = 1; n <= want_runs; n++)); do nums+=("$n"); done
+    else
+      for f in "$RESULTS"/design-precedent-"$c"-run*.md; do
+        [ -e "$f" ] || continue
+        n=${f##*-run}
+        nums+=("${n%.md}")
+      done
+      if [ ${#nums[@]} -eq 0 ]; then
+        echo "MISMATCH design-precedent/$c: no result file"
+        bad=1
+        continue
+      fi
+    fi
+    for n in "${nums[@]}"; do
+      f="$RESULTS/design-precedent-$c-run$n.md"
+      if [ ! -f "$f" ]; then
+        echo "MISMATCH design-precedent/$c run $n: no result file"
+        bad=1
+      elif reason=$(check_result "$f" "$d/expected.json"); then
+        echo "MATCH design-precedent/$c run $n"
+      else
+        echo "MISMATCH design-precedent/$c run $n: $reason"
+        bad=1
+      fi
+    done
+  done
+  return "$bad"
 }
 
 # probe: the code reviewer is told to reach expected.json by four routes.
@@ -170,26 +262,37 @@ probe() {
 }
 
 main() {
-  [ $# -ge 1 ] || die "usage: run.sh <reviewer|all|probe> [--runs N]"
-  local what=$1 runs=2
+  [ $# -ge 1 ] || die "usage: run.sh <reviewer|design-precedent|all|probe|check design-precedent> [--runs N]"
+  local what=$1 runs="" target=""
   shift
+  if [ "$what" = check ]; then
+    [ $# -ge 1 ] || die "usage: run.sh check design-precedent [--runs N]"
+    target=$1
+    shift
+  fi
   while [ $# -gt 0 ]; do
     case $1 in
       --runs) runs=${2:?--runs needs a number}; shift 2 ;;
       *) die "unknown argument: $1" ;;
     esac
   done
-  [[ $runs =~ ^[1-9][0-9]*$ ]] || die "--runs must be a positive number"
+  [ -z "$runs" ] || [[ $runs =~ ^[1-9][0-9]*$ ]] || die "--runs must be a positive number"
   case $what in
+    check)
+      [ "$target" = design-precedent ] || die "unknown check target: $target"
+      check_precedent "${runs:-0}"
+      ;;
     deny-rules) deny_rules ;;
     probe) warn_dirty; probe ;;
     all)
       warn_dirty
       local bad=0
-      for r in "${REVIEWERS[@]}"; do run_reviewer "$r" "$runs" || bad=1; done
+      for r in "${REVIEWERS[@]}"; do run_reviewer "$r" "${runs:-2}" || bad=1; done
+      run_precedent "${runs:-2}" || bad=1
       return "$bad"
       ;;
-    readiness | design | code | document | acceptance | incident) warn_dirty; run_reviewer "$what" "$runs" ;;
+    design-precedent) warn_dirty; run_precedent "${runs:-2}" ;;
+    readiness | design | code | document | acceptance | incident) warn_dirty; run_reviewer "$what" "${runs:-2}" ;;
     *) die "unknown target: $what" ;;
   esac
 }
