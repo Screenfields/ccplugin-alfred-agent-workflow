@@ -1,36 +1,43 @@
-**Fail**
+**Verdict: fail**
 
-Precedent: invalid — the design note has no `Precedent:` line, so it declares neither a link nor "none declared".
+Precedent: invalid — the design note has no `Precedent:` line.
 
-Real alternatives: yes — B is dismissed only by effort, which does not hold as a reason. Details are in blocker 2.
+Real alternatives: yes — the note lists A (`--json` flag) and B (`list-json` subcommand), and the reason it gives for dismissing B does not hold (see blocker 2). With no valid precedent, the item goes to the owner for architectural review (AP-ADR0035 item 2).
 
 ## Blockers
 
-1. **No precedent line.** The note has no line beginning `Precedent: `. A note without one has an invalid precedent, and that blocks it. The note must declare either a link with a quoted passage or `Precedent: none declared`.
+1. **No `Precedent:` line.** The note has Problem, Current state, Alternatives, Design and Expected effect, but no line that begins `Precedent: `. Step 4 says a note without one has an invalid precedent, and an invalid precedent is a blocker. The note must carry either `Precedent: <link> | "<passage>"` or `Precedent: none declared`.
 
-2. **B's dismissal does not hold.** The note says:
+2. **The reason for dismissing B does not hold.**
    > Recommendation: A, because the array is already built in `cmd_list` and B needs a helper first.
 
-   B's own listed con is only that "the fetch code is shared through a helper that does not exist yet". That is a small amount of work, not a barrier. B also has a pro that A lacks and that matters here. It leaves `list` untouched, so criterion 2 ("prints exactly the text it prints today") cannot regress. The note does not weigh that against A. Because the choice rests on effort alone, the item goes to the owner for architectural review.
+   That is a cost argument, not a defect in B. The note's own pro for B is real: "`list` and its argument handling stay untouched, so the text output cannot regress". Acceptance criterion 2 is exactly that no-regression requirement. The note does not say why A's smaller diff outweighs B's isolation, and it does not say why B could not simply reuse the fetch code. A's con, "two output forms behind one name", is also left unweighed. This is why I answered `Real alternatives: yes`.
 
-3. **The test setup cannot be built as written.** The note says:
-   > Three new tests in `tests/workitem.bats` run `cmd_list` with a stubbed `gh`
+3. **Criterion 2 is not shown to be covered by the test design.**
+   > Three new tests … `--json` with two items, `--json` with none, and no flag.
 
-   The source ends with a top-level `case "${1:-}" in … *) usage ;; esac`. Sourcing the script to call `cmd_list` directly would run that dispatch with an empty `$1` and hit `usage`. The note does not say how the tests call it. It could be by running the script with a stub `gh` on `PATH`, or by a source guard. It also does not say where `$REPO` comes from, since the quoted part of the script never sets it. A builder would have to ask.
+   Criterion 2 requires "exactly the text it prints today". The note does not say the no-flag test compares against the exact tab-separated output, in the order `number`, `state`, `title`. A test that only checks the command succeeds would pass while the text output changed.
 
-4. **The no-flag test has no stated assertion.** Criterion 2 requires "exactly the text it prints today". The note gives no expected output for the stubbed array, such as the exact tab-separated lines. Without it, the third test could pass without proving the criterion.
+4. **The test mechanism may not work.** The note says the tests "run `cmd_list` with a stubbed `gh`". In the quoted source, the `case "${1:-}"` dispatch sits at the bottom of the script. Sourcing the file to call `cmd_list` directly would run the dispatch with no argument, which calls `usage` and may exit. The note does not say how the tests get at `cmd_list`: by sourcing behind a guard, by running the script with `gh` on `PATH`, or some other way. A builder would have to ask.
 
 ## Nits
 
-- **Expected effect.** The note says:
-  > `alfred-workitem list --json | jq length` equals the number of open issues the API returned.
+- **Argument handling is undefined beyond "first argument is `--json`".**
+  - `list --jsno` and `list foo --json` silently print text.
+  - The design does not say whether that is intended. Say so, or reject unknown arguments.
+- **Truncation and pull requests.**
+  - The source fetches `issues?state=open&per_page=100` with no `--paginate`, so more than 100 open items are silently cut off.
+  - The issues endpoint also returns pull requests.
+  - The success state says "the open items". The expected effect hedges with "the number of open issues the API returned", which sidesteps both problems. Either state that both are inherited behaviour, or note the limit.
+- **Usage text.** A says "one command to document", but the design does not mention updating `usage` for `--json`.
+- **Wording.** "A `--json` flag … every later subcommand … needs its own flag" is a con of A. It sits close to the out-of-scope `--format` option, so the note could say that `--json` does not preclude `--format` later.
 
-  This only checks the output against the API response. The source fetches `per_page=100` with no pagination. Past 100 open issues the array is truncated, which breaks criterion 1 ("one object per open item"). The endpoint also returns pull requests. Both behaviours already exist, but the note should either state them as known limits or state that they are outside the bounds.
-- **Unknown arguments.** Today `list` ignores all arguments. The design checks only the first argument. `list foo --json` therefore prints text, and `list --json foo` prints JSON. Say whether that is intended.
-- **Output format.** `jq .` pretty-prints. Criterion 1 only requires a parseable array, so this is fine, but state it so the test can compare the output.
+## Claims I could not verify
 
-## Not verified
-
-- **Repo state.** I did not read the repo or the issue. I checked the "Current state" claims only against the quoted source, and they match it. That covers the array of `{number, title, state}`, `cmd_list "$@"`, and `cmd_list` reading no arguments.
-- **The rest of `bin/alfred-workitem`.** I did not see where `$REPO` is set, what `usage` does, or whether `tests/workitem.bats` already has a stub pattern for `gh`.
-- **The `@tsv` escaping claim.** I took the claim in the Problem section as stated. It is standard jq behaviour.
+- I did not read the repo, only the quoted `bin/alfred-workitem` excerpt. The following match the excerpt, but I could not check them against the repo, the issue or the API:
+  - `cmd_list` builds `{number, title, state}` items.
+  - `cmd_list` ignores its arguments.
+  - The `@tsv` line is the current output.
+- `tests/workitem.bats` was not available, so I could not check how existing tests load `cmd_list` or stub `gh`.
+- The claim that `@tsv` escapes tab, newline and backslash as `\t`, `\n` and `\\` is standard jq behaviour. I did not run it.
+- `jq .` printing `[]` for an empty array follows from jq's behaviour, but I did not run it.

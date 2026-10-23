@@ -1,35 +1,28 @@
-**Pass**
+**Verdict: pass**
 
-Precedent: none declared — the note declares none.
+Precedent: none declared. The note says `Precedent: none declared`, and I judge it below.
 
-Real alternatives: no — The work item names the `--json` flag on `list` as the success state and rules out `--format` and a new subcommand. Those two are dismissed on scope, and the reason holds. The third alternative, quoting tabs in titles, is dismissed because every script would have to undo the `@tsv` escapes. That holds, and the change would also break acceptance criterion 2. I found no viable alternative inside the bounds. An environment variable could be named, but it would not meet the stated success state. The item goes ahead and its design is recorded in a baseline doc.
+Real alternatives: no. The note lists three alternatives and dismisses each with a reason that holds:
+- Quoting tabs inside titles would change the text output, which criterion 2 forbids. The note's own reason, that scripts would have to undo the `@tsv` escapes, also holds.
+- `--format` and a new subcommand are both listed as out of scope in the work item.
+- That leaves the flag on `list`, which is what the note concludes.
 
-**Blockers**
+**Blockers:** none.
 
-None.
-
-The quoted source supports the state claims:
-- `cmd_list` builds `map({number, title, state})`.
-- It prints with `@tsv`.
-- It reads no arguments.
-- `list` passes them with `shift; cmd_list "$@"`.
-
-The design covers each criterion:
-- **Criterion 1:** `jq .` on `$items` prints the array of `{number, title, state}`.
-- **Criterion 2:** the existing `jq -r` line stays unchanged.
-- **Criterion 3:** an empty `$items` prints `[]`.
-- **Criterion 4:** the three tests are named.
-
-Sorting is not added, which matches the bounds.
+**Checks against the source**
+- Current state: the quoted `cmd_list` builds `jq 'map({number, title, state})'` and then prints `@tsv`. The dispatch `list) shift; cmd_list "$@"` passes the arguments, and `cmd_list` reads none. The note's claim matches the source.
+- Criterion 1: `jq . <<<"$items"` prints a single array of `{number, title, state}`.
+- Criterion 3: an empty API result gives `$items` = `[]`, and `jq .` prints `[]`.
+- Criterion 2: the existing `jq -r` line stays as it is, so the no-flag output does not change.
+- Bounds: the design touches only `list`, adds no sorting, and keeps the API order.
 
 **Nits**
-
-- The note says the tests "run `cmd_list` with a stubbed `gh`". In the quoted source the `case` dispatch sits at file level. Sourcing the file to call `cmd_list` directly would run `usage`, because `${1:-}` is empty. A builder should run `alfred-workitem list [--json]` with a stub `gh` first on `PATH`. The note should say so, and also how `$REPO` is set in the tests.
-- "Equals the number of open issues the API returned" is the right wording, and it is as far as the claim can go. The endpoint is `issues?state=open&per_page=100`, so the result is capped at 100 and includes pull requests. This is existing behaviour and out of scope, but the note should not suggest the count matches all open issues.
-- The note does not say what `list --other` does. By the design it behaves as `list` does today, which is fine. One line would settle it.
+- The tests are underspecified. The note says "run `cmd_list` with a stubbed `gh`". In the quoted source the `case` dispatch runs at the bottom of the script, so sourcing it to call `cmd_list` directly would also run `usage`. The note doesn't say whether the tests run the script with a stub `gh` on `PATH`, or how `REPO` gets set. A builder would have to decide this.
+- Argument handling beyond `$1 == --json` isn't stated. Examples are `list --bogus` and `list x --json`. The design implies they print text, and the note should say so.
+- `jq .` pretty-prints over several lines. That still counts as "one JSON array", but say so if compact output was intended.
+- The query is `issues?state=open&per_page=100`. The issues endpoint also returns pull requests, and the query has no pagination. The expected effect is worded "the number of open issues the API returned", which avoids the problem. The note should still say that "open items" means this query's result and nothing wider.
+- The note says the flag removes the need for scripts to undo the escapes. It never states that `--json` titles come through unescaped (`jq` emits standard JSON string escapes). A test with a title containing a tab or backslash would check the stated problem. The three listed tests would not.
 
 **Could not verify**
-
-- The current `bin/alfred-workitem` and `tests/workitem.bats` in the repo. I checked only the quoted source, and the working directory is not a git repository.
-- Issue #162 itself. I used the quoted text.
-- Whether `tests/workitem.bats` already has a `gh` stub helper, and how `$REPO` is set there.
+- I didn't read `tests/workitem.bats` or the full `bin/alfred-workitem`. The working directory is not a repo, so I judged the source only from the quoted excerpt. That includes whether `REPO` is defined and whether `gh` can be stubbed through `PATH`.
+- I didn't read issue #162 at the source. I used the quoted copy.

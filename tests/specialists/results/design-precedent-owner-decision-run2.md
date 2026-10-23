@@ -2,33 +2,31 @@
 
 **Blockers**
 
-1. The precedent is invalid. The note says:
-   > Precedent: https://github.com/Screenfields/ccplugin-alfred-agent-workflow/issues/146#issuecomment-6355000001 | "Owner (comment on the issue): Yes, go ahead with JSON output for the work item tools."
+1. The precedent fails step 4. The note says:
 
-   - The link is a comment on an issue. Step 4 says an owner decision recorded only on an issue is not a precedent. A precedent must be an accepted ADR under `docs/adr/` or `docs/decisions/`, or a baseline doc under `docs/baseline/`.
-   - I could not read the link. I have no GitHub access, and the working directory holds no copy of the repo. So the passage was "carried, not read at source".
-   - The passage would not cover the work even if it were genuine. It approves "JSON output for the work item tools" in general. It doesn't choose between a `--json` flag and a `list-json` subcommand, and it says nothing about `list`.
+> Precedent: https://github.com/Screenfields/ccplugin-alfred-agent-workflow/issues/146#issuecomment-6355000001 | "Owner (comment on the issue): Yes, go ahead with JSON output for the work item tools."
 
-2. The tests in the design cannot run as written. The design says:
+   The link points to a comment on an issue. It is not an accepted ADR under `docs/adr/` or `docs/decisions/`, and it is not a baseline doc under `docs/baseline/`. An owner decision recorded only on an issue is not a precedent. I have no network tool here, so I did not read the link. The passage is carried, not read at source. Even if it reads as quoted, it only approves "JSON output" in general. It does not cover the choice of a `--json` flag over a new subcommand.
+
+2. The test plan does not match the source. The note says:
+
    > Three new tests in `tests/workitem.bats` run `cmd_list` with a stubbed `gh`…
 
-   In the source, `cmd_list` sits in the same file as the `case "${1:-}"` dispatcher, which runs on load. A test can't call `cmd_list` directly without sourcing the script. Sourcing would run the dispatcher and call `usage` with no arguments. The design doesn't say how the tests reach `cmd_list`. Either they invoke `bin/alfred-workitem list [--json]` with `gh` stubbed on `PATH`, or the script gets a source guard. Pick one in the design, because a source guard changes the script beyond the `list` bounds.
-
-3. The success state for "no flag" is not nailed down. Acceptance criterion 2 requires that the text output stays exactly as it is today. The design says only that the test covers the "no flag" case. It doesn't say the test compares against the current `@tsv` output byte for byte, or give the expected fixture. Without that, the test could pass on a regression.
+   The source ends with a bare `case "${1:-}" in … *) usage ;; esac`. It has no guard against being sourced. Sourcing the file to call `cmd_list` directly would run the dispatcher and call `usage`. The design does not say how the tests reach `cmd_list`. A builder could run the script with a `gh` stub on `PATH`, or add a source guard. The second option changes the file's structure and is not in the design. The design needs to name one of them.
 
 **Nits**
 
-- The design's `--json` check only looks at the first argument. Say what happens with unknown or extra arguments, such as `list foo --json`. `cmd_list` ignores them today, and the design should keep that behaviour or change it on purpose.
-- The expected effect says `alfred-workitem list --json | jq length` equals the number of open issues the API returned. The API call uses `per_page=100` and no pagination. The issues endpoint also returns pull requests. That makes "open items" and "issues returned" differ when there are more than 100 or when PRs are open. This is existing behaviour and out of scope, but the design should state that the count means "items `cmd_list` fetches".
-- Alternative A lists as a con that every later subcommand needs its own flag. The work item rules out a `--format` option, but the design never says that is why it dismisses that route. Say so.
-- `jq .` pretty-prints the array. Criterion 1 only requires a JSON array, so this is fine. State that the output is pretty-printed.
-
-**Real alternatives: yes** — Alternatives A (`--json` flag) and B (`list-json` subcommand) are both viable. B's stated con is only that a helper doesn't exist yet, which is a small cost and doesn't rule it out. Since the precedent is invalid, the item goes to the owner for architectural review (AP-ADR0035 item 2).
-
-**Precedent: invalid** — The link is an owner comment on an issue, not an accepted ADR or a baseline doc. I couldn't read it, so the passage was "carried, not read at source". The passage is too general to cover a choice between a flag and a subcommand.
+- The note does not say what happens with `list --foo`, or with `--json` as a second argument. It only says "tests whether its first argument is `--json`". Acceptance criterion 2 says the non-JSON form prints "exactly" today's text, so this should be explicit.
+- The fetch uses `per_page=100` with no pagination. With more than 100 open items, the JSON array would not have "one object per open item" (criterion 1). The expected effect, "`jq length` equals the number of open issues the API returned", hides this gap. Either state it as a known limit or put it out of scope.
+- The `issues` endpoint also returns pull requests. The note calls the items "open issues" and does not say whether PRs are in the array. This is existing behaviour, but the JSON form makes it visible to scripts.
+- Dismissing B with "needs a helper first" is a cost, not a disqualifier. The note also lists the "two output forms behind one name" con of A but does not weigh it.
 
 **Claims I could not verify**
 
-- I could not check the `cmd_list` source, the `case` dispatcher, or the existence of `tests/workitem.bats` against the repo. I judged them only from the source quoted in the brief. My searches of the working directory found no `alfred-workitem` or `tests/workitem.bats`.
-- I could not check issue #146 or the comment's existence and wording at the link.
-- I could not check the `@tsv` escaping claim against a running `jq`. It matches the documented `jq` behaviour.
+- I could not read `tests/workitem.bats`, so I cannot check "three more passing tests".
+- I did not read the full `bin/alfred-workitem`, only the part quoted in the brief. That part matches the note's claims about `cmd_list` and `"$@"`.
+- I could not confirm the content of issue #146 comment 6355000001.
+
+Precedent: invalid — the link is an owner comment on an issue, which is not an accepted ADR or a baseline doc; passage carried, not read at source.
+
+Real alternatives: yes — A (a `--json` flag) and B (a `list-json` subcommand) are both viable. B is dismissed only on implementation cost (a helper must be written first), not on a reason that rules it out. The item goes to the owner for architectural review (AP-ADR0035 item 2).

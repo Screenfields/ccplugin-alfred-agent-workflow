@@ -1,43 +1,58 @@
-**Fail.**
+Fail.
+
+Owner time line: Owner prompt received at _[2026-10-12 08:30 CEST]_
+
+**Precedent: none declared** — the note declares none.
+
+**Real alternatives: no** — the note lists two alternatives. The dismissal of the transcript scan holds. The thresholds-config dismissal does not hold (blocker 3). Nothing in the note says the owner has to make an architectural choice. A possible alternative is missing (see nits). I would record the design in a baseline doc once the blockers are fixed.
+
+I could not read the repo, because the working directory holds no copy of it. I checked the design against the sources quoted in the brief only.
 
 **Blockers**
 
-1. The design misstates current state. It says:
-> `hooks/hooks.json` has no `PreToolUse` entry today, so the design adds a new `PreToolUse` block with the matcher `Bash`.
+1. **The "Current state" claim is false.**
+   > `hooks/hooks.json` has no `PreToolUse` entry today, so the design adds a new `PreToolUse` block with the matcher `Bash`.
 
-   The source shows a `PreToolUse` entry with matcher `Bash` that already runs `"${CLAUDE_PLUGIN_ROOT}/bin/alfred-workitem" guard`. The design must say whether the new hook is a second command in that block, replaces the existing one, or is folded into `alfred-workitem guard`. It must also say how the two hooks interact. If two hooks run on the same call, a builder could overwrite the existing guard or produce a duplicate key. The design doesn't cover this, and it makes the "registered in `hooks/hooks.json`" criterion ambiguous.
+   The quoted source of `hooks/hooks.json` has a `PreToolUse` entry with matcher `Bash`. It runs `"${CLAUDE_PLUGIN_ROOT}/bin/alfred-workitem" guard`. The design must say how the new hook joins that existing `Bash` block, as a second command in `hooks`. Adding a second `PreToolUse` block would be a duplicate matcher. The design must also say how the new hook interacts with the existing `guard`. The note does not mention the guard. Both hooks run on every Bash call. One can deny while the other allows, and the note does not say how that resolves.
 
-2. The failure behavior contradicts a stated convention that CI enforces. The design says:
-> On any internal failure (`jq` missing, unparseable input, a regex error) the script exits 2
+2. **The design contradicts the hook convention in the README.**
+   > On any internal failure (`jq` missing, unparseable input, a regex error) the script exits 2, so that no secret passes unchecked.
 
    The README says:
-> Hook-mode scripts use no `set -e`/`set -u` and always exit 0 (CI audits this); a syntax error would exit 2, which blocks, so CI also runs `bash -n` on every hook.
+   > Hook-mode scripts use no `set -e`/`set -u` and always exit 0 (CI audits this)
 
-   As written, the new script fails the CI audit. The design neither mentions the convention nor proposes an exemption or a change to the audit. Fail-closed may be the right call. If it is, the design has to justify it, since a missing `jq` would then block every Bash call. It also has to say how the CI audit changes. The design doesn't acknowledge this conflict.
+   The design deliberately exits 2, so the CI audit would fail it. The note does not mention the convention or say whether it changes it. A fail-closed hook is a defensible choice, and the owner may want it. But the design has to name the conflict and say how CI changes. It also has to say how a missing `jq` leaves the Bash tool, and with it the agent's other Bash work, usable. Exit 2 on every Bash call blocks all of them.
 
-3. A dismissed alternative is rejected for a false reason. The design says:
-> *Patterns in `config/thresholds.json`.* Rejected: the thresholds config cannot hold strings
+3. **The rejected alternative's reason rests on a claim the source does not support.**
+   > Rejected: the thresholds config cannot hold strings, so the patterns have to live in the script.
 
-   The source shows `thresholds.json` holding strings (`"waiting-label": "status:waiting-on-owner"`, `"ready-state": "status:ready"`) and a string array (`"workable-states"`). Strings are therefore not the obstacle. The rejection doesn't hold, and the design has not given a real reason for keeping the patterns in the script.
+   `config/thresholds.json` already holds strings (`"waiting-label": "status:waiting-on-owner"`) and string arrays (`"workable-states"`). The reason is false, so the alternative is not properly dismissed. A real reason may exist, for example that the thresholds file is for numbers and states, or that a hook should not depend on a config file at runtime. The note has to give one.
 
-4. The expected effect isn't measurable. The design says:
-> Secret handling gets safer, and agents follow the stdin rule more consistently.
+4. **The acceptance criteria are not covered by the test plan.**
+   > one case per pattern, one stdin case, one garbage-input case.
 
-   It gives no metric, no observable signal and no threshold, for example the number of denials or a check that a token-bearing command never reaches execution. The acceptance criteria are testable, but the stated effect is not.
+   - Criterion 3 is `gh auth login --with-token < /tmp/tok`. The note's stdin case does not say it uses this command, nor that the secret is absent from the command text. Say so.
+   - The design does not say what "token-shaped argument" means beyond the three regexes.
+   - The design does not say whether a secret inside an env-var prefix, heredoc or here-string is refused. The rule `secrets-via-stdin-never-cmdline` names those. A builder cannot tell if they are in scope.
+   - Criterion 1 says `github_pat_` followed by at least 20 characters. The regex `github_pat_[A-Za-z0-9_]{20,}` matches that.
+   - Criterion 4 requires a `hooks/hooks.json` registration. It is not stated how the registration is tested.
 
-**Precedent:** none declared — the note declares none.
+5. **The expected effect is not measurable.**
+   > Secret handling gets safer, and agents follow the stdin rule more consistently.
 
-**Real alternatives:** yes — the only dismissed alternatives are the thresholds config, which was rejected for a false reason, and the after-the-fact transcript scan. A plausible alternative is missing: extend the existing `alfred-workitem guard` PreToolUse hook instead of adding a second script. Others are exiting 0 with the deny JSON in every failure path, which follows the README convention, and a different failure policy for a missing `jq`. Because a real alternative exists, the item goes to the owner for architectural review (AP-ADR0035 item 2).
+   The note gives no metric, baseline or check. A measurable form would be the number of denials, a count of leaked tokens in transcripts, or the bats cases passing.
 
 **Nits**
 
-- The rule also names env-var prefixes, heredoc literals and here-strings. The design covers only three token shapes and doesn't say that other secret forms are out of scope.
-- The test list has no case for a token inside a heredoc or here-string, and no case showing that `< /tmp/tok` passes when the command also contains a non-secret `ghp_` substring.
-- The deny reason text is not specified, and acceptance requires it to say how to pass the secret by stdin. The test should assert that text.
-- A match on `ghp_[A-Za-z0-9]{20,}` can also hit the middle of a longer string. The design should state that this is accepted.
+- The deny reason must not echo the matched secret. The note says the reason "names the rule", but does not forbid echoing the match. The hook's own output also lands in the transcript.
+- A missing alternative is a `permissionDecision: "ask"` or a non-blocking warning. A second is a `bin/alfred-workitem` subcommand, since `guard` already exists there. The note should say why a new script is better than extending the existing guard.
+- The hook's `timeout` is not specified. The existing entry uses 5.
+- Name the false-positive risk: a pattern appearing in a commit message or in test fixtures that are not real secrets.
+- State that the script's own bats fixtures must build token strings at runtime, so the test file does not contain token-shaped literals.
 
-**Could not verify**
+**Claims I could not verify**
 
-- I did not read the repo. I judged only the quoted excerpts, so I can't say whether other `PreToolUse` or `Stop` hooks, or the CI audit script itself, exist beyond what is quoted.
-- I did not check `tests/secret-arg-guard.bats` or `hooks/secret-arg-guard.sh` for existence or content.
-- I did not confirm that exit 2 from a hook blocks the Bash call in the installed Claude Code version. I took that from the README.
+- That `hooks/hooks.json`, `README.md` and `config/thresholds.json` match the excerpts in the brief. I used the quoted text only.
+- That the `alfred-workitem guard` hook does not already scan for secrets.
+- That CI really audits the "always exit 0" convention.
+- That Claude Code treats exit 2 as a block for `PreToolUse` and ignores JSON output in that case. I took the README's statement.

@@ -1,30 +1,29 @@
-**Fail**
+**Verdict: fail.** The precedent is invalid. The other checks pass or leave only nits.
 
 **Blockers**
 
-1. The precedent is invalid. The note says:
+1. The precedent does not cover the work.
 
 > Precedent: https://github.com/Screenfields/alfred-platform/blob/main/docs/adr/0038-retry-policy-for-github-calls.md | "Status: Accepted (2026-07-02). Decision: A call to the GitHub API that fails with HTTP 5xx is retried up to 3 times with a pause of 2 seconds. Other failures are not retried."
 
-I have no network or GitHub access in this session. I could not read the link, so I checked the passage the brief carries. That passage reads Accepted and sits at a `docs/adr/` path. It decides a retry policy for failing GitHub API calls. It says nothing about CLI output formats, a `--json` flag, or `alfred-workitem list`. So the passage does not cover this work, and it is not a precedent for it. Passage carried, not read at source.
+   - I could not read the link. The sandbox has no repo checkout and no network tool, and a glob for that ADR file found nothing. The check therefore rests on the carried passage, which was "passage carried, not read at source".
+   - That passage is a retry policy for failed GitHub calls. The work item adds a JSON output form to `alfred-workitem list`. The passage says nothing about output formats, flags, subcommands or machine-readable output, so it cannot be the precedent for this design.
 
-**Real alternatives:** yes. Alternative A (a `--json` flag on `list`) and alternative B (a `list-json` subcommand) are both viable. The note dismisses neither with a reason that rules it out. It only recommends A on cost. The recommendation of A also leaves "every later subcommand that wants JSON needs its own flag" open. Because the precedent is invalid, the item goes to the owner for architectural review (AP-ADR0035 item 2).
+**Precedent:** invalid. The passage was carried, not read at source, and it covers GitHub retry behaviour, not list output formats.
+
+**Real alternatives:** yes. The note lists two viable options: a `--json` flag on `list`, or a separate `list-json` subcommand. The reason given for dismissing B is "B needs a helper first". That is a cost, not a reason B cannot work. B's stated pro is that the text output cannot regress, which bears directly on acceptance criterion 2. Both options hold, so the item goes to the owner for architectural review (AP-ADR0035 item 2).
 
 **Nits**
 
-- The test setup is unspecified. The note says the tests "run `cmd_list` with a stubbed `gh`". The `case` dispatch at the bottom of `bin/alfred-workitem` runs when the file is sourced. With no argument it calls `usage`. The builder has to choose between sourcing the file and running the script with a stub `gh` on `PATH`. The note should say which. It should also say how `$REPO` is set in the tests.
-- "Tests whether its first argument is `--json`" leaves other arguments undefined. Examples are `list foo` and `list --json extra`. Say whether they are ignored, as today, or rejected.
-- `issues?state=open&per_page=100` has two effects that predate this change. It returns pull requests as well as issues. It also stops at 100 items with no pagination. The expected effect words this carefully ("the number of open issues the API returned"). The success state says "the open items", which is wider. Name the limit or accept it explicitly.
-- Alternative B is dismissed because "the fetch code is shared through a helper that does not exist yet". That is weak. Writing the helper is a small change. The stronger argument for A is the one already given: one command to document.
+- The design does not say what happens with an unknown first argument, such as `list --jsno`. As written, the argument is silently ignored and text is printed, so a script that mistypes the flag gets tab-separated text where it expects JSON. A builder will have to guess. The design should say whether to reject it.
+- The design tests only the first argument (`--json`). It does not say whether `list --json` with extra arguments is allowed.
+- The note does not name a missing alternative that was plausible: emitting one JSON object per line instead of an array. The work item asks for one array, so this is minor.
+- The expected effect says `jq length` equals "the number of open issues the API returned". That is measurable, but it is a test against a stub, not against real open items. See the unverified claims below for the real-world gap.
 
 **Claims I could not verify**
 
-- The `bin/alfred-workitem` source was only available as quoted in the brief. I did not check it against the repo.
-- The existence and status of ADR 0038 at the link.
-- That `tests/workitem.bats` exists and which stub conventions it uses.
-
-I checked these claims against the quoted source, and they hold:
-- `cmd_list` builds `{number, title, state}` as a JSON array.
-- `cmd_list` prints it with `@tsv`.
-- `list` passes `"$@"` to `cmd_list`, which reads none of it.
-- `jq .` on `[]` prints `[]`, so acceptance criterion 3 is met.
+- I could not check `bin/alfred-workitem` against the repo. I used only the source quoted in the brief. It matches the design's "Current state": `cmd_list` builds the array with `jq 'map({number, title, state})'`, prints it with `@tsv`, and ignores its arguments.
+- I could not check that `tests/workitem.bats` exists, or how it stubs `gh`.
+- I could not read ADR 0038 at source, or confirm its status.
+- The `@tsv` escaping of tab, newline and backslash is standard jq behaviour. I did not run it.
+- `repos/$REPO/issues?state=open&per_page=100` returns at most 100 items, with no pagination. It also returns pull requests, which the GitHub issues endpoint includes. The success state says "the open items", so the design should say whether those two limits are accepted. The note does not mention either.

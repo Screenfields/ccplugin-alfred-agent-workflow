@@ -1,38 +1,31 @@
-Pass
+**Verdict: Pass**
 
-Precedent: none declared — the note declares none.
+Precedent: none declared — the note says `Precedent: none declared`.
 
-Real alternatives: no — the work item puts `--format` and a new subcommand out of scope, and those two dismissals hold. The "quote tabs" alternative would change the text output, which criterion 2 forbids. That leaves the flag on `list` as the only option inside the bounds.
+Real alternatives: no — the work item itself fixes the `--json` flag on `list` in its success state and acceptance criteria. The note rejects the other options for reasons that hold. A `--format` option and a new subcommand are both listed as out of scope. Making scripts undo the `@tsv` escapes themselves would not meet the success state of `list --json` printing a JSON array. The item goes ahead and its design is recorded in a baseline doc.
 
 **Blockers**
 
-None. The state claims match the quoted source:
-- `cmd_list` builds `{number, title, state}` with `jq 'map(...)'`.
-- It prints with `jq -r ... @tsv`.
-- It ignores its arguments.
-- `list` is dispatched with `cmd_list "$@"`.
+None.
 
-The design covers all four criteria:
-1. `jq .` on `$items` gives a JSON array of `number`, `title` and `state`.
-2. The `-r @tsv` line is left unchanged on the no-flag path.
-3. An empty API result gives `$items` = `[]`, and `jq .` prints `[]`.
-4. Three tests are named in `tests/workitem.bats`.
+**Checks against the source**
+
+I checked these against the quoted `bin/alfred-workitem` only. The repo itself was not available to me.
+
+- The note says: "`cmd_list` in `bin/alfred-workitem` already builds the open items as a JSON array of `{number, title, state}` and then prints them as tab-separated text." The source matches. `jq 'map({number, title, state})'` builds the array, and `jq -r '.[] | ... | @tsv'` prints it.
+- The note says: "`list` takes its arguments through `cmd_list "$@"`, and `cmd_list` reads none of them." The source matches.
+- The design keeps the existing `jq -r` line unchanged. That supports acceptance criterion 2 (no flag, same text).
+- `$items` is `[]` when the API returns nothing, and `jq .` prints `[]`. That supports criterion 3.
+- The note adds no sorting and builds no new field, which stays inside the stated bounds.
+- The expected effect is measurable: three more passing bats tests, and `list --json | jq length` equals the number of items the API returned.
 
 **Nits**
 
-- The first alternative's reason is muddled:
-  > Rejected: every script would have to undo the `@tsv` escapes itself, and the array is already built as JSON inside `cmd_list`.
-
-  Quoting tabs is what `@tsv` already does. The reason that actually holds is that changing the text output breaks criterion 2. Say so.
-- The note doesn't say what happens to `--json` when it isn't the first argument, for example `list foo --json`. "Tests whether its first argument is `--json`" means it is silently ignored and text prints. This is acceptable, but state it.
-- The expected-effect check is close to circular:
-  > `alfred-workitem list --json | jq length` equals the number of open issues the API returned.
-
-  It only shows the output matches the stub or API response. It doesn't test the "open items" claim. Name the fixed count in the stubbed test, for example 2 and 0.
-- The note doesn't mention that `repos/$REPO/issues` also returns pull requests, and that `per_page=100` has no pagination. Both are existing behaviour and out of scope. Still, the success state says "open items", so a script author could be surprised. A one-line "unchanged, not addressed" would do.
+- The note says "Three new tests ... run `cmd_list` with a stubbed `gh`." The source runs `case "${1:-}"` at the bottom of the script. Sourcing the file to call `cmd_list` directly would also run that dispatch, so the builder has to decide how to invoke it. Running the script with a stub `gh` on `PATH` avoids this. The note should say which.
+- The note tests only whether the first argument is `--json`. `list --json` works, but any other argument, such as `list foo --json`, is silently ignored. The note could say this is intended.
+- The note's expected effect says "the number of open issues the API returned." `repos/.../issues` also returns pull requests, and `per_page=100` has no pagination. Both are existing behaviour and out of scope, but the wording "open items" in the work item could be read more strictly than what the code returns.
 
 **Claims I could not verify**
 
-- I could not read the repo, only the quoted excerpt of `bin/alfred-workitem`. I did not check `tests/workitem.bats`, the rest of the script (`usage`, `REPO`, `cmd_show`), or whether other callers parse the `list` output.
-- "Run `cmd_list` with a stubbed `gh`" assumes the tests can source the script or call `cmd_list` without the bottom `case` running `usage` and exiting. They would also need `REPO` set. I could not check how existing tests load the script, so the builder should confirm it.
-- I could not check the claim that scripts split on tabs and mishandle titles. It is plausible, since `@tsv` does escape `\t`, `\n` and `\\`.
+- I could not read `tests/workitem.bats`, the definition of `REPO`, or the rest of `bin/alfred-workitem`. I relied on the quoted `list` section.
+- I did not run the real `gh api` output, so I could not confirm the PR-inclusion and 100-item limits above.

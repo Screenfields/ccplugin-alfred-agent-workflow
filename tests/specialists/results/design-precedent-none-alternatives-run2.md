@@ -1,37 +1,32 @@
 **Pass**
 
-Precedent: none declared — the note carries `Precedent: none declared`.
+Precedent: none declared — the note has no link and says so.
 
-Real alternatives: yes — The note lists A (a `--json` flag) and B (a `list-json` subcommand). Both would meet the acceptance criteria. B is dismissed only on effort:
-
-> Recommendation: A, because the array is already built in `cmd_list` and B needs a helper first.
-
-That reason does not rule B out. B's stated advantage also goes unanswered:
-
-> `list` and its argument handling stay untouched, so the text output cannot regress.
-
-Neither does A's stated cost:
-
-> every later subcommand that wants JSON needs its own flag.
-
-The choice sets how scripts ask for JSON across the CLI, and no precedent covers it. The item goes to the owner for architectural review (AP-ADR0035 item 2).
+Real alternatives: yes — the note lists two viable options, A (`--json` flag) and B (`list-json` subcommand). B is dismissed only by cost: "B needs a helper first". That is effort, not a defect, and B's stated benefit is real: "`list` and its argument handling stay untouched, so the text output cannot regress". The item should go to the owner for architectural review (AP-ADR0035 item 2).
 
 **Blockers**
 
-None. The design supports the work item:
-- The "Current state" claims match the quoted source. `cmd_list` builds `map({number, title, state})`, prints it with `@tsv`, and never reads its arguments.
-- The problem claim is correct. `@tsv` escapes tab, newline and backslash in titles.
-- `jq .` on `[]` prints `[]`, which meets AC3. The text path is untouched, which meets AC2.
-- Sorting and `--format` are excluded, as the bounds require.
+None. The state claims match the quoted source:
+- `cmd_list` builds `jq 'map({number, title, state})'` into `$items`.
+- It prints with `jq -r '.[] | [.number, .state, .title] | @tsv'`.
+- The dispatch is `list) shift; cmd_list "$@"`, and `cmd_list` reads no arguments.
+
+The design also meets the acceptance criteria and the bounds:
+- `jq .` on an empty array prints `[]` (AC 3).
+- The `jq -r` line stays unchanged (AC 2).
+- No `--format` option and no sorting are added.
 
 **Nits**
 
-- The test plan says "run `cmd_list` with a stubbed `gh`". The script ends with a `case` dispatch that calls `usage` when there is no argument. A test that sources the file would hit that. The note does not say whether tests call the script as `bin/alfred-workitem list [--json]` with `gh` on `PATH`, or source it. A builder will have to decide, and `$REPO` also needs setting.
-- The "no flag" test should assert the exact tab-separated output, `number<TAB>state<TAB>title`. AC2 says "exactly the text it prints today", and "no flag" alone does not say what is asserted.
-- `--json` is recognised only as the first argument. Say whether `list --json extra` is accepted and whether an unknown first argument is still ignored, as it is today.
-- `repos/$REPO/issues` also returns pull requests, and `per_page=100` has no pagination. Both are existing behaviour. The expected-effect line says "open issues the API returned", so it holds, but the JSON will contain PRs and at most 100 items.
+1. The test setup is ambiguous. The note says the tests "run `cmd_list` with a stubbed `gh`". In the quoted source the `case "${1:-}"` dispatch sits at top level, so sourcing the file would run `usage`. The tests must therefore run `bin/alfred-workitem list [--json]` with a stub `gh` on `PATH`, and `REPO` must be set. The note should say which. It should also say what the "no flag" test asserts: the exact current TSV text, from a fixed fixture.
+2. The expected effect is partly circular. It says "`jq length` equals the number of open issues the API returned". That checks the output against the same API response, so it cannot show that every open item is listed.
+3. The same circularity hides a gap against AC 1 ("one object per open item"). The fetch uses `per_page=100` with no pagination, so more than 100 open items are silently truncated. The `issues` endpoint also returns pull requests. Both limits exist today, but the note should state them as known limits or place them out of scope.
+4. The note does not say what happens when `--json` is not the first argument (`list foo --json`), or when another argument is given. As written, `cmd_list` ignores both. State that this is intended.
+5. The test fixture should include extra fields, such as `body` and `labels`. That shows the output holds only `number`, `title` and `state`.
 
-**Claims I could not verify**
+**Could not verify**
 
-- I had no repo access. I checked the "Current state" claims only against the quoted `bin/alfred-workitem` excerpt. I did not check the rest of the file, `tests/workitem.bats`, how `usage` and `$REPO` are set, or whether other callers parse the TSV output.
-- I could not confirm that bats can stub `gh` the way the note describes.
+- `tests/workitem.bats` and the existing test count. I had no repo access, so "three more passing tests" is unchecked.
+- Whether `REPO` and `gh` are already stubbable in the existing bats setup.
+- The claim that most scripts split on tabs and do not undo the `@tsv` escaping. This is context for the problem and not checkable from the source.
+- That the `issues` endpoint returns the same `state` value for every item. It should be `open` here, but I did not call the API.

@@ -1,35 +1,27 @@
 **Pass**
 
-Precedent: none declared — the note declares none.
+Precedent: none declared — the note's line is `Precedent: none declared`, so I judged alternatives instead.
 
-Real alternatives: yes — The note lists A (`--json` flag) and B (`list-json` subcommand), and B is viable. It is dismissed only because "B needs a helper first", which is a cost of building it. It is not a defect of B. B's own advantage, that the text output cannot regress, is not weighed against A. This goes to the owner for architectural review (AP-ADR0035 item 2).
+Real alternatives: yes — the note lists two viable options (A `--json` flag, B `list-json` subcommand), and the reason given against B does not settle the choice. B's stated cost is "the fetch code is shared through a helper that does not exist yet". That helper is a few lines: the `gh api … | jq 'map(...)'` pipeline. B's stated benefit, that the text output cannot regress, is also covered under A by the "no flag" test. What remains is a choice about the CLI surface: one name with two output forms, or two commands. That is an owner decision under AP-ADR0035 item 2. I did not weigh in on which option is better. A third option, an environment variable such as `ALFRED_WORKITEM_JSON=1`, is not listed. `--format` is out of scope per the work item, so leaving it out is correct.
 
 **Blockers**
 
-None. The design matches the work item's three behaviours and its bounds: only `list`, no `--format`, no sorting.
+None. The design supports each acceptance criterion:
+- Criterion 1: `--json` prints `$items`, which is already `{number,title,state}` per item.
+- Criterion 2: the `jq -r` line is left unchanged.
+- Criterion 3: `jq 'map(...)'` over an empty API array gives `[]`, and `jq .` prints that.
+- Criterion 4: the three tests are named.
 
 **Nits**
 
-1. Argument handling is under-specified. The note says:
-   > `cmd_list` tests whether its first argument is `--json`.
+1. The test setup is unclear. The note says the tests "run `cmd_list` with a stubbed `gh`". The script, as quoted, ends with an unconditional `case "${1:-}" … *) usage ;;`. Sourcing it from bats would therefore run `usage`, and the quoted code has no source guard. The note should say how the tests invoke it: either a stub `gh` on `PATH` with `alfred-workitem list [--json]` run as a subprocess, or a source guard added to the script. A guard would be a change the note does not list.
+2. The "no flag" test should compare the exact text output (`<number>\t<state>\t<title>` lines). Criterion 2 says "exactly the text it prints today", and "no flag" alone does not pin that down.
+3. The note says `cmd_list` "tests whether its first argument is `--json`". Any other argument is silently ignored, so `list foo --json` prints text. The note should say whether that is intended.
+4. The expected effect is measurable but loose. `jq length` equals "the number of open issues the API returned". With `per_page=100` and no pagination, that is at most 100, and the issues endpoint also returns pull requests. Both limits already exist, but the note does not say they remain.
+5. The problem statement says "most scripts do not undo that". That is an assertion, not evidence. It does not affect the design.
 
-   It does not say what `list --jsn`, `list foo` or `list x --json` do. As written they silently print text, so a script that mistypes the flag gets TSV where it expects JSON. A builder should be told whether unknown arguments are ignored or rejected.
+**Claims I could not verify**
 
-2. A failed fetch may look like an empty result. The source has `items=$(gh api ... | jq ...)`. I can't see whether `set -o pipefail` is on. If it isn't, a failing `gh` leaves `$items` empty. Then `jq .` prints nothing and exits 0, which is not `[]`. Criterion 3 only holds for "no open items", not for an API error. The design should state the failure behaviour.
-
-3. The tests' harness is not described. The quoted source ends with a top-level `case` that dispatches on `$1`. The note says the tests "run `cmd_list` with a stubbed `gh`", but not how: by sourcing the script, or by running it with `gh` on a stubbed `PATH`. Sourcing would trigger the dispatch and `usage`. The "no flag" test should also assert the exact current tab-separated text, because criterion 2 says "exactly".
-
-4. The listed con of A is weak:
-   > every later subcommand that wants JSON needs its own flag.
-
-   That is speculative and outside scope. A real con is that `--json` becomes a one-off if a `--format` option comes later, and `--format` is explicitly out of scope.
-
-5. The note does not mention that the call uses `per_page=100` with no pagination. With more than 100 open items, "one JSON array of the open items" is truncated. The `jq length` check in the expected effect would still pass, because it compares against what the API returned. This is existing behaviour, but the JSON form makes it more visible. Also, the `issues` endpoint returns pull requests too.
-
-6. The expected effect says "three more passing tests", which assumes the current test count and file. That is fine as a delta, but state the baseline.
-
-**Could not verify**
-
-- I could not read the repo, so `bin/alfred-workitem` is checked only against the quoted excerpt. That includes whether `pipefail` is set, how `REPO` is defined, and the rest of the file.
-- The existing contents of `tests/workitem.bats` and the stub conventions are unread.
-- I did not check issue #162 itself beyond the quoted text.
+- The contents of `tests/workitem.bats`, and whether it already has a stub-`gh` pattern or a way to load `bin/alfred-workitem`. The repo was not available to me, so I checked only against the quoted source.
+- Where `REPO` is set and what `usage` does, since the source excerpt shows only the `list` part.
+- The claim that the shown code is "as in the repo now". I had no repo to compare it with.

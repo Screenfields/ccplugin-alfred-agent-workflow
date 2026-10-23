@@ -1,28 +1,37 @@
-**Fail**
+**Verdict: fail**
 
-Precedent: invalid — the design note has no `Precedent:` line. The step-4 rule makes a missing line an invalid precedent, whatever the design's merit.
+Precedent: invalid — the design note has no `Precedent:` line. It has no link and no quoted passage, so there is nothing to check against an accepted ADR or baseline doc.
 
-Real alternatives: yes — the note lists two viable options. A is a `--json` flag on `list`. B is a new `list-json` subcommand. B is dismissed only because "B needs a helper first", and that is a cost, not a barrier. The recommendation of A rests on size, which is a judgment call between two workable designs. This item goes to the owner for architectural review (AP-ADR0035 item 2). It does not go ahead on a baseline doc.
+Real alternatives: yes — A (`--json` flag) and B (`list-json` subcommand) are both viable, and the choice sets the CLI surface for scripts. The reason given for dismissing B does not hold (see blocker 2). This item goes to the owner for architectural review (AP-ADR0035 item 2).
 
 **Blockers**
 
-1. No precedent line. The note has no line starting `Precedent: `. It needs either `Precedent: <link> | "<passage>"` pointing at an accepted ADR or baseline doc, or `Precedent: none declared`. Declaring none leads to the owner review above.
+1. The `Precedent:` line is missing, so the precedent is invalid. The note ends with "Expected effect" and never has the line. Add `Precedent: <link> | "<passage>"` or `Precedent: none declared`.
 
-2. The test mechanism cannot be built as written. The note says:
+2. The dismissal of B rests on a weak reason.
+   > Recommendation: A, because the array is already built in `cmd_list` and B needs a helper first.
+
+   The quoted source shows the dispatch is a plain `case`. A `list-json)` branch could call `cmd_list --json` and need no helper. The note's own B pro is that `list` stays untouched, so the text output cannot regress. That bears directly on acceptance criterion 2, and the note does not weigh it. "Needs a helper" is a build cost, not a reason B cannot work.
+
+3. The expected effect cannot fail.
+   > `alfred-workitem list --json | jq length` equals the number of open issues the API returned.
+
+   The count is compared with the output of the same call, so the check is circular. It also never tests that each item has `number`, `title` and `state`. Acceptance criterion 1 needs a check on those fields. For example, the stubbed fixture's titles with tab, newline and backslash should round-trip through `jq -r '.[].title'`. That is the problem the note set out to solve, and no test covers it.
+
+4. The test harness is underspecified, so a builder would have to ask.
    > Three new tests in `tests/workitem.bats` run `cmd_list` with a stubbed `gh`…
 
-   The source ends with a top-level `case "${1:-}" in … *) usage ;; esac`. Sourcing the file to call `cmd_list` directly would run that dispatch and hit `usage`. The note doesn't say how `cmd_list` is reached in tests. It could be a source guard, running the script as `alfred-workitem list --json` with `gh` on `PATH`, or something else. Acceptance criterion 4 depends on this, and a builder would have to ask. I could not read `tests/workitem.bats`, so I can't tell whether it already has a pattern for this.
+   In the quoted source, `cmd_list` sits above a top-level `case "${1:-}"` that runs on load. The note does not say whether the tests source the file, run the script with `gh` stubbed on `PATH`, or something else. It does not say how the "no flag" test proves the output is exactly today's text (criterion 2). That test should compare against a fixed expected TSV string.
 
 **Nits**
 
-- **Failure behaviour is not stated.** In `items=$(gh api … | jq …)`, a failing `gh` does not fail the pipeline unless `pipefail` is set. With `--json`, a script could then get empty output and exit 0, which is neither `[]` nor an error. A machine-readable form should say what happens when the fetch fails.
-- **Arguments other than `--json` are not specified.** Today `list foo` is silently ignored. The note says only "first argument is `--json`". It doesn't say what `list foo --json` or `list --json foo` do.
-- **The expected effect is partly circular.** `jq length` "equals the number of open issues the API returned" compares the output with the same fetch. The URL also has `per_page=100` and no pagination, so for more than 100 items "open issues" and "returned" differ. Say the effect is bounded to the first page, or test it against the stub's fixed array.
-- **The problem statement is slightly off.** jq's `@tsv` also escapes carriage return (`\r`). The note lists only tab, newline and backslash. This doesn't change the design.
-- **The `/issues` endpoint also returns pull requests.** That is existing behaviour and out of scope, but "open items" in the JSON contract inherits it. You could say so in one line.
+- `list --bogus` or `list foo --json` would silently print text, because only the first argument is tested. The note does not say whether that is intended.
+- `jq .` pretty-prints over many lines. The success state says "one JSON array", which this still meets, but the note should say that pretty-printed output is intended.
+- The success state says "open items", but the note's expected effect says "open issues". The `issues` endpoint also returns pull requests, so the two words are not the same thing. The note should say which one it means.
 
 **Claims I could not verify**
 
-- The repo was not available to me, so I checked the claims about `cmd_list` and the `case` dispatch only against the quoted source. They match: the array is `{number, title, state}`, and `cmd_list "$@"` receives arguments it doesn't read.
-- I did not check that `tests/workitem.bats` exists, what stubbing pattern it uses, or whether it already covers `list`.
-- I did not check that `jq .` on `[]` prints exactly `[]`. I expect it does.
+- I checked the `cmd_list` and dispatch claims only against the quoted source. The repo is not available in this session (the working directory is not a git repo), so I did not read `bin/alfred-workitem` or `tests/workitem.bats` in the repo.
+- Whether the script runs under `set -e` or `pipefail`, which would affect a `gh` failure while `--json` is in use.
+- Whether `per_page=100` with no pagination silently truncates the array. The text output already has this, but a script reading JSON will treat the array as complete.
+- Whether `tests/workitem.bats` already has a `gh` stub or helper to reuse.
