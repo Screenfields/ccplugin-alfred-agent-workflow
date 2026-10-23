@@ -6,7 +6,7 @@ description: >
   implement a feature (use alfred-agent:develop for that). Separate from develop because
   troubleshooting has its own discipline: cleanup contract upfront, hypothesis-driven probes,
   ground-truth verification, narrow interventions, conclude-or-escalate, teardown.
-allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, SendMessage
 ---
 
 # alfred-agent:troubleshoot
@@ -119,6 +119,16 @@ Execute the cleanup contract from Step 0:
 - Report what was cleaned up
 
 Leave the system in the same state it was in before diagnosis began (or better, never worse).
+
+## Incident handling (hub)
+
+A separate path for the hub. The lead flow above is unchanged. On this path Step 0's cleanup contract applies. Step 5's thresholds apply too, for diagnosis only. Step 6's teardown cleans up diagnostic leftovers and never reverts the approved mitigation. The order is: diagnose, choose the mitigation, the incident reviewer reviews it, apply it on go, then a sized fix.
+
+- **Diagnose.** Find the cause from the actual state, as in the steps above.
+- **Mitigate.** The hub chooses the mitigation from the diagnosis. A mitigation stops the harm and is not the fix.
+- **`incident-reviewer`.** Before the mitigation is applied, start a fresh `incident-reviewer` specialist (`agents/incident-reviewer.md`) with the Agent tool and keep its agent ID. The brief links the alert or the work item and carries the diagnosis, the chosen mitigation and the production evidence the reviewer cannot read. On stop, choose again and send the new mitigation to the same reviewer with SendMessage to its agent ID. After `alfred-config get failed-review-max` rounds that end in stop, escalate to Alfred with an agent-messaging direct message to `alfred`, with the subject prefix `[escalate]`, linking the item and the round findings.
+- **Apply on go.** Apply the mitigation only on go, or on go with conditions that you have met.
+- **A sized fix.** "Sized" means sized under the Size paragraph of `agreement/lead.md`. Give the fix a complexity class by its effect, and it follows design and develop as the class requires.
 
 ## Rules
 

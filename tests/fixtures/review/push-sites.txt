@@ -1,10 +1,10 @@
-# Every `git push` and `gh pr create` in skills/, commands/, agents/, hooks/, lib/ and bin/ (CCW-145, C6).
+# Every `git push` (and, in develop, the worktree form `git -C <path> push`) and `gh pr create` in skills/, commands/, agents/, hooks/, lib/ and bin/ (CCW-145, C6).
 # Format: <file>|<command>|<count>|<class>|<reason>
 # class lead: the lead role pushes and creates the PR; a `switch-role lead` comes before the site
 #   in the same code block on a multi-role devbox (a block under "If single-role devbox" has none).
 # class other: not a lead PR; the reason says why.
 # The test fails when a site is not listed here, or when a count differs.
-skills/develop/SKILL.md|git push|8|lead|Step 6 push, the Step 6.5 CI-fix push, the Step 7 fix-round push (multi- and single-role blocks each) and the two re-push sequences under PRs already in flight
+skills/develop/SKILL.md|git -C <path> push|8|lead|Step 6 push, the Step 6.5 CI-fix push, the Step 7 fix-round push (multi- and single-role blocks each) and the two re-push sequences under PRs already in flight
 skills/develop/SKILL.md|gh pr create|3|lead|Step 6 (multi- and single-role blocks) and the recreate sequence under PRs already in flight
 skills/release/SKILL.md|git push|1|lead|the catalog bump PR is a lead PR
 skills/release/SKILL.md|gh pr create|1|lead|the catalog bump PR is a lead PR

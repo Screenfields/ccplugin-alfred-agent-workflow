@@ -120,13 +120,13 @@ Scaffold all sections first with placeholders, then fill from Step 2 answers. As
 
 If there are open questions or significant design decisions, ask: "Want to run an ECR on this?"
 
-Recommend ECR when multiple valid approaches exist or the technology is unfamiliar. Skip if the design follows an established pattern exactly.
+Recommend ECR when multiple valid approaches exist or the technology is unfamiliar. Skip if the design follows an established pattern exactly. For a large or very large item the ECR is required, see the design review below.
 
 ## Step 4.5: Coupled-ADR review gate
 
 Before declaring the design complete, count how many ADRs (Decision Log entries) were produced in this session.
 
-**Single-ADR bypass:** If the Decision Log contains exactly one entry, skip this gate entirely — no review pass required, proceed directly to Step 5.
+**Single-ADR bypass:** If the Decision Log contains exactly one entry, skip this gate entirely — no review pass required, proceed directly to the design review below.
 
 **When ≥2 ADRs are present**, check for coupling before proceeding:
 
@@ -137,7 +137,7 @@ Two ADRs are coupled if either condition holds:
 1. **Cross-reference:** one ADR entry's Decision or Rationale text explicitly names or references another ADR by number, topic, or component name.
 2. **Shared boundary:** both ADRs touch the same component, interface, or contract (e.g., two decisions that both affect the API shape, the same database schema, or the same deployment unit).
 
-If no coupling is detected among the ≥2 ADRs, document that finding ("ADRs are independent — gate skipped") and proceed to Step 5.
+If no coupling is detected among the ≥2 ADRs, document that finding ("ADRs are independent — gate skipped") and proceed to the design review below.
 
 If coupling is detected, **the following mandatory review pass is required before the design is marked complete.**
 
@@ -195,7 +195,19 @@ Collect all findings (from the `file_refs_verified` lint and the Agent reviewer)
 
 Each finding requires an explicit disposition of **"addressed"** (fix applied now) or **"deferred-to-PR"** (tracked as a GitHub Issue or PR comment) before the design may be marked complete. A finding may not remain blank.
 
-Only after all findings have dispositions is the design considered complete.
+The design is complete only after all findings have dispositions, the design reviewer has passed it (see the design review below), and, for a large or very large item, the owner has approved it.
+
+## Design review and the owner's approval
+
+Before the design is marked complete, send it to the `design-reviewer` pair. This pass is separate from the critical-review pass of Step 4.5b, which runs only for coupled ADRs. When both apply, both run.
+
+Before the review, add one `Precedent:` line to the design note, in the format that `agents/design-reviewer.md` defines. A note with no such line fails the review.
+
+Start a fresh `design-reviewer` specialist (`agents/design-reviewer.md`) with the Agent tool and keep the agent ID it returns. The brief links the work item and the design document and states purpose (decide whether the design is sound enough to build on), end state (pass or fail, with the reviewer's output) and bounds (read-only, no rewrite of the design). The loop is the routed rule `work-and-review-in-pairs`. Findings go back to the session that wrote the design, the fixed design goes to the same reviewer with SendMessage to its agent ID, and after `alfred-config get failed-review-max` failed rounds the session stops and escalates to the hub.
+
+Act on the reviewer's `Precedent:` and `Real alternatives:` lines as `agents/design-reviewer.md` defines them. `Real alternatives: yes` with no valid precedent sends the item to the owner for architectural review (AP-ADR0035, item two).
+
+Following Size in `agreement/lead.md` ("Large and very large need the owner at ready and at designed, and an expert consulting review"), a large or very large item needs the owner's approval of the design before it is marked complete. After the reviewer passes the design, run `alfred-agent:ecr` as that skill describes and add its verdict to the Decision Log. Then park the item with the status that `alfred-config get waiting-label` names, and comment the design and the question on it (the Escalate paragraph of `agreement/lead.md`). An item with `Real alternatives: yes` and no valid precedent is parked the same way and goes to the owner, and when it is also large or very large, both asks go in the same owner turn. When the owner answers, remove the status and record the decision on the item. Mark the design complete after the approval.
 
 ## Step 5: Prerequisites
 

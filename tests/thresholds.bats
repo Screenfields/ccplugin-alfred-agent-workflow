@@ -125,3 +125,13 @@ names_in() {
   grep -q -- '--add-label "<ready-state>"' "$f"
   grep -q 'no label from `workable-states`' "$f"
 }
+
+@test "model-setting-per-role holds reviewer-light with tier medium and effort medium (ccplugin#129)" {
+  s=$("$CFG" get model-setting-per-role)
+  [ "$(jq -r 'has("reviewer-light")' <<<"$s")" = "true" ]
+  [ "$(jq -r '.["reviewer-light"].tier' <<<"$s")" = "medium" ]
+  [ "$(jq -r '.["reviewer-light"].effort' <<<"$s")" = "medium" ]
+  # next to the existing reviewer setting, which is unchanged
+  [ "$(jq -r '.reviewer.tier' <<<"$s")" = "medium" ]
+  [ "$(jq -r '.reviewer.effort' <<<"$s")" = "high" ]
+}
