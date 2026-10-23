@@ -390,7 +390,7 @@ cmd_guard() {
 
 # --- hook events -----------------------------------------------------------
 
-REMINDER='No work item is marked for this session, so its token usage is recorded as an unmarked deviation. Mark it: alfred-workitem mark <owner>/<repo>#<n> (operational turns without an item of their own go on your own standing issue, `Standing: <project> operations (objective 1)`; see the alfred-agent README), or alfred-workitem mark none.'
+REMINDER='No work item is marked for this session, so its token usage is recorded as an unmarked deviation. Mark it: alfred-workitem mark <owner>/<repo>#<n> (operational turns without an item of their own go on your own standing issue, titled Standing: <project> operations (objective 1); see the alfred-agent README), or alfred-workitem mark none.'
 
 # with_dev_lock <cmd...>: run under an flock on deviations.jsonl (2 s); on a
 # timeout or an unusable lock file, warn and skip: failing open.
