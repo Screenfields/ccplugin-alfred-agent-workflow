@@ -8,7 +8,7 @@
 #                              compare the Precedent and Real alternatives lines
 #                              of the result files with expected.json; no
 #                              network and no claude
-#                              (reads indentation, one list marker and **/__ emphasis
+#                              (reads indentation, one list marker, backticks and **/__ emphasis
 #                              loosely; ignores "> " quotes; see normalize_result)
 #   run.sh probe
 #   run.sh deny-rules          print the deny rules the runs use
@@ -144,13 +144,16 @@ run_precedent() {
 #      the design note and is dropped;
 #   2. leading whitespace is stripped;
 #   3. one list marker ("- ", "* " or "N. ") is stripped;
-#   4. emphasis around the leading token, **...** or __...__, is stripped
-#      (so "**Precedent: invalid** - x" and "**Real alternatives:** yes" read
-#      as "Precedent: invalid - x" and "Real alternatives: yes").
+#   4. one pair of backticks (\x60 in the sed) around the whole line, or around the leading
+#      token, is stripped; then emphasis around the leading token, **...** or
+#      __...__ (so "**Precedent: invalid** - x", "**Real alternatives:** yes"
+#      and "`Precedent: invalid` - x" read as "Precedent: invalid - x" and
+#      "Real alternatives: yes").
 # The content is never loosened: the values and the phrase must still match.
 normalize_result() {
   sed -E 's/^[[:space:]]+//' "$1" | { grep -v '^>' || true; } |
     sed -E -e 's/^([-*]|[0-9]+\.) +//' \
+      -e 's/^\x60(.*)\x60$/\1/' -e 's/^\x60([^\x60]*)\x60/\1/' \
       -e 's/^\*\*([^*]*)\*\*/\1/' -e 's/^__([^_]*)__/\1/'
 }
 

@@ -738,7 +738,8 @@ prints `FAILED design-precedent/<case> run <N>` and the loop goes on.
 compares the `Precedent:` and `Real alternatives:` lines with `expected.json`. It reads presentation
 loosely and content strictly: a line that starts with `> ` (after any indentation) is a quote of
 the design note and is ignored first; then leading whitespace, one list marker (`- `, `* `, `N. `)
-and `**…**` or `__…__` around the leading token are stripped. The values and the phrase must still
+one pair of backticks around the whole line or the leading token, and `**…**` or `__…__` around
+the leading token are stripped. The values and the phrase must still
 match exactly. For `valid` it looks for `passage carried,
 not read at source` on the `Precedent:` line. It prints `MATCH` or `MISMATCH` per case and run and
 exits non-zero on any mismatch or any case without a result file; `--runs N` also requires

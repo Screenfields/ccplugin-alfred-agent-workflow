@@ -708,3 +708,17 @@ check_variant() {
   [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
   [[ "$output" == *"MISMATCH design-precedent/valid run 1"* ]] || { echo "$output"; return 1; }
 }
+
+@test "check design-precedent: a line wrapped in backticks, whole or at the leading token, matches" {
+  check_variant 's/^(Precedent: .*)$/`\1`/; s/^(Real alternatives: .*)$/`\1`/' doctrine-only
+  check_variant 's/^(Precedent: [a-z ]+)( —.*)$/`\1`\2/' code-only
+}
+
+@test "check design-precedent: a backtick-wrapped quoted line is still ignored" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-missing-run1.md"
+  sed -i 's/^Precedent: .*/> `Precedent: invalid — quoted`/' "$f"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/missing run 1: no Precedent line"* ]] || { echo "$output"; return 1; }
+}
