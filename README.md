@@ -713,7 +713,9 @@ reviewer passes when it finds every seeded defect and leaves the sound part alon
 ```bash
 tests/specialists/run.sh probe                    # prove the answer files are unreachable; run first
 tests/specialists/run.sh code --runs 2            # one reviewer
-tests/specialists/run.sh all                      # all six reviewers, two runs each
+tests/specialists/run.sh design-precedent --runs 2  # the eight precedent cases against the design reviewer
+tests/specialists/run.sh all                      # the six reviewers and the design-precedent cases, two runs each
+tests/specialists/run.sh check design-precedent   # compare the Precedent lines of the results with expected.json
 ```
 
 `run.sh` is a live runner (`claude -p`), not part of the bats job. It copies only `case.md` into
@@ -724,6 +726,31 @@ open). Outputs go to `tests/specialists/results/<role>-reviewer-run<N>.md`, with
 in the matching `.json`. The runner only collects; the starting session compares each output with
 `expected.json` and records found or missed per defect and run. Run it from a commit that includes the
 definitions: the plugin copy is built from `HEAD`.
+
+`tests/specialists/design-precedent/<case>/` holds the eight precedent cases of the design
+reviewer (`valid`, `missing`, `code-only`, `not-covering`, `owner-decision`, `doctrine-only`,
+`none-alternatives`, `none-one-option`), each with `case.md` and `expected.json`
+(`precedent`, `alternatives`, `verdict`, `blocker`, `source_note`, `sound`). `run.sh all` runs the
+six reviewers and then these cases, with the same `--runs`. Result files are
+`design-precedent-<case>-run<N>.md` and `.json` in `tests/specialists/results/`; a run that fails
+prints `FAILED design-precedent/<case> run <N>` and the loop goes on.
+`run.sh check design-precedent` needs no network and no `claude`: for each result file it
+compares the `Precedent:` and `Real alternatives:` lines with `expected.json`. It reads presentation
+loosely and content strictly: a line that starts with `> ` (after any indentation) is a quote of
+the design note and is ignored first; then leading whitespace, one list marker (`- `, `* `, `N. `)
+one pair of backticks around the whole line or the leading token, and `**…**` or `__…__` around
+the leading token are stripped. It then reads by meaning (Alfred, CCW-157
+comment 6356942867): identical repeated lines count once; two `Precedent:` lines with different values
+conflict and read as `invalid` (fail closed, as the consumers do); when the precedent is `valid`
+every `Real alternatives:` line is ignored; otherwise the first `Real alternatives:` line with a
+value wins. A value must be a whole word, so `Real alternatives: not applicable` has none. The
+values and the phrase must still match exactly. For `valid` it looks for `passage`, `carried` and `not read
+at source` on the `Precedent:` line, in that order, case-insensitive, with an optional "the" or "was"
+between them (so "The passage was carried, not read at source" counts; Alfred, CCW-157 comment
+6357259459). It prints `MATCH` or `MISMATCH` per case and run and
+exits non-zero on any mismatch or any case without a result file; `--runs N` also requires
+`run1` to `runN`. The verdict, the blocker text and the sound part stay with the starting session.
+The format of the `Precedent:` line is defined once, in `tests/helpers/design-format.bash`.
 
 ## Theme: owner prompts stand out (`themes/owner-prompts.json`)
 

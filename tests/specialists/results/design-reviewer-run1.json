@@ -1,14 +1,14 @@
 {
-  "session_id": "8d6ab9f8-0f00-47d8-a540-9cdac91c239e",
+  "session_id": "0e243c94-169b-4627-a39e-57fa39d250a0",
   "num_turns": 3,
-  "total_cost_usd": 0.05304400000000001,
+  "total_cost_usd": 0.05076510000000001,
   "usage": {
     "input_tokens": 4,
-    "cache_creation_input_tokens": 7935,
-    "cache_read_input_tokens": 12860,
-    "output_tokens": 2001,
+    "cache_creation_input_tokens": 7493,
+    "cache_read_input_tokens": 14751,
+    "output_tokens": 1931,
     "output_tokens_details": {
-      "thinking_tokens": 81
+      "thinking_tokens": 58
     },
     "server_tool_use": {
       "web_search_requests": 0,
@@ -16,19 +16,19 @@
     },
     "service_tier": "standard",
     "cache_creation": {
-      "ephemeral_1h_input_tokens": 7935,
+      "ephemeral_1h_input_tokens": 7493,
       "ephemeral_5m_input_tokens": 0
     },
     "inference_geo": "global",
     "iterations": [
       {
         "input_tokens": 2,
-        "output_tokens": 1804,
-        "cache_read_input_tokens": 10256,
-        "cache_creation_input_tokens": 283,
+        "output_tokens": 1753,
+        "cache_read_input_tokens": 10990,
+        "cache_creation_input_tokens": 264,
         "cache_creation": {
           "ephemeral_5m_input_tokens": 0,
-          "ephemeral_1h_input_tokens": 283
+          "ephemeral_1h_input_tokens": 264
         },
         "type": "message"
       }
@@ -39,14 +39,14 @@
   "modelUsage": {
     "claude-sonnet-5-5": {
       "inputTokens": 4,
-      "outputTokens": 2001,
-      "cacheReadInputTokens": 12860,
-      "cacheCreationInputTokens": 7935,
+      "outputTokens": 1931,
+      "cacheReadInputTokens": 14751,
+      "cacheCreationInputTokens": 7493,
       "webSearchRequests": 0,
-      "costUSD": 0.05304400000000001,
+      "costUSD": 0.05076510000000001,
       "contextWindow": 1000000,
       "maxOutputTokens": 128000,
-      "thinkingTokens": 81,
+      "thinkingTokens": 58,
       "canonicalModel": "claude-sonnet-5-5",
       "provider": "firstParty",
       "costBasis": "list"
