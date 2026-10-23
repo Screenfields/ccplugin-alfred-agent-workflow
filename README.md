@@ -533,7 +533,7 @@ alfred-workitem deviations                # unmarked sessions: local record, plu
   when the unmarked window is under `deviation-min-seconds` (60), the session is non-interactive
   (`CLAUDE_CODE_ENTRYPOINT` not `cli`, `claude-vscode` or `claude-desktop`, or unset), or there are no store
   amounts and the transcript shows no tool calls.
-- **Operational work.** Each lead opens its own standing issue in its main repo, titled `Standing: <project> operations (objective 1)` (with the repo's code prefix, as for any issue), and marks operational turns on it with `alfred-workitem mark <owner>/<repo>#<n>`. Operational turns are inbox handling, wakes, reviews, merges, and pin bumps with no item of their own (AP-ADR0028).
+- **Operational work.** Operational turns (inbox, wakes, reviews, merges, restarts) for which no specific item applies are marked with `alfred-workitem mark Screenfields/alfred-platform#1173`, the standing item of objective 1 (AP-1173), shared by the hub, Alfred and every lead (AP-ADR0028).
 - **Store env** (set by the hub in gitops): `AGENT_RUNS_OTLP_LOGS_ENDPOINT`, `AGENT_RUNS_OTLP_HEADERS`
   (comma-separated, each `Name: value` or the OTLP form `key=value`), `AGENT_RUNS_READER_URL`, `AGENT_RUNS_TOKEN`. Hooks cannot see
   `OTEL_*` (Claude Code strips it). **Every command fails open**: a missing env, an unreachable store
