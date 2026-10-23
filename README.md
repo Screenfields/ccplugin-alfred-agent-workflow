@@ -765,6 +765,23 @@ stores `"theme": "custom:alfred-agent:owner-prompts"` in the user `settings.json
 Owner suggestion (via zeus and the hub), 2026-10-15. Hooks and status lines cannot recolour
 prompts; a theme can.
 
+## Charter template and check (`templates/CHARTER.md`, `bin/alfred-charter-check`)
+
+Every repo with a lead has a `CHARTER.md` in its root (AP-ADR0024, AP-1280). Copy the template, fill the five sections, and run the check on the file:
+
+```bash
+cp "${CLAUDE_PLUGIN_ROOT}/templates/CHARTER.md" CHARTER.md
+"${CLAUDE_PLUGIN_ROOT}/bin/alfred-charter-check" CHARTER.md
+```
+
+The five headings are `## Repo owner`, `## Objective`, `## Business case`, `## Merge rule` and `## Scope`, in that order, each once. The first four have exactly one non-blank line each; `## Scope` has at least one. Extra `##` headings are allowed only after `## Scope`; text before the first heading, such as a `#` title, is allowed. Headings inside a fenced block (three backticks or three tildes at column 0) are ignored, and lines inside a fence count as lines.
+
+The check fails on a placeholder: a line under a heading that starts with `TODO:`.
+
+Where the register has no objective for the project, write the project's own objective as one line; the check accepts any single line under `## Objective` that does not start with `TODO:`.
+
+The check prints one line per fault, naming the heading, and exits 0 (valid), 1 (invalid) or 2 (no argument or no such file).
+
 ## Agent identity convention
 
 Each agent has a unique `agent_id` set via the `AGENT_ID` env var. Choose a stable identifier — other agents will address you by that name.

@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# alfred-charter-check — check a repo's CHARTER.md against the template
+# (templates/CHARTER.md, AP-ADR0024, AP-1280).
+#
+#   alfred-charter-check <file>
+#
+# Rules:
+#   - A heading is a line equal to "## <name>" once trailing whitespace is
+#     removed. Names are exact, case included. The five names, in order:
+#     Repo owner, Objective, Business case, Merge rule, Scope. Each once.
+#   - Fences: a line that begins at column 0 with three backticks or three
+#     tildes opens a fence; it closes at the next line that begins with three
+#     of the same character; an unterminated fence runs to the end of the
+#     file. A line inside a fence is not a heading. An indented fence line is
+#     not a fence.
+#   - Order: the first five level-2 headings (outside a fence) are the five
+#     names, in order. Extra level-2 headings are allowed only after Scope.
+#     Text before the first heading, including a "# Title", is allowed.
+#   - Lines: a heading's lines are the non-blank lines after it and before the
+#     next level-1 or level-2 heading (outside a fence) or the end of the
+#     file; lines inside a fence count. Each of the first four has exactly
+#     one. Scope has at least one.
+#   - Placeholder: a line under one of the five headings that starts with
+#     "TODO:" (optional leading whitespace, any case) fails.
+#
+# One line on stdout per fault, naming the heading. An order fault names the
+# expected and the found heading.
+# Exit: 0 valid; 1 invalid; 2 no argument or no such file (usage line).
+
+if [ $# -ne 1 ] || [ ! -f "$1" ]; then
+  echo "usage: alfred-charter-check <file>   (CHARTER.md to check)" >&2
+  exit 2
+fi
+
+exec awk '
+BEGIN {
+  n = split("Repo owner|Objective|Business case|Merge rule|Scope", want, "|")
+  for (i = 1; i <= n; i++) idx["## " want[i]] = i
+  fence = ""; sec = ""; nh = 0; ns = 0; bad = 0
+}
+function fault(msg) { print msg; bad = 1 }
+function close_sec() {
+  if (sec != "") { ns++; sname[ns] = sec; scount[ns] = cnt }
+  sec = ""; cnt = 0
+}
+{
+  line = $0
+  sub(/[ \t\r]+$/, "", line)
+  if (fence != "") {
+    if (substr(line, 1, 3) == fence) fence = ""
+    infence = 1
+  } else {
+    infence = 0
+    c = substr(line, 1, 3)
+    if (c == "```" || c == "~~~") { fence = c; infence = 1 }
+  }
+  if (!infence && fence == "" && (line ~ /^#[ \t]/ || line == "#" || line ~ /^##([ \t]|$)/)) {
+    close_sec()
+    if (line ~ /^##([ \t]|$)/) {
+      nh++; head[nh] = line
+      if (line in idx) { seen[line]++; sec = line }
+    }
+    next
+  }
+  if (line == "") next
+  if (sec != "") {
+    cnt++
+    if (tolower(line) ~ /^[ \t]*todo:/) fault("placeholder under " sec ": a line starts with TODO:")
+  }
+}
+END {
+  close_sec()
+  allok = 1
+  for (i = 1; i <= n; i++) {
+    h = "## " want[i]
+    if (seen[h] == 0) { fault("missing heading: " h); allok = 0 }
+    else if (seen[h] > 1) { fault("repeated heading: " h); allok = 0 }
+  }
+  if (allok) {
+    for (i = 1; i <= n; i++) {
+      if (head[i] != "## " want[i]) {
+        fault("order: expected ## " want[i] " but found " head[i] " in position " i)
+        break
+      }
+    }
+  }
+  for (k = 1; k <= ns; k++) {
+    h = sname[k]; c = scount[k]
+    if (c < 1) fault("empty heading: " h " has no line")
+    else if (c > 1 && h != "## Scope") fault("too many lines under " h ": " c " lines, expected one")
+  }
+  exit bad
+}
+' "$1"
