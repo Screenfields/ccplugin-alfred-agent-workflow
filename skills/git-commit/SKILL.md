@@ -38,6 +38,7 @@ Run `git diff --cached --stat` to confirm what will be committed. If something l
 Study the recent `git log` output and match the repository's style.
 
 **Message rules:**
+- When the commit belongs to an issue, the subject line is `<CODE>-<n>: <what changed>`. CODE comes from alfred-code-lookup `<owner/repo>`; the `code` in `.alfred/config.json` is the fallback for the session's own repo only.
 - One-line summary in imperative mood ("add", "fix", "update" — not "added", "fixed")
 - Max 72 characters for the summary line
 - Optional body after a blank line — explain **why**, not what (the diff shows the what)

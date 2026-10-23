@@ -42,12 +42,14 @@ Extract the `agent_id` field. If the file is missing or the field is absent, tre
 
 ## Step 3 — Fetch PR state
 
+Name the PR in every report as `<CODE>#<n>` (for example `CCW#136`). CODE comes from alfred-code-lookup `<owner/repo>`; the `code` in `.alfred/config.json` is the fallback for the session's own repo only. With exit 1 or 2 and no usable config `code`, write `#<n>`.
+
 ```bash
 gh pr view {N} --json number,title,labels,statusCheckRollup,headRefName,state,mergeStateStatus
 ```
 
-- If `state` is already `MERGED` → report "PR #{N} is already merged." and stop.
-- If `state` is `CLOSED` → report "PR #{N} is closed and cannot be merged." and stop.
+- If `state` is already `MERGED` → report "<CODE>#<n> is already merged." and stop.
+- If `state` is `CLOSED` → report "<CODE>#<n> is closed and cannot be merged." and stop.
 
 ## Step 4 — CI gate (hard)
 
@@ -152,7 +154,7 @@ Fetch the merge commit SHA:
 gh pr view {N} --json mergeCommit --jq '.mergeCommit.oid'
 ```
 
-Report: PR number, title, and merge SHA.
+Report: the PR as `<CODE>#<n>`, its title, and the merge SHA.
 
 ## Rules
 

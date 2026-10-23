@@ -4,7 +4,7 @@ description: >
   Structured PR review with doctrine-aligned angles. Two modes: interactive (conversational,
   agent-triggered) and headless (structured markdown output for CI/PR comment, exit code).
   Use when reviewing a PR for correctness, doctrine adherence, and scope hygiene.
-  Invoke as: /alfred-agent:review [#N] [--mode=headless]
+  Invoke as: /alfred-agent:review [<CODE>#<n> | #<n>] [--mode=headless]
 allowed-tools: Bash, Read, WebFetch
 ---
 
@@ -19,13 +19,13 @@ Do not skip angles. Do not auto-approve without completing all steps.
 
 ## Step 1 — Resolve the PR
 
-If a PR number `#N` was supplied in the invocation, use it. Otherwise infer from the current branch:
+If a PR reference was supplied in the invocation (`<CODE>#<n>` or `#<n>`), use it. Parse step: strip the code and `#`, and use `<n>` for `gh pr view` and every later `{N}`. Print the PR as `<CODE>#<n>`. CODE comes from alfred-code-lookup `<owner/repo>`; the `code` in `.alfred/config.json` is the fallback for the session's own repo only. Otherwise infer from the current branch:
 
 ```bash
 gh pr view --json number,title
 ```
 
-If no PR is found (no `#N` and branch has no associated PR), stop and report: "No PR found. Provide a PR number with /alfred-agent:review #N."
+If no PR is found (no PR reference and branch has no associated PR), stop and report: "No PR found. Provide a PR number with /alfred-agent:review <CODE>#<n>."
 
 If the diff is empty or the PR is already merged, report that fact and stop.
 
