@@ -1,0 +1,6 @@
+## Design
+
+checked: the thresholds file holds the feature switches | grep loop-check-enabled config/thresholds.json | found, a boolean
+Precedent: https://example.org/docs/adr/0035.md
+
+The link has no quoted passage after it.

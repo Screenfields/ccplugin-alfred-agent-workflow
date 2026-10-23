@@ -1,0 +1,6 @@
+## Design
+
+checked: the thresholds file holds the feature switches | grep loop-check-enabled config/thresholds.json
+Precedent: none declared
+
+The checked line above has two fields, not three.

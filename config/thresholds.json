@@ -16,6 +16,7 @@
     "reviewer": {"tier": "medium", "effort": "high"},
     "reviewer-light": {"tier": "medium", "effort": "medium"},
     "analyst": {"tier": "medium", "effort": "high"},
+    "designer": {"tier": "strong", "effort": "high"},
     "investigator": {"tier": "light", "effort": "low"},
     "incident-reviewer": {"tier": "strong", "effort": "highest"}
   },
@@ -29,6 +30,7 @@
     "status:blocked"
   ],
   "loop-check-enabled": true,
+  "designer-enabled": false,
   "loop-check-timeout-seconds": 5,
   "loop-check-deadline-seconds": 10,
   "chase-interval-minutes": 10,
