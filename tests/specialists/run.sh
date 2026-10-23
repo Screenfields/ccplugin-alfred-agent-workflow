@@ -8,6 +8,8 @@
 #                              compare the Precedent and Real alternatives lines
 #                              of the result files with expected.json; no
 #                              network and no claude
+#                              (reads indentation, one list marker and **/__ emphasis
+#                              loosely; ignores "> " quotes; see normalize_result)
 #   run.sh probe
 #   run.sh deny-rules          print the deny rules the runs use
 #
@@ -136,13 +138,30 @@ run_precedent() {
   return "$failed"
 }
 
+# normalize_result <result.md>: the lines of a result as check reads them.
+# check is a tolerant reader of presentation only. In this order, per line:
+#   1. a line that starts (after leading whitespace) with "> " is a quote of
+#      the design note and is dropped;
+#   2. leading whitespace is stripped;
+#   3. one list marker ("- ", "* " or "N. ") is stripped;
+#   4. emphasis around the leading token, **...** or __...__, is stripped
+#      (so "**Precedent: invalid** - x" and "**Real alternatives:** yes" read
+#      as "Precedent: invalid - x" and "Real alternatives: yes").
+# The content is never loosened: the values and the phrase must still match.
+normalize_result() {
+  sed -E 's/^[[:space:]]+//' "$1" | { grep -v '^>' || true; } |
+    sed -E -e 's/^([-*]|[0-9]+\.) +//' \
+      -e 's/^\*\*([^*]*)\*\*/\1/' -e 's/^__([^_]*)__/\1/'
+}
+
 # check_result <result.md> <expected.json>: the mechanical part of a
 # design-precedent comparison. Prints the reason and returns 1 on a mismatch.
-# Only the Precedent and Real alternatives lines are read. A line that starts
-# with "> " is a quote of the design note and never matches the anchors.
+# Only the Precedent and Real alternatives lines are read (see
+# normalize_result for what is tolerated).
 check_result() {
-  local f=$1 e=$2 got want
-  got=$({ grep -E '^Precedent: |^Real alternatives: ' "$f" || true; } |
+  local f=$1 e=$2 got want norm
+  norm=$(normalize_result "$f")
+  got=$({ grep -E '^Precedent: |^Real alternatives: ' <<<"$norm" || true; } |
     sed -E 's/^(Precedent|Real alternatives): (valid|invalid|none declared|yes|no).*/\1=\2/' | sort)
   want=$(jq -r '"Precedent=\(.precedent)", (if .alternatives == null then empty else "Real alternatives=\(.alternatives)" end)' "$e" | sort)
   if [ "$got" != "$want" ]; then
@@ -154,7 +173,7 @@ check_result() {
     return 1
   fi
   if [ "$(jq -r .source_note "$e")" = true ]; then
-    if ! { grep '^Precedent: ' "$f" || true; } | grep -qF 'passage carried, not read at source'; then
+    if ! { grep '^Precedent: ' <<<"$norm" || true; } | grep -qF 'passage carried, not read at source'; then
       echo "the Precedent line lacks 'passage carried, not read at source'"
       return 1
     fi

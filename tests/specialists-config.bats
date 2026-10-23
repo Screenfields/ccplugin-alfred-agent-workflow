@@ -619,3 +619,62 @@ check_env() { env SPECIALISTS_RESULTS="$BATS_TEST_TMPDIR/res" "$ROOT/tests/speci
   run env CLAUDE_BIN=/nonexistent SPECIALISTS_RESULTS="$BATS_TEST_TMPDIR/res" "$ROOT/tests/specialists/run.sh" check design-precedent
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
+
+# --- CCW-157: check reads presentation variants, never loosens the content --
+
+# variant_test <name> <sed expression applied to the reviewer's own lines>
+check_variant() {
+  make_results "$BATS_TEST_TMPDIR/res"
+  sed -i -E "$1" "$BATS_TEST_TMPDIR/res/design-precedent-$2-run1.md"
+  run check_env
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"MATCH design-precedent/$2 run 1"* ]] || { echo "$output"; return 1; }
+  [ "$(grep -c '^MATCH ' <<<"$output")" -eq 8 ] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: bold Precedent and Real alternatives lines match" {
+  check_variant 's/^(Precedent: [a-z ]+)( —.*)$/**\1**\2/; s/^(Real alternatives:) ([a-z]+)/**\1** \2/' missing
+}
+
+@test "check design-precedent: indented lines match" {
+  check_variant 's/^(Precedent|Real alternatives): /    \1: /' doctrine-only
+}
+
+@test "check design-precedent: listed lines match (dash, star and number)" {
+  check_variant 's/^Precedent: /- Precedent: /; s/^Real alternatives: /2. Real alternatives: /' owner-decision
+  check_variant 's/^Precedent: /* Precedent: /' not-covering
+}
+
+@test "check design-precedent: bold inside a list, indented, matches" {
+  check_variant 's/^(Precedent: [a-z ]+)( —.*)$/  - **\1**\2/; s/^(Real alternatives:) ([a-z]+)/  - **\1** \2/' doctrine-only
+}
+
+@test "check design-precedent: underscore emphasis matches" {
+  check_variant 's/^(Precedent: [a-z ]+)( —.*)$/__\1__\2/' code-only
+}
+
+@test "check design-precedent: a quoted bold line is still ignored (no Precedent line besides the quote)" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-missing-run1.md"
+  sed -i 's/^Precedent: .*/> **Precedent: invalid** - quoted/' "$f"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/missing run 1: no Precedent line"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: an indented quoted line is still ignored" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  f="$BATS_TEST_TMPDIR/res/design-precedent-missing-run1.md"
+  sed -i 's/^Precedent: .*/   > Precedent: invalid - quoted/' "$f"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/missing run 1: no Precedent line"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: presentation tolerance does not loosen the value" {
+  make_results "$BATS_TEST_TMPDIR/res"
+  sed -i -E 's/^Precedent: valid/- **Precedent: invalid**/' "$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/valid run 1"* ]] || { echo "$output"; return 1; }
+}

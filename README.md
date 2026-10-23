@@ -735,8 +735,11 @@ six reviewers and then these cases, with the same `--runs`. Result files are
 `design-precedent-<case>-run<N>.md` and `.json` in `tests/specialists/results/`; a run that fails
 prints `FAILED design-precedent/<case> run <N>` and the loop goes on.
 `run.sh check design-precedent` needs no network and no `claude`: for each result file it
-compares the `Precedent:` and `Real alternatives:` lines with `expected.json` (lines that start with
-`> ` are quotes of the design note and are ignored), and for `valid` it looks for `passage carried,
+compares the `Precedent:` and `Real alternatives:` lines with `expected.json`. It reads presentation
+loosely and content strictly: a line that starts with `> ` (after any indentation) is a quote of
+the design note and is ignored first; then leading whitespace, one list marker (`- `, `* `, `N. `)
+and `**…**` or `__…__` around the leading token are stripped. The values and the phrase must still
+match exactly. For `valid` it looks for `passage carried,
 not read at source` on the `Precedent:` line. It prints `MATCH` or `MISMATCH` per case and run and
 exits non-zero on any mismatch or any case without a result file; `--runs N` also requires
 `run1` to `runN`. The verdict, the blocker text and the sound part stay with the starting session.
