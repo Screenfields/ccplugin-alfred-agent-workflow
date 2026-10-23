@@ -14,6 +14,7 @@
     "builder": {"tier": "medium", "effort": "medium"},
     "technical-writer": {"tier": "medium", "effort": "medium"},
     "reviewer": {"tier": "medium", "effort": "high"},
+    "reviewer-light": {"tier": "medium", "effort": "medium"},
     "analyst": {"tier": "medium", "effort": "high"},
     "investigator": {"tier": "light", "effort": "low"},
     "incident-reviewer": {"tier": "strong", "effort": "highest"}
