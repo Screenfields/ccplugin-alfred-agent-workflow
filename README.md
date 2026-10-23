@@ -774,13 +774,22 @@ cp "${CLAUDE_PLUGIN_ROOT}/templates/CHARTER.md" CHARTER.md
 "${CLAUDE_PLUGIN_ROOT}/bin/alfred-charter-check" CHARTER.md
 ```
 
-The five headings are `## Repo owner`, `## Objective`, `## Business case`, `## Merge rule` and `## Scope`, in that order, each once. The first four have exactly one non-blank line each; `## Scope` has at least one. Extra `##` headings are allowed only after `## Scope`; text before the first heading, such as a `#` title, is allowed. Headings inside a fenced block (three backticks or three tildes at column 0) are ignored, and lines inside a fence count as lines.
+If the plugin's `bin/` is on your `PATH`, or `CLAUDE_PLUGIN_ROOT` is not set in your shell, resolve the script first:
+
+```bash
+CC=$(command -v alfred-charter-check || echo "${CLAUDE_PLUGIN_ROOT}/bin/alfred-charter-check")
+"$CC" CHARTER.md
+```
+
+The five headings are `## Repo owner`, `## Objective`, `## Business case`, `## Merge rule` and `## Scope`, in that order, each once. The first four have exactly one non-blank line each; `## Scope` has at least one. Extra `##` headings are allowed only after `## Scope`; text before the first heading, such as a `#` title, is allowed. A heading needs a space after the hashes: `##Notes` and `#764 ...` are ordinary lines. Headings inside a fenced block (a line whose trimmed start is three backticks or three tildes) are ignored, and lines inside a fence count as lines. HTML comments (`<!-- ... -->`, also across lines) are removed before lines are counted.
 
 The check fails on a placeholder: a line under a heading that starts with `TODO:`.
 
+The `TODO:` match is case-insensitive, allows leading whitespace, and counts lines inside fences.
+
 Where the register has no objective for the project, write the project's own objective as one line; the check accepts any single line under `## Objective` that does not start with `TODO:`.
 
-The check prints one line per fault, naming the heading, and exits 0 (valid), 1 (invalid) or 2 (no argument or no such file).
+The check prints `ok: <file>` and exits 0 when the charter is valid. It prints one line per fault, `<file>: <fault>: ## <Heading>`, and exits 1 when it is not. It exits 2, with an error line and a usage line, for no argument, more than one argument, a missing or unreadable file, or a directory.
 
 ## Agent identity convention
 

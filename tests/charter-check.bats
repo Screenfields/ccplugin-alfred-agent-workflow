@@ -25,6 +25,7 @@ fails() {
   shift
   run "$CHECK" "$f"
   [ "$status" -eq 1 ] || { echo "$f: status $status: $output"; return 1; }
+  [ "$(printf '%s\n' "$output" | grep -vc "^$f: ")" = "0" ] || { echo "$f: a line without the file prefix: $output"; return 1; }
   for h in "$@"; do
     [[ "$output" == *"$h"* ]] || { echo "$f: output does not name $h: $output"; return 1; }
   done
@@ -34,6 +35,7 @@ fails() {
 passes() {
   run "$CHECK" "$1"
   [ "$status" -eq 0 ] || { echo "$1: status $status: $output"; return 1; }
+  [ "$output" = "ok: $1" ] || { echo "$1: output: $output"; return 1; }
 }
 
 # --- criterion 1: the template's shape ---
@@ -100,6 +102,27 @@ passes() {
   run "$CHECK" "$BATS_TEST_TMPDIR/no-such-file.md"
   [ "$status" -eq 2 ]
   [[ "$output" == *"usage"* ]] || { echo "$output"; return 1; }
+}
+
+@test "a directory: status 2, an error line, then usage" {
+  run "$CHECK" "$BATS_TEST_TMPDIR"
+  [ "$status" -eq 2 ]
+  [[ "$output" == "alfred-charter-check: is a directory"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"usage"* ]] || { echo "$output"; return 1; }
+}
+
+@test "two arguments: status 2, an error line, then usage" {
+  run "$CHECK" "$FIX/valid.md" "$FIX/valid.md"
+  [ "$status" -eq 2 ]
+  [[ "$output" == "alfred-charter-check: expected one file"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"usage"* ]] || { echo "$output"; return 1; }
+}
+
+@test "one fault is one line: a missing heading does not cascade" {
+  run "$CHECK" "$FIX/missing-objective.md"
+  [ "$status" -eq 1 ]
+  [ "${#lines[@]}" -eq 1 ]
+  [ "$output" = "$FIX/missing-objective.md: missing heading: ## Objective" ]
 }
 
 # --- criterion 4: fixture inventory ---
@@ -221,8 +244,13 @@ gen_scope() {
   fails "$C" "## Repo owner"
 }
 
-@test "case d: backtick fence indented by four spaces passes" {
+@test "case d: a backtick fence indented by four spaces opens a fence (never closed: fails)" {
   gen_top '    ```'
+  fails "$C" "## Repo owner"
+}
+
+@test "case d2: an indented fence that closes passes" {
+  gen_top '  ~~~' 'one text line' '	~~~'
   passes "$C"
 }
 
@@ -285,6 +313,40 @@ gen_scope() {
 
 @test "case p: TODOs without a colon at the line start, TODO: mid-line, pass" {
   gen_scope 'TODOs are kept in the tracker, see TODO: in issues.' "$(scope_lines | sed -n 2p)"
+  passes "$C"
+}
+
+@test "case q: a Scope line starting #764 (no space) is an ordinary line and passes" {
+  gen_scope '#764 reads this file.' "$(scope_lines | sed -n 2p)"
+  passes "$C"
+}
+
+@test "case r: ##Notes and ### Sub inside Scope are ordinary lines and pass" {
+  gen_scope '##Notes are not a heading.' '### Sub is not a level-2 heading.'
+  passes "$C"
+}
+
+# gen_objective <line>... — valid.md with the lines under ## Objective replaced
+gen_objective() {
+  C="$BATS_TEST_TMPDIR/case.md"
+  { awk '{ print } $0 == "## Objective" { exit }' "$FIX/valid.md"; printf '%s\n' "$@"; printf '\n'
+    awk '$0 == "## Business case" { f = 1 } f' "$FIX/valid.md"; } > "$C"
+}
+
+@test "case s: only whitespace under Objective fails naming Objective" {
+  gen_objective '   	  '
+  fails "$C" "## Objective"
+}
+
+@test "case t: only an HTML comment under Objective fails naming Objective" {
+  gen_objective '<!-- x -->'
+  fails "$C" "## Objective"
+}
+
+@test "case u: a comment spanning lines under Objective fails; a line beside it passes" {
+  gen_objective '<!-- first' 'second -->'
+  fails "$C" "## Objective"
+  gen_objective '<!-- first' 'second -->' 'O2, a real objective'
   passes "$C"
 }
 
