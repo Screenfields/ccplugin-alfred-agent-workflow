@@ -687,7 +687,7 @@ reviewer, then the fix to the same pair) is the routed rule `work-and-review-in-
 | `incident-reviewer` | the hub, who chooses the mitigation | read-only | opus, max |
 | `investigator` | none | `Read, Grep, Glob, WebFetch`, read-only Metis tools | haiku, low |
 
-`designer` writes the design for a ready item, naming its precedent or the alternatives; pairs with the design reviewer; opt-in (`designer-enabled`). The switch `designer-enabled` is a boolean in `config/thresholds.json`, default `false`, read with `alfred-config get designer-enabled` like `loop-check-enabled`; nothing reads it yet. It preloads the core skill `skills/platform-design-basis/SKILL.md`. Its model and effort (`opus`, `high`) are an unmeasured starting candidate with no source.
+`designer` writes the design for a ready item, naming its precedent or the alternatives; pairs with the design reviewer; opt-in (`designer-enabled`). The switch `designer-enabled` is a boolean in `config/thresholds.json`, default `false`, read with `alfred-config get designer-enabled` like `loop-check-enabled`. Until `skills/design` reads the switch, a lead uses the designer by starting `alfred-agent:designer` with the Agent tool. The switch changes nothing yet. The designer's brief carries the work item, whose `## Design` section is the write target, the precedent link with its passage, the installed `doctrines/` path, the absolute path to `skills/platform-design-basis/SKILL.md` as the fallback, and passages for any platform references the skill points at. A lead that uses the designer does not add its own `Precedent:` line. The designer writes it. The designer preloads the core skill `skills/platform-design-basis/SKILL.md`. Its model and effort (`opus`, `high`) are an unmeasured starting candidate with no source.
 
 `model` and `effort` follow `model-setting-per-role` in `config/thresholds.json`
 (`light`/`medium`/`strong` are `haiku`/`sonnet`/`opus`; effort `highest` is `max`). A role whose
@@ -735,7 +735,7 @@ Only the investigator is read-only by tool list: it has no `Bash`, `Edit`, `Writ
 reviewers keep `Bash` because they need `gh`, `git log` and the test runner to check claims, so
 they are read-only by instruction: the definition says not to change files, branches, issues or
 other state, and nothing in the tool list stops it. The analyst may edit the body of the item named in the
-brief; the designer may edit the `## Design` section of that item. The code reviewer may run tests in its own scratch worktree and commit nothing.
+brief. The designer may edit the `## Design` section of that item. The code reviewer may run tests in its own scratch worktree and commit nothing.
 
 ### House style
 

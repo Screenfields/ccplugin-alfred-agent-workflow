@@ -925,3 +925,32 @@ readme_rows() {
   grep -qF '| `design-reviewer` | designer (when enabled), otherwise the lead or Alfred | read-only | sonnet, high |' "$ROOT/README.md"
   grep -qF '`designer` writes the design for a ready item, naming its precedent or the alternatives; pairs with the design reviewer; opt-in (`designer-enabled`).' "$ROOT/README.md"
 }
+
+# --- CCW-158 document review: the designer note in the README ----------------
+
+# designer_note — the README note under the Specialists table, without Alfred's row sentence.
+designer_note() {
+  grep -F '`designer` writes the design for a ready item' "$ROOT/README.md" \
+    | sed 's/^`designer` writes the design for a ready item, naming its precedent or the alternatives; pairs with the design reviewer; opt-in (`designer-enabled`)\.//'
+}
+
+@test "README designer note: what opt-in means today" {
+  designer_note | grep -qF 'Until `skills/design` reads the switch, a lead uses the designer by starting `alfred-agent:designer` with the Agent tool. The switch changes nothing yet.'
+}
+
+@test "README designer note: what the brief carries" {
+  designer_note | grep -qF "The designer's brief carries the work item, whose \`## Design\` section is the write target, the precedent link with its passage, the installed \`doctrines/\` path, the absolute path to \`skills/platform-design-basis/SKILL.md\` as the fallback, and passages for any platform references the skill points at."
+}
+
+@test "README designer note: the lead adds no Precedent line" {
+  designer_note | grep -qF 'A lead that uses the designer does not add its own `Precedent:` line. The designer writes it.'
+}
+
+@test "README: the lines added for the designer carry no semicolon" {
+  note=$(designer_note)
+  [ -n "$note" ]
+  if grep -q ';' <<<"$note"; then echo "semicolon in the designer note"; return 1; fi
+  line=$(grep -F 'The designer may edit the `## Design` section of that item.' "$ROOT/README.md")
+  [ -n "$line" ]
+  if grep -q ';' <<<"$line"; then echo "semicolon in the read-only paragraph"; return 1; fi
+}
