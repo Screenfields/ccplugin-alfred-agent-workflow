@@ -744,8 +744,10 @@ comment 6356942867): identical repeated lines count once; two `Precedent:` lines
 conflict and read as `invalid` (fail closed, as the consumers do); when the precedent is `valid`
 every `Real alternatives:` line is ignored; otherwise the first `Real alternatives:` line with a
 value wins. A value must be a whole word, so `Real alternatives: not applicable` has none. The
-values and the phrase must still match exactly. For `valid` it looks for `passage carried,
-not read at source` on the `Precedent:` line. It prints `MATCH` or `MISMATCH` per case and run and
+values and the phrase must still match exactly. For `valid` it looks for `passage`, `carried` and `not read
+at source` on the `Precedent:` line, in that order, case-insensitive, with an optional "the" or "was"
+between them (so "The passage was carried, not read at source" counts; Alfred, CCW-157 comment
+6357259459). It prints `MATCH` or `MISMATCH` per case and run and
 exits non-zero on any mismatch or any case without a result file; `--runs N` also requires
 `run1` to `runN`. The verdict, the blocker text and the sound part stay with the starting session.
 The format of the `Precedent:` line is defined once, in `tests/helpers/design-format.bash`.

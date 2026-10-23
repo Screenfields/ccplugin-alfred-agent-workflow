@@ -160,6 +160,14 @@ normalize_result() {
       -e 's/^\*\*([^*]*)\*\*/\1/' -e 's/^__([^_]*)__/\1/'
 }
 
+# The phrase of AC4 is matched by meaning (Alfred, CCW-157 comment 6357259459):
+# "passage", "carried" and "not read at source" on the Precedent line, in that
+# order, case-insensitive, with an optional "the" or "was" between them and an
+# optional comma after "carried". "passage carried, not read at source" and
+# "The passage was carried, not read at source" pass; "passage not carried, read
+# at source" and the words spread over other lines do not.
+PHRASE_RE='passage([[:space:]]+(the|was))*[[:space:]]+carried,?([[:space:]]+(the|was))*[[:space:]]+not read at source'
+
 # check_result <result.md> <expected.json>: the mechanical part of a
 # design-precedent comparison. Prints the reason and returns 1 on a mismatch.
 # It parses by meaning (Alfred, CCW-157 comment 6356942867), on the lines that
@@ -171,7 +179,9 @@ normalize_result() {
 #      "invalid" (fail closed); the consumers do the same;
 #   4. when the precedent is "valid", every "Real alternatives:" line is
 #      ignored (the expected set has none);
-#   5. otherwise the first "Real alternatives:" line with a value wins.
+#   5. otherwise the first "Real alternatives:" line with a value wins;
+#   6. for a result that must carry the phrase, it is matched by meaning (see
+#      PHRASE_RE above) on a Precedent line.
 # A value is valid|invalid|none declared (or yes|no) as a whole word, so
 # "Real alternatives: not applicable" has no value. A Precedent line with no
 # value is not a Precedent line.
@@ -206,7 +216,7 @@ check_result() {
     return 1
   fi
   if [ "$(jq -r .source_note "$e")" = true ]; then
-    if ! { grep '^Precedent: ' <<<"$norm" || true; } | grep -qF 'passage carried, not read at source'; then
+    if ! { grep '^Precedent: ' <<<"$norm" || true; } | grep -qiE "$PHRASE_RE"; then
       echo "the Precedent line lacks 'passage carried, not read at source'"
       return 1
     fi

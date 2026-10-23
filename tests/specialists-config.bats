@@ -775,3 +775,57 @@ check_variant() {
   [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
   [[ "$output" == *"MISMATCH design-precedent/missing run 1: no Precedent line"* ]] || { echo "$output"; return 1; }
 }
+
+# phrase_result <line>: the valid case with the given Precedent line.
+phrase_result() {
+  make_results "$BATS_TEST_TMPDIR/res"
+  printf '%s\n' "$1" > "$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
+}
+
+@test "check design-precedent: the exact phrase passes" {
+  phrase_result 'Precedent: valid — passage carried, not read at source.'
+  run check_env
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c '^MATCH design-precedent/valid run 1$' <<<"$output")" -eq 1 ] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: 'The passage was carried, not read at source' passes" {
+  phrase_result 'Precedent: valid. The passage was carried, not read at source, so I used the brief.'
+  run check_env
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c '^MATCH design-precedent/valid run 1$' <<<"$output")" -eq 1 ] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: the phrase is case-insensitive and the comma is optional" {
+  phrase_result 'Precedent: valid — Passage Carried not read at SOURCE.'
+  run check_env
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c '^MATCH design-precedent/valid run 1$' <<<"$output")" -eq 1 ] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: the words spread over other lines fail" {
+  printf '%s\n' 'Precedent: valid — the passage' 'was carried, not read at source' > "$BATS_TEST_TMPDIR/two.md"
+  make_results "$BATS_TEST_TMPDIR/res"
+  cp "$BATS_TEST_TMPDIR/two.md" "$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/valid run 1: the Precedent line lacks"* ]] || { echo "$output"; return 1; }
+}
+
+@test "check design-precedent: 'passage not carried' and the wrong order fail" {
+  phrase_result 'Precedent: valid — the passage was not carried; read at source.'
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0 for 'not carried'"; return 1; }
+  [[ "$output" == *"MISMATCH design-precedent/valid run 1: the Precedent line lacks"* ]] || { echo "$output"; return 1; }
+  phrase_result 'Precedent: valid — carried passage, not read at source.'
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0 for the wrong order"; return 1; }
+}
+
+@test "check design-precedent: the phrase is matched on the Precedent line, not elsewhere" {
+  printf '%s\n' 'Precedent: valid — fine.' 'The passage was carried, not read at source.' > "$BATS_TEST_TMPDIR/x.md"
+  make_results "$BATS_TEST_TMPDIR/res"
+  cp "$BATS_TEST_TMPDIR/x.md" "$BATS_TEST_TMPDIR/res/design-precedent-valid-run1.md"
+  run check_env
+  [ "$status" -ne 0 ] || { echo "exit 0"; return 1; }
+}
