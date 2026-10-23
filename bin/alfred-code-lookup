@@ -45,6 +45,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 base="${PROJECT_MANAGER_URL:-https://project-manager.screenfields.net}"
 url="${base%/}/api/codes/export"
+shown=$(printf '%s' "$url" | sed -E 's#//[^@/]*@#//#')   # never echo userinfo
 hdr=()
 if [ -n "${PM_TOKEN_RO:-}" ]; then
   printf 'Authorization: Bearer %s\n' "$PM_TOKEN_RO" > "$tmp/hdr"
@@ -56,7 +57,7 @@ rc=$?
 case "$rc" in
   0) ;;
   124|137) fail 2 "registry timed out after 4 s" ;;
-  *) fail 2 "registry unreachable ($url)" ;;
+  *) fail 2 "registry unreachable ($shown)" ;;
 esac
 case "$http" in
   200) ;;
@@ -69,6 +70,8 @@ esac
 res=$(jq -r --arg repo "$repo" '
   def live: ((.retiredAt // "") == "");
   def latest: sort_by(.assignedAt // "") | last;
+  def out($r): if ($r.code | type) == "string" and ($r.code | test("\\A[A-Z][A-Z0-9]{1,5}\\z"))
+               then "LIVE\t" + $r.code else "BADCODE" end;
   .codes as $all
   | if ($all | type) != "array" then "BAD"
     else
@@ -79,15 +82,16 @@ res=$(jq -r --arg repo "$repo" '
                | if ($r | live) then $r else succ($r.code; $d + 1) end
           end;
         if ($mine | length) == 0 then "NONE"
-        elif ($mine | map(select(live)) | length) > 0 then "LIVE\t" + ($mine | map(select(live)) | latest | .code)
+        elif ($mine | map(select(live)) | length) > 0 then out($mine | map(select(live)) | latest)
         else
           ([$mine[] | succ(.code; 0)] ) as $s
-          | if ($s | length) > 0 then "LIVE\t" + ($s | latest | .code) else "RETIRED" end
+          | if ($s | length) > 0 then out($s | latest) else "RETIRED" end
         end
     end' "$tmp/body" 2>/dev/null) || fail 2 "registry reply is not valid JSON"
 
 case "$res" in
   LIVE*) printf '%s\n' "${res#LIVE	}"; exit 0 ;;
+  BADCODE) fail 2 "registry reply has an invalid code" ;;
   RETIRED) fail 1 "repo retired; no current code" ;;
   NONE) fail 1 "no code registered for $repo" ;;
   *) fail 2 "registry reply has no codes list" ;;
