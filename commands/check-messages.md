@@ -36,7 +36,7 @@ replaces any previous one, so relaunching is always safe.
 |---|---|---|
 | `WAKE am …` | `get_messages`, handle per the rules below, relaunch | Only what the messages themselves warrant |
 | `WAKE buzz …` | Read that channel, handle, relaunch | Only what the posts warrant |
-| `… no-mark` (a trailing ` no-mark` on a `WAKE am`/`WAKE buzz` line) | This session has no work-item mark. Run `alfred-workitem mark <owner>/<repo>#<n>` (your own standing issue for operational turns, or `alfred-workitem mark none`), then handle the wake as usual with the row above | None |
+| `… no-mark` (a trailing ` no-mark` on a `WAKE am`/`WAKE buzz` line) | This session has no work-item mark. Run `alfred-workitem mark <owner>/<repo>#<n>` (operational turns with no specific item go on the shared standing item Screenfields/alfred-platform#1173, AP-1173, or `alfred-workitem mark none`), then handle the wake as usual with the row above | None |
 | `WAKE-ERROR …` (exit 2) | Relaunch. If it is `WAKE-ERROR alfred-wake`, or the second `WAKE-ERROR agent-messaging` this session: see "Bridge down" | One line, once per source per session |
 | `WAKE-RECOVERED …` | Relaunch | None |
 | `WAKE-STOPPED signal=…` | Relaunch | None |
