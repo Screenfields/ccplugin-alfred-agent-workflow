@@ -1,0 +1,11 @@
+{
+  "precedent": "invalid",
+  "alternatives": "yes",
+  "verdict": "fail",
+  "blocker": "the note has no Precedent: line",
+  "source_note": false,
+  "sound": {
+    "where": "Design, 'The order is the one the API returns; no sorting is added.'",
+    "summary": "Looks like a gap, but the work item puts sorting out of scope, so the design correctly stays inside the bounds."
+  }
+}

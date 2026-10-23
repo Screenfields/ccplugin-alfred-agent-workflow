@@ -20,6 +20,8 @@ Review the design note below. It serves the work item quoted first. The sources 
 
 ## Design note: secret-arg guard
 
+Precedent: none declared
+
 **Problem.** The rule `secrets-via-stdin-never-cmdline` is text only. Agents still paste tokens into commands, where they reach shell history, process listings and the session transcript.
 
 **Current state.** `hooks/hooks.json` has no `PreToolUse` entry today, so the design adds a new `PreToolUse` block with the matcher `Bash`.
