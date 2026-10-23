@@ -17,7 +17,10 @@ fm_key() {
   [ -f "$SKILL" ]
   [ "$(head -n1 "$SKILL")" = "---" ]
   [ "$(fm_key name)" = "name: refine" ]
-  [ -n "$(fm_key description)" ]
+  # a non-empty description body, inline or folded (description: >)
+  d=$(awk '/^---$/ {n++; next} n == 1' "$SKILL" \
+        | awk '/^description:/ {on=1; sub(/^description:[[:space:]]*>?[[:space:]]*/, ""); print; next} on && /^[[:space:]]/ {print; next} {on=0}')
+  [ -n "$(printf '%s' "$d" | tr -d '[:space:]')" ] || { echo "empty description"; return 1; }
   [ -n "$(fm_key allowed-tools)" ]
 }
 
@@ -47,7 +50,8 @@ fm_key() {
   grep -q 'Do not start a new analyst' "$SKILL"
   grep -q 'SendMessage to the reviewer.s agent ID' "$SKILL"
   grep -q 'alfred-config get failed-review-max' "$SKILL"
-  grep -q 'escalate to the hub' "$SKILL"
+  grep -q 'escalation to the hub with the messaging skill' "$SKILL"
+  grep -q 'failed-review-max limit sends it to the hub' "$SKILL"
   grep -q 'hit a review or overrun limit' "$SKILL"
 }
 
@@ -71,6 +75,15 @@ fm_key() {
 @test "the skill never edits the item or sets a label" {
   if grep -q -- '--add-label' "$SKILL"; then echo "add-label in skill"; return 1; fi
   if grep -q 'gh issue edit' "$SKILL"; then echo "gh issue edit in skill"; return 1; fi
+}
+
+@test "the loop counts before it sends, and large items missing only approval are not looped" {
+  c=$(grep -n -m1 'first count the failed rounds, before sending any findings' "$SKILL" | cut -d: -f1)
+  m=$(grep -n -m1 'send the reviewer.s findings to the same analyst' "$SKILL" | cut -d: -f1)
+  [ -n "$c" ] && [ -n "$m" ] && [ "$c" -lt "$m" ]
+  grep -q 'only failed check is the missing owner approval is not looped' "$SKILL"
+  grep -q 'checks the carried body and not the item' "$SKILL"
+  grep -q "analyst's latest open questions and split proposals" "$SKILL"
 }
 
 @test "the check for forbidden calls does catch them" {

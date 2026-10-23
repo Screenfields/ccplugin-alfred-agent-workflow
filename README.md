@@ -69,7 +69,7 @@ Should reach the messaging service and report your inbox state. If the MCP isn't
 | `/alfred-agent:ecr` | Expert Consulting Review — multi-model architectural feedback |
 | `/alfred-agent:retro` | Session retrospective for capturing learnings |
 | `/alfred-agent:land` | Session close-out: health-check gate + retro + git push + reconcile work to issues + Metis capture. `--mode=team` skips the inline retro |
-| `/alfred-agent:refine` | The analyst and readiness reviewer pair, new to ready: loops the pair until the reviewer passes, then hands the pass to the lead; edits nothing |
+| `/alfred-agent:refine` | The analyst and readiness reviewer pair, new to ready: loops the pair until the reviewer passes or the failed-review-max limit sends it to the hub. Hands the pass to the lead. Edits nothing. |
 | `/alfred-agent:git-commit` | Authoritative commit procedure (always invoke before `git commit`) |
 | `/alfred-agent:documentation` | Apply baseline-vs-delta + ADR discipline when writing docs |
 | `/alfred-agent:messaging` | Inter-agent messaging skill (MCP tool reference) |
