@@ -1,0 +1,16 @@
+{
+  "_synthetic": "SYNTHETIC registry export for tests only; not the live registry",
+  "version": 1,
+  "codes": [
+    {"code": "LVE", "repo": "acme/live-repo", "project": "acme", "role": "main", "mainCode": "LVE", "assignedAt": "2026-01-01T00:00:00Z", "retiredAt": null, "aliasOf": null},
+    {"code": "MUA", "repo": "acme/multi", "project": "acme", "role": "main", "mainCode": "MUA", "assignedAt": "2026-01-01T00:00:00Z", "retiredAt": null, "aliasOf": null},
+    {"code": "MUB", "repo": "acme/multi", "project": "acme", "role": "secondary", "mainCode": "MUA", "assignedAt": "2026-03-01T00:00:00Z", "retiredAt": null, "aliasOf": null},
+    {"code": "ALI", "repo": "acme/aliased", "project": "acme", "role": "main", "mainCode": "ALI", "assignedAt": "2026-02-01T00:00:00Z", "retiredAt": null, "aliasOf": "OLDX"},
+    {"code": "REN1", "repo": "acme/renamed", "project": "acme", "role": "main", "mainCode": "REN1", "assignedAt": "2026-01-01T00:00:00Z", "retiredAt": "2026-02-01T00:00:00Z", "aliasOf": null},
+    {"code": "REN2", "repo": "acme/renamed", "project": "acme", "role": "main", "mainCode": "REN2", "assignedAt": "2026-02-01T00:00:00Z", "retiredAt": null, "aliasOf": "REN1"},
+    {"code": "CHA1", "repo": "acme/chain", "project": "acme", "role": "main", "mainCode": "CHA1", "assignedAt": "2026-01-01T00:00:00Z", "retiredAt": "2026-02-01T00:00:00Z", "aliasOf": null},
+    {"code": "CHA2", "repo": "acme/chain", "project": "acme", "role": "main", "mainCode": "CHA2", "assignedAt": "2026-02-01T00:00:00Z", "retiredAt": "2026-03-01T00:00:00Z", "aliasOf": "CHA1"},
+    {"code": "CHA3", "repo": "acme/chain", "project": "acme", "role": "main", "mainCode": "CHA3", "assignedAt": "2026-03-01T00:00:00Z", "retiredAt": null, "aliasOf": "CHA2"},
+    {"code": "GON", "repo": "acme/gone", "project": "acme", "role": "main", "mainCode": "GON", "assignedAt": "2026-01-01T00:00:00Z", "retiredAt": "2026-02-01T00:00:00Z", "aliasOf": null}
+  ]
+}

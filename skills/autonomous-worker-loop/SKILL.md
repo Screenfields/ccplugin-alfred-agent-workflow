@@ -60,14 +60,25 @@ Do NOT emit `<promise>DONE</promise>` on failure.
 
 ## Step 4 — Open PR
 
-Commit, push, and open a PR:
+Commit, push, and open a PR. The PR title is `<CODE>-<n>: <task title>`, where `<n>` is the issue the worker implements.
+
+```bash
+CL=$(command -v alfred-code-lookup || echo "${CLAUDE_PLUGIN_ROOT:-}/bin/alfred-code-lookup")
+CODE=$("$CL" {owner}/{repo}); RC=$?
+```
+
+CODE comes from alfred-code-lookup `<owner/repo>`; the `code` in `.alfred/config.json` is the fallback for the session's own repo only. A code is never taken from memory. Branch on RC. A `CL` that is not executable, or any RC other than 0 or 1, counts as exit 2. Outcomes:
+
+- exit 0 (RC=0): use the code.
+- exit 1 (RC=1, no code, for example an ops repo): title without a prefix, plus one line in the PR or issue body, "repo has no registry code".
+- exit 2 (any other RC, registry failure): use the config `code` if present for the own repo, otherwise no prefix plus the body line "registry unreachable; title not coded".
 
 ```bash
 git add -A
 git commit -m "{concise description of what was implemented}"
 git push -u origin HEAD
 gh pr create \
-  --title "{task title from issue}" \
+  --title "<CODE>-<n>: <task title>" \
   --body "$(cat <<'PREOF'
 ## Summary
 {one-line description of what was implemented}
