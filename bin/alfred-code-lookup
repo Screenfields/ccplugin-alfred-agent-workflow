@@ -24,7 +24,7 @@ set -u
 
 fail() { echo "$2" >&2; exit "$1"; }
 
-[ $# -eq 1 ] && [ -n "$1" ] || fail 2 "usage: alfred-code-lookup <owner/repo | git remote URL>"
+if [ $# -ne 1 ] || [ -z "$1" ]; then fail 2 "usage: alfred-code-lookup <owner/repo | git remote URL>"; fi
 in="$1"
 if printf '%s' "$in" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
   repo="$in"
