@@ -61,9 +61,8 @@ printf '{"messages":[],"total_unread":0}' > "$T/stub/inbox.json"
 export ALFRED_WAKE_STATE_DIR="$T/state"
 export ALFRED_WAKE_NO_UPGRADE=1
 
-# claude_p <prompt> [-c] — one `claude -p` call from $T/work, the prompt on
-# stdin (from a file, so that the subshell can exec claude and `$!` is claude's
-# own pid). A -c continues the last session of $T/work.
+# claude_p <prompt> [-c] — one foreground `claude -p` call from $T/work, the
+# prompt on stdin. A -c continues the last session of $T/work.
 claude_p() {
   local prompt="$1"
   shift
@@ -85,7 +84,11 @@ Step 2: in a second Bash call, run this command exactly as written and reply wit
 $WALK
 Your final reply is that output line only, also after the background task has ended."
 
-claude_p "$PROMPT" > "$T/out.txt" &
+# The background call is a subshell that execs claude, started with `&` right
+# here (not through a function, which would add a wrapper process): `$!` is
+# claude's own pid, so cleanup kills claude and not a wrapper.
+printf '%s' "$PROMPT" > "$T/prompt.txt"
+( cd "$T/work" && exec claude -p --plugin-dir "$BRANCH" --permission-mode bypassPermissions < "$T/prompt.txt" ) > "$T/out.txt" &
 CLAUDE_PID=$!
 i=0
 while [ ! -e "$T/step2-done" ] && kill -0 "$CLAUDE_PID" 2>/dev/null && [ "$i" -lt 1200 ]; do

@@ -158,12 +158,15 @@ catches deaf leads deterministically.
 
 ```bash
 alfred-wake check     # one dry-run pass: never writes cursors, explains itself on stderr
-alfred-wake status    # config + whether a wait/run process is alive (exit 0 = a live wait with a live owner)
+alfred-wake status    # config + whether a wait/run process is alive (exit 0 = a live wait with a live owner, or one with no recorded owner and no session id)
 ```
 
 `status` means a live wait whose owner Claude Code process is also alive. A wait that
 survived a crash of its session (an orphan) is reported as not running, so the revived session
-launches its own.
+launches its own. The one exception: a wait with no recorded owner and no session id (a human
+shell, or a wait from an older version) counts as running, as before. An orphan can still consume
+news before the revive (CCW-172 fixes that), so the unread count that SessionStart shows comes from
+the service, not from what the orphan already printed.
 
 `check` is safe to run at any time: it resolves config, proves auth against both
 sources, prints what it *would* have woken you with — and writes no cursor, so
@@ -254,7 +257,7 @@ Cursors on ephemeral storage mean a restarted lead replays its whole history as
 | `buzz_identity.json` | Own Buzz pubkey (used to filter out your own posts) |
 | `failures.json` | Per-source consecutive-failure count + last-reported timestamp |
 | `armed` | Touched every pass by `run`; `status` and `/alfred-agent:check-messages` read its mtime |
-| `alfred-wake.owner` | The Claude Code process that started the running wait: `<pid> <starttime>`, or `unknown`. Removed with the pidfile. The rules are in the header of `bin/alfred-wake` |
+| `alfred-wake.owner` | The Claude Code process that started the running wait: `<pid> <starttime>`, or `unknown`. Removed with the pidfile. `unknown` means owner discovery failed (no ancestor has the owner name), not that the owner died. The rules are in the header of `bin/alfred-wake` |
 | `.initialized` | Marker — its absence means "first run, seed only, don't replay" |
 | `alfred-wake.log` | One line per pass: timestamp + counts only, never bodies, never secrets. Rotated at ~1 MB |
 
@@ -852,6 +855,7 @@ In multi-agent project setups, only the project's lead agent typically gets a me
 | `MCP server failed to connect` | Required env var missing or empty | `/mcp` to see error; check env vars per step 1 |
 | Messages reach the service but you don't receive them | `X-Agent-ID` header mismatch | Verify your `AGENT_ID` env matches what senders address |
 | `no wake bridge running` from `/alfred-agent:check-messages` | No live `alfred-wake wait` process, with a live owner, for this state dir | Start one: `Bash(command: "alfred-wake wait", run_in_background: true)`; `alfred-wake status` shows the pidfile PID and last-pass age |
+| `alfred-wake status` prints `armed:      no … no owner could be found` while a wait is alive | `CLAUDE_CODE_SESSION_ID` is set but no ancestor of the wait has the owner name (`claude` by default), so `alfred-wake.owner` holds `unknown` | Set `ALFRED_WAKE_OWNER_COMM` to your Claude Code binary's process name (see `ps -o comm= -p <pid of the session>`), then relaunch `alfred-wake wait` |
 | Wake bridge silent while messages arrive | Wrong or missing `AGENT_MESSAGING_TOKEN` / `AGENT_ID` | `alfred-wake check` — it prints the resolved URL, auth mode and agent id, and any `WAKE-ERROR` reason |
 | Buzz never wakes you | No buzz-mcp sidecar in the pod, or no Buzz identity | `alfred-wake check` says `buzz: no sidecar …`. Expected for leads without a Buzz identity — it is not an error |
 

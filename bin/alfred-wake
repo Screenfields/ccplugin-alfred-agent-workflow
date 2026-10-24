@@ -1367,7 +1367,7 @@ cmd_status() {
         echo "armed:      yes (pid $pid, last pass $age)"
         exit 0 ;;
       unknown)
-        echo "armed:      no (pid $pid is alive, but no owner could be found: the Claude Code process that started it is unknown; last pass $age)" ;;
+        echo "armed:      no (pid $pid is alive, but no owner could be found: the Claude Code process that started it is unknown; set ALFRED_WAKE_OWNER_COMM if your Claude Code binary's process name is not claude; last pass $age)" ;;
       *)
         echo "armed:      no (pid $pid is alive, but its owner Claude Code process $OWNER_PID is gone; last pass $age)" ;;
     esac

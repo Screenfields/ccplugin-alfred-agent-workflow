@@ -396,7 +396,7 @@ holders_of() {
   export CLAUDE_CODE_SESSION_ID=dead-session
   run "$WAKE" status
   [ "$status" -eq 1 ]
-  [[ "$output" == *"armed:      no"*"owner"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"armed:      no"*"is gone"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"pid $wait_pid"* ]] || { echo "$output"; return 1; }
   alive "$wait_pid"
 }
@@ -427,7 +427,7 @@ holders_of() {
   alive "$$"
   run "$WAKE" status
   [ "$status" -eq 1 ]
-  [[ "$output" == *"armed:      no"*"owner"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"armed:      no"*"is gone"* ]] || { echo "$output"; return 1; }
 }
 
 @test "no owner and no session id: no owner file, status as before" {
@@ -449,6 +449,7 @@ holders_of() {
   run "$WAKE" status
   [ "$status" -eq 1 ]
   [[ "$output" == *"armed:      no"*"no owner"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"set ALFRED_WAKE_OWNER_COMM"* ]] || { echo "$output"; return 1; }
   alive "$a_pid"
 }
 
