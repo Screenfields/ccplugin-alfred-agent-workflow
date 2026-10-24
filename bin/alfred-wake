@@ -18,11 +18,30 @@
 #                                diagnostics on stderr, events on stdout
 #   alfred-wake install          symlink this script into ~/.local/bin
 #   alfred-wake status           show config; exit 0 only while a live
-#                                wait/run process holds the pidfile
+#                                wait/run process holds the pidfile AND the
+#                                Claude Code process that started it is alive
 #
 # Single instance: `wait` and `run` share one pidfile per state dir (one state
 # dir per identity on a devbox). A new instance SIGTERMs the previous one,
 # waits up to ALFRED_WAKE_STOP_GRACE seconds, then SIGKILLs it.
+#
+# Owner: `wait`/`run` records which Claude Code process started it, in
+# $STATE_DIR/alfred-wake.owner (one line, written in take_over before the
+# pidfile). The owner is the nearest ancestor of the wait whose command name
+# (/proc/<pid>/comm, 15 characters) equals ALFRED_WAKE_OWNER_COMM (default
+# `claude`; set it only when the harness binary has another name). The file
+# holds `<pid> <starttime>` (start time = field 22 of /proc/<pid>/stat), or
+# `unknown`. The parent pid (field 4) and the start time are read after the
+# LAST `)` of the stat line, because the command name may hold spaces and
+# parentheses. `status` (and `status --json`) report a wait as running only
+# while its owner is alive with the same start time (a zombie is dead; a reused
+# pid has another start time). A wait whose owner crashed, and which survived as
+# an orphan, is therefore "not running": the hooks read that exit code and the
+# revived session launches its own wait, which takes over from the orphan.
+# No owner found: with CLAUDE_CODE_SESSION_ID unset (a human shell) no file is
+# written and `status` is unchanged; with it set the file holds `unknown` and
+# `status` fails closed. A wait with no owner file (older version) counts as
+# running. The session id is NOT used: `claude -c` reuses it.
 #
 # Security invariants:
 #   - No token, header value, private key or message body is ever printed,
@@ -39,7 +58,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.8.1"
+VERSION="1.9.0"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -75,6 +94,10 @@ LAST_WAKE_FILE="$STATE_DIR/last_wake_exit"
 HANDLING_GRACE="${ALFRED_WAKE_HANDLING_GRACE:-600}"
 [[ "$HANDLING_GRACE" =~ ^[0-9]+$ ]] || HANDLING_GRACE=600
 LOCK_FILE="$STATE_DIR/alfred-wake.lock"
+# The Claude Code process that owns the running wait: "<pid> <starttime>" or
+# "unknown" (see the Owner paragraph in the header).
+OWNER_FILE="$STATE_DIR/alfred-wake.owner"
+OWNER_COMM="${ALFRED_WAKE_OWNER_COMM:-claude}"
 
 # ---------------------------------------------------------------------------
 # agent-messaging configuration
@@ -851,6 +874,63 @@ is_wake_pid() {
   [[ "$cmdline" =~ alfred-wake\ (wait|run)( |$) ]]
 }
 
+# stat_rest <pid> — set STAT_PPID, STAT_STATE and STAT_START from
+# /proc/<pid>/stat, read after the last ") " (the command name may hold spaces
+# and parentheses). rest word 1 is the state (field 3), word 2 the parent pid
+# (field 4), word 20 the start time (field 22). Returns 1 when unreadable.
+stat_rest() {
+  local stat rest
+  local -a w
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  [ -n "$stat" ] || return 1
+  rest=${stat##*) }
+  read -ra w <<< "$rest"
+  STAT_STATE=${w[0]:-}
+  STAT_PPID=${w[1]:-}
+  STAT_START=${w[19]:-}
+  [[ "$STAT_PPID" =~ ^[0-9]+$ ]] && [[ "$STAT_START" =~ ^[0-9]+$ ]]
+}
+
+# find_owner — print "<pid> <starttime>" of the nearest ancestor of this
+# process whose command name is OWNER_COMM; return 1 when there is none.
+find_owner() {
+  local want="${OWNER_COMM:0:15}" p="$$" depth=0 comm
+  while [ "$depth" -lt 64 ]; do
+    stat_rest "$p" || return 1
+    p="$STAT_PPID"
+    [ "$p" -gt 1 ] || return 1
+    comm=$(cat "/proc/$p/comm" 2>/dev/null) || return 1
+    if [ "$comm" = "$want" ]; then
+      stat_rest "$p" || return 1
+      printf '%s %s' "$p" "$STAT_START"
+      return 0
+    fi
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# owner_check — set OWNER_STATE: "ok" (owner alive, or no owner file at all),
+# "gone" (owner dead, a zombie, or its pid reused: other start time) or
+# "unknown" (the file says unknown, or holds anything else). OWNER_PID is the
+# recorded pid, for messages. Sets globals; no subshell, so the caller sees them.
+owner_check() {
+  local line pid start
+  OWNER_PID=""
+  OWNER_STATE=ok
+  [ -e "$OWNER_FILE" ] || return 0
+  line=$(cat "$OWNER_FILE" 2>/dev/null || true)
+  if ! [[ "$line" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then OWNER_STATE=unknown; return 0; fi
+  pid="${BASH_REMATCH[1]}" start="${BASH_REMATCH[2]}"
+  OWNER_PID="$pid"
+  if stat_rest "$pid" && [ "$STAT_START" = "$start" ] \
+     && [ "$STAT_STATE" != Z ] && [ "$STAT_STATE" != X ]; then
+    OWNER_STATE=ok
+  else
+    OWNER_STATE=gone
+  fi
+}
+
 # Kill <pid> and everything below it (curl, sleep, the pass subshell),
 # deepest first so nothing is re-parented to init and left running.
 kill_tree() {
@@ -864,7 +944,7 @@ kill_tree() {
 # Become the only wait/run for this state dir. Serialised with flock so two
 # instances started together cannot both win.
 take_over() {
-  local old waited=0 limit=$((STOP_GRACE_S * 10)) dir
+  local old waited=0 limit=$((STOP_GRACE_S * 10)) dir owner
   exec 9>"$LOCK_FILE"
   flock -w $((STOP_GRACE_S + 10)) 9 2>/dev/null || true
 
@@ -893,13 +973,21 @@ take_over() {
     is_wake_pid "${dir##*.}" || rm -rf "$dir"
   done
 
+  # Owner first, pidfile second: a pidfile never exists without its owner.
+  if owner=$(find_owner); then
+    printf '%s\n' "$owner" > "$OWNER_FILE"
+  elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    echo unknown > "$OWNER_FILE"
+  else
+    rm -f "$OWNER_FILE"
+  fi
   printf '%s\n' "$$" > "$PID_FILE"
   flock -u 9 2>/dev/null || true
   exec 9>&-
 }
 
 release_pidfile() {
-  if [ "$(cat "$PID_FILE" 2>/dev/null)" = "$$" ]; then rm -f "$PID_FILE"; fi
+  if [ "$(cat "$PID_FILE" 2>/dev/null)" = "$$" ]; then rm -f "$OWNER_FILE" "$PID_FILE"; fi
 }
 
 # Everything this process may have left on disk. Cursors need no flush: each
@@ -1218,8 +1306,10 @@ cmd_notify() {
 # status_json: the machine-readable state for probes. A lead between a wake
 # and its relaunch (handling the news, up to HANDLING_GRACE s) counts as armed
 # here, so a busy lead does not flap to "degraded". "News" is any wake line,
-# WAKE-ERROR included. Starting a new wait ends the window. The plain `status` exit
-# code stays strict (a live wait only): the Stop and SessionStart hooks use it
+# WAKE-ERROR included. Starting a new wait ends the window. "waiting" needs a
+# live wait AND a live owner (an orphan or an unknown owner is down); "handling"
+# does not look at the owner. The plain `status` exit
+# code stays strict (a live wait with a live owner only): the Stop and SessionStart hooks use it
 # to catch a turn that ends without the relaunch.
 #   {"armed": bool, "state": "waiting"|"handling"|"down", "pid": int|null,
 #    "lastWakeExitAt": "<ISO-8601 UTC>"|null, "lastWakeExitAgoSeconds": int|null,
@@ -1228,7 +1318,10 @@ cmd_notify() {
 status_json() {
   local pid live=false last="" ago="" state armed
   pid=$(cat "$PID_FILE" 2>/dev/null || true)
-  if is_wake_pid "$pid"; then live=true; fi
+  if is_wake_pid "$pid"; then
+    owner_check
+    [ "$OWNER_STATE" = ok ] && live=true
+  fi
   last=$(cat "$LAST_WAKE_FILE" 2>/dev/null || true)
   [[ "$last" =~ ^[0-9]+$ ]] || last=""
   if [ -n "$last" ]; then
@@ -1268,10 +1361,17 @@ cmd_status() {
     age="$(( $(now_epoch) - $(stat -c %Y "$ARMED_MARKER" 2>/dev/null || echo 0) ))s ago"
   fi
   if is_wake_pid "$pid"; then
-    echo "armed:      yes (pid $pid, last pass $age)"
-    exit 0
-  fi
-  if [ -n "$pid" ]; then
+    owner_check
+    case "$OWNER_STATE" in
+      ok)
+        echo "armed:      yes (pid $pid, last pass $age)"
+        exit 0 ;;
+      unknown)
+        echo "armed:      no (pid $pid is alive, but no owner could be found: the Claude Code process that started it is unknown; last pass $age)" ;;
+      *)
+        echo "armed:      no (pid $pid is alive, but its owner Claude Code process $OWNER_PID is gone; last pass $age)" ;;
+    esac
+  elif [ -n "$pid" ]; then
     echo "armed:      no (pid $pid is not running; last pass $age)"
   else
     echo "armed:      no"
@@ -1296,7 +1396,7 @@ Usage:
   alfred-wake run [interval]     legacy watch loop for a Monitor (default tick 20s)
   alfred-wake check              one dry-run pass (no cursor writes); diagnostics on stderr
   alfred-wake install            symlink into ~/.local/bin
-  alfred-wake status             show config; exit 0 only while a wait/run is alive
+  alfred-wake status             show config; exit 0 only while a wait/run and its Claude Code owner are alive
   alfred-wake status --json      armed/state for probes (a just-woken lead counts as armed)
   alfred-wake unread [--direct]  print the agent-messaging unread count (--direct: direct messages only)
   alfred-wake notify TO SUBJ BODY  send one agent-messaging message

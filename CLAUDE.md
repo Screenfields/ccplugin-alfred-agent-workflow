@@ -129,7 +129,7 @@ Invariants to preserve when editing it:
   `ALFRED_WAKE_STOP_GRACE` (5 s). Passes and sleeps run as waited children so a
   signal is handled within a second, and curl auth configs live in a private
   `run.<pid>` dir under the state dir that is removed on every exit path.
-- **`status` means a live process.** Never go back to judging "armed" from
+- **`status` means a live wait whose owner Claude Code process is also alive.** Never go back to judging "armed" from
   marker-file freshness: a marker stays fresh for minutes after the loop died.
 - **agent-messaging is read by cursor, not by window.** `get_messages(since,
   include_body:false)` returns exactly what arrived after the stored
