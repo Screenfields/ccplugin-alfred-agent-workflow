@@ -23,6 +23,8 @@ setup() {
   # No session id and a private config dir: the no-mark flag (ccplugin#126)
   # must not depend on the session these tests happen to run in.
   unset CLAUDE_CODE_SESSION_ID
+  # A name no real process has: a real `claude` above the bats run is never the owner.
+  export ALFRED_WAKE_OWNER_COMM="no-real-owner-comm"
   export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/claude"
   inbox
   # Job control: without it, `&` jobs of a non-interactive shell start with
@@ -32,6 +34,9 @@ setup() {
 
 teardown() {
   local pid
+  for pid in "${FAKE_PIDS[@]:-}"; do
+    if [ -n "$pid" ]; then kill -KILL "$pid" 2>/dev/null || true; fi
+  done
   for pid in $(pgrep -f "alfred-wake (wait|run)" 2>/dev/null); do
     if grep -qzxF "ALFRED_WAKE_STATE_DIR=$STATE" "/proc/$pid/environ" 2>/dev/null; then
       kill -KILL "$pid" 2>/dev/null || true
@@ -81,8 +86,43 @@ reap() {
   wait "$1" || rc=$?
 }
 pidfile_is() { [ "$(cat "$STATE/alfred-wake.pid" 2>/dev/null)" = "$1" ]; }
+FAKE_PIDS=()
+# fake_claude <name> <cmd...> — an executable called <name> (the owner name that
+# alfred-wake looks for) that starts <cmd> as its child, output to $FAKE_OUT
+# (default $BATS_TEST_TMPDIR/fake.out), and stays up while the child runs.
+# Sets fake_pid; teardown kills it by that pid.
+fake_claude() {
+  local name="$1" f
+  shift
+  f="$BATS_TEST_TMPDIR/fake/$name"
+  mkdir -p "${f%/*}"
+  printf '#!/bin/bash\n"$@" > "%s" 2>&1 3>&- &\nwait\n' "${FAKE_OUT:-$BATS_TEST_TMPDIR/fake.out}" > "$f"
+  chmod +x "$f"
+  "$f" "$@" 3>&- &
+  fake_pid=$!
+  FAKE_PIDS+=("$fake_pid")
+}
+pidfile_set() { [ -s "$STATE/alfred-wake.pid" ]; }
+pidfile_not() { [ -s "$STATE/alfred-wake.pid" ] && [ "$(cat "$STATE/alfred-wake.pid")" != "$1" ]; }
+# owned_wait <owner-name> — a wait under a fake claude of that name; sets
+# fake_pid and wait_pid once the wait holds the pidfile.
+owned_wait() {
+  export ALFRED_WAKE_OWNER_COMM="$1"
+  fake_claude "$1" "$WAKE" wait
+  until_true 50 pidfile_set || return 1
+  wait_pid=$(cat "$STATE/alfred-wake.pid")
+}
+# orphan_wait — owned_wait, then SIGKILL the fake claude: the wait survives.
+orphan_wait() {
+  owned_wait fake-owner-a || return 1
+  kill -KILL "$fake_pid"
+  wait "$fake_pid" 2>/dev/null || true
+  until_true 30 gone "$fake_pid" || return 1
+  alive "$wait_pid"
+}
 no_leftovers() {
   [ ! -e "$STATE/alfred-wake.pid" ] &&
+    [ ! -e "$STATE/alfred-wake.owner" ] &&
     ! compgen -G "$STATE/run.*" > /dev/null &&
     ! compgen -G "$STATE/*.json.??????" > /dev/null
 }
@@ -323,6 +363,120 @@ holders_of() {
   [[ "$output" == *"armed:      yes (pid $a_pid"* ]]
 }
 
+# --- owner: status needs the Claude Code process that started the wait ------
+
+@test "wait records its owner" {
+  local name i=0 body own pid
+  mkdir -p "$BATS_TEST_TMPDIR/fake"
+  printf '#!/bin/bash\n"$@"\nrc=$?\nexit "$rc"\n' > "$BATS_TEST_TMPDIR/fake/wrap (y)"
+  chmod +x "$BATS_TEST_TMPDIR/fake/wrap (y)"
+  for name in "fake (x) claude" "claude-fake-long-name"; do
+    i=$((i + 1))
+    inbox
+    export ALFRED_WAKE_OWNER_COMM="$name"
+    fake_claude "$name" "$BATS_TEST_TMPDIR/fake/wrap (y)" "$WAKE" wait
+    until_true 50 pidfile_set
+    [ "$(cut -d' ' -f1 "$STATE/alfred-wake.owner")" = "$fake_pid" ]
+    [ "$(cut -d' ' -f2 "$STATE/alfred-wake.owner")" = "$(sed 's/.*) //' /proc/$fake_pid/stat | awk '{print $20}')" ]
+    inbox "m$i:bob"
+    until_true 100 gone "$fake_pid"
+    [ ! -e "$STATE/alfred-wake.owner" ]
+    no_leftovers
+  done
+  body=$(sed -n '/^take_over()/,/^}/p' "$WAKE")
+  own=$(printf '%s\n' "$body" | grep -n '> "$OWNER_FILE"' | tail -1 | cut -d: -f1)
+  pid=$(printf '%s\n' "$body" | grep -n '> "$PID_FILE"' | head -1 | cut -d: -f1)
+  [ -n "$own" ]
+  [ -n "$pid" ]
+  [ "$own" -lt "$pid" ]
+}
+
+@test "an orphaned wait is not armed" {
+  orphan_wait
+  export CLAUDE_CODE_SESSION_ID=dead-session
+  run "$WAKE" status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"armed:      no"*"is gone"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"pid $wait_pid"* ]] || { echo "$output"; return 1; }
+  alive "$wait_pid"
+}
+
+@test "a wait with a live owner is armed" {
+  owned_wait fake-owner-a
+  run "$WAKE" status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"armed:      yes (pid $wait_pid"* ]]
+}
+
+@test "a new wait replaces an orphan and takes over the owner" {
+  orphan_wait
+  local orphan="$wait_pid"
+  FAKE_OUT="$BATS_TEST_TMPDIR/b.out" fake_claude fake-owner-a "$WAKE" wait
+  until_true 50 pidfile_not "$orphan"
+  wait_pid=$(cat "$STATE/alfred-wake.pid")
+  reap "$orphan"
+  [ "$(cat "$BATS_TEST_TMPDIR/fake.out")" = "WAKE-STOPPED replaced by=$wait_pid" ] || { echo "orphan printed: $(cat "$BATS_TEST_TMPDIR/fake.out")"; false; }
+  [ "$(cut -d' ' -f1 "$STATE/alfred-wake.owner")" = "$fake_pid" ]
+  run "$WAKE" status
+  [ "$status" -eq 0 ]
+}
+
+@test "a reused owner pid with another start time is not an owner" {
+  owned_wait fake-owner-a
+  echo "$$ 1" > "$STATE/alfred-wake.owner"
+  alive "$$"
+  run "$WAKE" status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"armed:      no"*"is gone"* ]] || { echo "$output"; return 1; }
+}
+
+@test "no owner and no session id: no owner file, status as before" {
+  mkdir -p "$STATE"
+  echo "999999 1" > "$STATE/alfred-wake.owner"
+  start a wait
+  until_true 30 pidfile_is "$a_pid"
+  [ ! -e "$STATE/alfred-wake.owner" ]
+  run "$WAKE" status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"armed:      yes (pid $a_pid"* ]]
+}
+
+@test "no owner but a session id: owner unknown, status fails closed" {
+  export CLAUDE_CODE_SESSION_ID=sess-no-owner
+  start a wait
+  until_true 30 pidfile_is "$a_pid"
+  [ "$(cat "$STATE/alfred-wake.owner")" = "unknown" ]
+  run "$WAKE" status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"armed:      no"*"no owner"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"set ALFRED_WAKE_OWNER_COMM"* ]] || { echo "$output"; return 1; }
+  alive "$a_pid"
+}
+
+@test "status --json: an orphan or unknown owner is down" {
+  orphan_wait
+  run "$WAKE" status --json
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s' "$output" | jq -r .state)" = "down" ]
+  [ "$(printf '%s' "$output" | jq -r .armed)" = "false" ]
+  [ "$(printf '%s' "$output" | jq -r .pid)" = "null" ]
+  echo unknown > "$STATE/alfred-wake.owner"
+  run "$WAKE" status --json
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s' "$output" | jq -r .state)" = "down" ]
+  [ "$(printf '%s' "$output" | jq -r .armed)" = "false" ]
+  [ "$(printf '%s' "$output" | jq -r .pid)" = "null" ]
+}
+
+@test "status --json: handling survives a dead owner" {
+  orphan_wait
+  date +%s > "$STATE/last_wake_exit"
+  run "$WAKE" status --json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r .state)" = "handling" ]
+  [ "$(printf '%s' "$output" | jq -r .armed)" = "true" ]
+}
+
 # --- self-upgrade (ccplugin#107) ----------------------------------------------
 
 # fake_install <version>: an installed plugin whose alfred-wake reports itself.
@@ -346,13 +500,13 @@ EOF
   ln -s "$(readlink -f "$WAKE")" "$ALFRED_WAKE_BIN_DIR/alfred-wake"
   run "$ALFRED_WAKE_BIN_DIR/alfred-wake" wait 5
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.8.1"* ]]
+  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.9.0"* ]]
   [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-wake")" = "$BATS_TEST_TMPDIR/cache/9.9.0/bin/alfred-wake" ]
-  grep -q "upgrade: 1.8.1 -> 9.9.0" "$STATE/alfred-wake.log"
+  grep -q "upgrade: 1.9.0 -> 9.9.0" "$STATE/alfred-wake.log"
 }
 
 @test "an older or equal installed alfred-wake is not used" {
-  for v in 1.0.0 1.8.1; do
+  for v in 1.0.0 1.9.0; do
     fake_install "$v"
     run timeout 3 "$WAKE" wait
     [[ "$output" != *"ran $v"* ]]
@@ -379,7 +533,7 @@ EOF
 @test "--version prints the version" {
   run "$WAKE" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "alfred-wake 1.8.1" ]
+  [ "$output" = "alfred-wake 1.9.0" ]
 }
 
 # --- Stop hook: never end a turn with the bridge down -----------------------
@@ -468,6 +622,27 @@ session_hook() {  # session_hook <source> — run session-check.sh in a lead pro
       "$BATS_TEST_DIRNAME/../hooks/session-check.sh"
 }
 ctx_of() { printf '%s' "$1" | jq -r .hookSpecificOutput.additionalContext; }
+
+@test "session start with an orphaned wait: NOT running, relaunch, one nudge" {
+  fake_tmux
+  orphan_wait
+  export CLAUDE_CODE_SESSION_ID=dead-session
+  run session_hook resume
+  [ "$status" -eq 0 ]
+  [[ "$(ctx_of "$output")" == *"NOT running"* ]]
+  [[ "$(ctx_of "$output")" == *'Bash(command: "alfred-wake wait", run_in_background: true)'* ]]
+  until_true 30 test -s "$STUB_DIR/keys"
+  sleep 1
+  [ "$(grep -c 'substrate wake' "$STUB_DIR/keys")" -eq 1 ]
+}
+
+@test "stop hook blocks the stop when the wait is an orphan" {
+  orphan_wait
+  export CLAUDE_CODE_SESSION_ID=dead-session
+  run hook false
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r .decision)" = "block" ]
+}
 
 @test "unread prints the agent-messaging unread count" {
   inbox m1:alice m2:bob

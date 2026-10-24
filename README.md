@@ -158,8 +158,15 @@ catches deaf leads deterministically.
 
 ```bash
 alfred-wake check     # one dry-run pass: never writes cursors, explains itself on stderr
-alfred-wake status    # config + whether a wait/run process is alive (exit 0 = armed)
+alfred-wake status    # config + whether a wait/run process is alive (exit 0 = a live wait with a live owner, or one with no owner file: a human shell, or a wait from an older version)
 ```
+
+`status` means a live wait whose owner Claude Code process is also alive. A wait that
+survived a crash of its session (an orphan) is reported as not running, so the revived session
+launches its own. The one exception: a wait with no owner file (a human shell, or a wait from an
+older version) counts as running, as before. An orphan can still consume
+news before the revive (CCW-172 fixes that), so the unread count that SessionStart shows comes from
+the service, not from what the orphan already printed.
 
 `check` is safe to run at any time: it resolves config, proves auth against both
 sources, prints what it *would* have woken you with — and writes no cursor, so
@@ -174,9 +181,9 @@ it cannot swallow news that the running bridge should deliver.
 | `alfred-wake run [interval]` | Legacy watch loop for a `Monitor`. Default tick 20s (Buzz), agent-messaging every 60s with failure backoff to 600s |
 | `alfred-wake check` | One dry-run pass, diagnostics on stderr, exit 0 |
 | `alfred-wake install` | Symlink into `~/.local/bin` (override with `ALFRED_WAKE_BIN_DIR`) |
-| `alfred-wake status` | Print config; exit 0 only while a live `wait`/`run` process holds the pidfile |
+| `alfred-wake status` | Print config; exit 0 only while a live `wait`/`run` process holds the pidfile and the Claude Code process that started it (the owner, recorded in `alfred-wake.owner`) is also alive. An orphaned wait (owner gone) or one with no discoverable owner (while `CLAUDE_CODE_SESSION_ID` is set) prints `armed:      no` and exits 1 |
 | `alfred-wake --version` | Print the version |
-| `alfred-wake status --json` | Machine-readable state for probes: `{"armed", "state": "waiting"\|"handling"\|"down", "pid", "lastWakeExitAt", "lastWakeExitAgoSeconds", "graceSeconds", "version"}`. A lead whose `wait` exited with news (any WAKE line, WAKE-ERROR included) less than `ALFRED_WAKE_HANDLING_GRACE` s ago (default 600; a non-integer value falls back to 600), with no wait started since, is `handling` and counts as armed. Exit 0 when armed. The plain `status` exit code stays strict (a live wait only), because the hooks rely on it |
+| `alfred-wake status --json` | Machine-readable state for probes: `{"armed", "state": "waiting"\|"handling"\|"down", "pid", "lastWakeExitAt", "lastWakeExitAgoSeconds", "graceSeconds", "version"}`. A lead whose `wait` exited with news (any WAKE line, WAKE-ERROR included) less than `ALFRED_WAKE_HANDLING_GRACE` s ago (default 600; a non-integer value falls back to 600), with no wait started since, is `handling` and counts as armed, whatever happened to its owner. `waiting` requires a live wait with a live owner; an orphan or an unknown owner is `down`. Exit 0 when armed. The plain `status` exit code stays strict (a live wait with a live owner only), because the hooks rely on it |
 | `alfred-wake unread` | Print the agent-messaging unread count (one request; for the SessionStart check) |
 | `alfred-wake notify <to> <subject> <body>` | Send one agent-messaging message as this agent; exit 0 when accepted. For deterministic callers, e.g. the devbox boot reporting Remote Control off (alfred-devbox#70) |
 
@@ -229,6 +236,7 @@ Everything is env-driven; the defaults are correct for a standard devbox pod.
 | `ALFRED_WAKE_STOP_GRACE` | `5` | Seconds a new instance waits for the previous one to exit after SIGTERM before SIGKILL |
 | `ALFRED_WAKE_FAIL_THRESHOLD` | `5` | Consecutive failed passes before a source raises `WAKE-ERROR` |
 | `ALFRED_WAKE_STATE_DIR` | `/workspace/.alfred-wake`, else `$XDG_STATE_HOME/alfred-wake` | Where cursors live |
+| `ALFRED_WAKE_OWNER_COMM` | `claude` | The command name of the process that owns a wait (the nearest ancestor with this name, compared on its first 15 characters). Set it only when the harness binary has another name |
 | `ALFRED_WAKE_TZ` | `Europe/Amsterdam` | Timezone for `last=` timestamps |
 | `ALFRED_WAKE_BIN_DIR` | `$HOME/.local/bin` | Target of `alfred-wake install`, and the link self-upgrade repoints |
 | `ALFRED_WAKE_NO_UPGRADE` | — | `1` = never exec a newer installed alfred-wake |
@@ -249,6 +257,7 @@ Cursors on ephemeral storage mean a restarted lead replays its whole history as
 | `buzz_identity.json` | Own Buzz pubkey (used to filter out your own posts) |
 | `failures.json` | Per-source consecutive-failure count + last-reported timestamp |
 | `armed` | Touched every pass by `run`; `status` and `/alfred-agent:check-messages` read its mtime |
+| `alfred-wake.owner` | The Claude Code process that started the running wait: `<pid> <starttime>`, or `unknown`. Removed with the pidfile. `unknown` means owner discovery failed (no ancestor has the owner name), not that the owner died. The rules are in the header of `bin/alfred-wake` |
 | `.initialized` | Marker — its absence means "first run, seed only, don't replay" |
 | `alfred-wake.log` | One line per pass: timestamp + counts only, never bodies, never secrets. Rotated at ~1 MB |
 
@@ -304,7 +313,8 @@ A watcher is a background task of the session that started it, so it dies with t
 bridge stayed down for 80 minutes after a session restart. `hooks/session-check.sh` runs at every
 session start (`startup`, `resume`, `clear`, `compact`):
 1. It checks the watcher with `alfred-wake status`, or with `ALFRED_WATCHER_STATUS_CMD` on a
-   session with another bridge, such as the hub's `hub-wake-bridge status`. Both watcher
+   session with another bridge, such as the hub's `hub-wake-bridge status`. A wait whose owner
+   Claude Code process is gone (an orphan after a crash) counts as not running. Both watcher
    variables are shell command lines, run with `bash -c`. It also gets the unread count
    from `alfred-wake unread`.
 2. It adds both to the session context. When the watcher is down or mail is waiting, it adds:
@@ -345,7 +355,7 @@ how the rules reach a session. The doctrines are owned in `Screenfields/alfred-p
 A lead relaunches `alfred-wake wait` after every wake. If a turn ends without that, the session
 stays up but deaf. This was seen live on screenfields-ai on 2026-10-14: about three hours with no
 bridge, until a nudge. The plugin therefore ships a `Stop` check, `hooks/bridge-check.sh` (called
-through `hooks/stop.sh`, see the loop check below), which runs `alfred-wake status` when a turn ends. That is a pid check, with no network and no model call.
+through `hooks/stop.sh`, see the loop check below), which runs `alfred-wake status` when a turn ends. That is a pid and owner check, with no network and no model call.
 - **Bridge down:** it blocks the stop once with "relaunch `alfred-wake wait`", so the same turn re-arms it.
 - **Still down after that relaunch:** it lets the stop through with a visible `WARNING` instead of blocking again, so it never loops.
 
@@ -844,7 +854,8 @@ In multi-agent project setups, only the project's lead agent typically gets a me
 | `/plugin install` errors with `terminal prompts disabled` (HTTPS) | Repo private / no credential helper | The marketplace + plugin repos are public; verify you're using the HTTPS URL form in step 3 |
 | `MCP server failed to connect` | Required env var missing or empty | `/mcp` to see error; check env vars per step 1 |
 | Messages reach the service but you don't receive them | `X-Agent-ID` header mismatch | Verify your `AGENT_ID` env matches what senders address |
-| `no wake bridge running` from `/alfred-agent:check-messages` | No live `alfred-wake wait` process for this state dir | Start one: `Bash(command: "alfred-wake wait", run_in_background: true)`; `alfred-wake status` shows the pidfile PID and last-pass age |
+| `no wake bridge running` from `/alfred-agent:check-messages` | No live `alfred-wake wait` process, with a live owner, for this state dir | Start one: `Bash(command: "alfred-wake wait", run_in_background: true)`; `alfred-wake status` shows the pidfile PID and last-pass age |
+| `alfred-wake status` prints `armed:      no … no owner could be found` while a wait is alive | `CLAUDE_CODE_SESSION_ID` is set but no ancestor of the wait has the owner name (`claude` by default), so `alfred-wake.owner` holds `unknown` | Set `ALFRED_WAKE_OWNER_COMM` to your Claude Code binary's process name (see `ps -o comm= -p <pid of the session>`). It must be in the environment of the process that runs `alfred-wake wait`, for example exported in the shell profile, not only set in an interactive shell. Then relaunch `alfred-wake wait` |
 | Wake bridge silent while messages arrive | Wrong or missing `AGENT_MESSAGING_TOKEN` / `AGENT_ID` | `alfred-wake check` — it prints the resolved URL, auth mode and agent id, and any `WAKE-ERROR` reason |
 | Buzz never wakes you | No buzz-mcp sidecar in the pod, or no Buzz identity | `alfred-wake check` says `buzz: no sidecar …`. Expected for leads without a Buzz identity — it is not an error |
 
