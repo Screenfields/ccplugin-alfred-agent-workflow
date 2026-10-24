@@ -131,8 +131,8 @@ Invariants to preserve when editing it:
   `run.<pid>` dir under the state dir that is removed on every exit path.
 - **`status` means a live wait whose owner Claude Code process is also alive.** Never go back to judging "armed" from
   marker-file freshness: a marker stays fresh for minutes after the loop died.
-  One exception: a wait with no recorded owner and no session id counts as
-  running, as before.
+  One exception: a wait with no owner file (a human shell, or a wait from an
+  older version) counts as running, as before.
 - **agent-messaging is read by cursor, not by window.** `get_messages(since,
   include_body:false)` returns exactly what arrived after the stored
   `next_cursor`; `cursor_reset` reseats without replaying. Never go back to
