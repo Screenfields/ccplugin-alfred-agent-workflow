@@ -21,6 +21,7 @@
     "incident-reviewer": {"tier": "strong", "effort": "highest"}
   },
   "waiting-label": "status:waiting-on-owner",
+  "parked-labels": ["status:waiting-on-owner", "status:waiting-on-peer"],
   "ready-state": "status:ready",
   "workable-states": [
     "status:ready",
@@ -36,5 +37,6 @@
   "chase-interval-minutes": 10,
   "chase-max-tries": 3,
   "loop-check-max-blocks-per-hour": 6,
-  "deviation-min-seconds": 60
+  "deviation-min-seconds": 60,
+  "owner-note-max-age-minutes": 60
 }

@@ -42,9 +42,14 @@ names_in() {
   [ "$("$CFG" get waiting-label)" = "status:waiting-on-owner" ]
 }
 
+@test "parked-labels resolves" {
+  "$CFG" get parked-labels | jq -e 'index("status:waiting-on-peer") and index("status:waiting-on-owner")'
+  [ "$("$CFG" get waiting-label)" = "status:waiting-on-owner" ]
+}
+
 @test "the loop-check names resolve" {
   for n in ready-state workable-states loop-check-enabled loop-check-timeout-seconds loop-check-deadline-seconds \
-           chase-interval-minutes chase-max-tries loop-check-max-blocks-per-hour; do
+           chase-interval-minutes chase-max-tries loop-check-max-blocks-per-hour parked-labels owner-note-max-age-minutes; do
     run "$CFG" get "$n"
     [ "$status" -eq 0 ] || { echo "no $n"; return 1; }
   done

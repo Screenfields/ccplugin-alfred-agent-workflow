@@ -400,16 +400,18 @@ to the `model` and `effort` of a specialist as described under "Specialists (`ag
 
 A lead keeps working while it has actionable items or unread direct messages. At the end of a
 turn `bin/alfred-loop-check --hook` decides, with `gh` and one inbox call and no model call,
-whether to block the stop once. Items waiting on the owner never hold the loop open.
+whether to block the stop once. Items parked as waiting on the owner or on a peer never hold the loop open.
 
 - **Actionable set:** open issues in the lead's repos that carry a label in `workable-states` and
-  not the `waiting-label` (`status:waiting-on-owner`). Once the not-ready items number at least
+  no parked label: the `waiting-label` (`status:waiting-on-owner`) or a label of `parked-labels`
+  (`status:waiting-on-owner` and `status:waiting-on-peer`). Once the not-ready items number at least
   `wip-limit` (counted over all repos together), only they count; below it the ready ones count
   too. An unread **direct** agent-messaging message counts as well (`alfred-wake unread --direct`);
   topic posts do not. `worker-limit` is not used: the hook cannot see a builder bound.
-- **Parking:** add the `waiting-label` and comment the question. The item keeps its state label.
-  `/alfred-agent:waiting` lists these items and, once the owner answers, records the decision and
-  removes the label.
+- **Parking:** add a label of `parked-labels` (`status:waiting-on-owner`, or `status:waiting-on-peer`
+  for a wait on another agent) and comment what the item waits for. The item keeps its state label.
+  The block reason names every parked label. `/alfred-agent:waiting` lists the items parked with
+  the `waiting-label` and, once the owner answers, records the decision and removes the label.
 - **`repos` key:** `.alfred/config.json` takes `{"agent_id": "...", "repos": ["owner/name", ...]}`.
   Without `repos` the check uses the working directory's `origin` remote. The label names must
   exist in each repo; a repo that has open issues but none with a state or waiting label gives a
@@ -423,7 +425,9 @@ whether to block the stop once. Items waiting on the owner never hold the loop o
   Issue titles in the block reason are untrusted: control characters, backticks and quotes are
   removed and each is cut to about 100 characters, and the list is labelled as data.
   If the state cannot be written, the stop is allowed with a warning.
-  A stop that is allowed because nothing changed prints a warning and appends one line to
+  A stop that is allowed because nothing changed (or because the block cap is reached) prints
+  nothing to the owner: the message is stored for the next prompt (see "Owner present" below), and
+  one line goes to stderr and to
   `${CLAUDE_CONFIG_DIR:-~/.claude}/alfred-loop/friction.jsonl` (local only).
 - **Chase, then escalate:** an item that is still unchanged after `chase-max-tries` blocks makes
   the block reason say to escalate to the hub and record it on the item. The count resets when the
@@ -432,12 +436,30 @@ whether to block the stop once. Items waiting on the owner never hold the loop o
   started with the owner. In an interactive session (`CLAUDE_CODE_ENTRYPOINT` is `cli`, `claude-vscode` or
   `claude-desktop`; anything else, or unset, is a machine), a prompt without a machine prefix
   (`<task-notification>`, `<cross-session-message`, `[substrate wake]`, `<scheduled-task`) is an
-  owner turn. The next stop then only adds a one-line note and consumes the marker, so a later
-  stop without a new prompt blocks normally. Unknown counts as a machine turn.
+  owner turn. The next stop then never blocks: it consumes the marker and stores a note instead, so
+  a later stop without a new prompt blocks normally. Unknown counts as a machine turn.
+- **Notes go to the model, not to the owner:** a Stop hook that does not block has no channel to
+  the model, and a `systemMessage` shows on the owner's screen only. So the three informational
+  messages (the owner-turn note, "no progress since the last block", "block cap reached") are
+  stored in the state file as `pending_note`, and the next `note-turn` of the same session prints
+  it once as `UserPromptSubmit` `additionalContext`, whether that prompt is an owner or a machine
+  prompt. The text is `open work: <refs>[; <d> unread direct message(s)]`, or the same after
+  `no progress since the last block, stop allowed. Actionable work remains: ` or
+  `block cap reached for this session, stop allowed. Actionable work remains: `. `<refs>` are
+  `<repo>#<number>` joined by `, ` (`none` when empty), at most 20 and then `, and <N> more`, with
+  no issue titles. The context starts with the line
+  `alfred-loop-check note (from the previous turn, <n> min ago, may be out of date):`. There is one
+  slot: a newer note overwrites the older, a block drops it, and a note never leaves its session.
+  A note older than `owner-note-max-age-minutes` (60; also used when the thresholds file is
+  unreadable) is dropped at the next prompt. Without a next prompt the note stays in the state file
+  until the one-day prune. Failures stay on the owner's screen as a `systemMessage`: a failed
+  source, inbox, `gh` or binary, config or thresholds, bad hook input, no session id, no stored
+  state for the chain, `state not written` (a failed note write included) and every bridge warning.
 - **Cap:** at most `loop-check-max-blocks-per-hour` blocks per session.
 - **Kill switch:** `ALFRED_LOOP_CHECK=0` or `"loop-check-enabled": false` in the thresholds.
 - **Silent** without `.alfred/config.json`, for the `hub` and `alfred` ids under the plugin entry,
-  and for `ALFRED_ROLE=worker`.
+  and for `ALFRED_ROLE=worker`. `note-turn` delivers a note only to a session that stored one, so
+  the hub and Alfred, which are silent under the plugin entry, store none.
 
 ### One Stop entry
 
@@ -465,16 +487,18 @@ Printed on stderr as `alfred-loop-check: <text>` (and, where the stop decision c
 `<repo>: 500 open items, later ones are not seen` · `no status labels in <repo>` ·
 `no repos to check (no repos key in the config, no origin remote)` · `inbox unreachable (...)` ·
 `inbox scan partial: ...` · `all sources failed, stop allowed` · `some sources failed, stop allowed` ·
-`block cap reached, stop allowed` · `no state for this chain, stop allowed` ·
-`no progress since the last block, stop allowed`. From `stop.sh`: `<bridge|loop> part gave unusable output, ignored`
-and `<bridge|loop> part timed out, stop allowed`.
+`no state for this chain, stop allowed` · `state not written, stop allowed` ·
+`state not written, the note is lost`. Stderr and the friction file only, never the owner's screen:
+`block cap reached, stop allowed` and `no progress since the last block, stop allowed`. From `stop.sh`:
+`<bridge|loop> part gave unusable output, ignored` and `<bridge|loop> part timed out, stop allowed`.
 
 ### Known false blocks
 
 - A change from outside the session (a teammate moves or opens an item) changes the signature, so
   the next stop can block once for work the lead did not cause.
-- An item that waits on someone without the `waiting-label` (a hub gate, a background builder)
-  stays actionable and is chased every `chase-interval-minutes` until it is parked or escalated.
+- An item that waits on a peer parks with `status:waiting-on-peer` and stops counting. An item that
+  waits on time or on a running builder has no parked label, stays actionable and is chased every
+  `chase-interval-minutes` until it is parked or escalated.
 - With several repos, when one repo call fails and no state exists yet, the set from the repos
   that answered can still block.
 
@@ -492,7 +516,10 @@ The script runs outside the plugin's hook entry with an explicit config path, th
 The hub and Alfred keep their own actionable sets by passing their own `workable-states` and
 `waiting-label` in their own thresholds file (required keys: `waiting-label`, `workable-states`,
 `wip-limit`; optional: `ready-state`, `loop-check-timeout-seconds`, `chase-interval-minutes`,
-`chase-max-tries`, `loop-check-max-blocks-per-hour`, `loop-check-enabled`). From another Stop setup:
+`chase-max-tries`, `loop-check-max-blocks-per-hour`, `loop-check-enabled`, `parked-labels` (a list of
+strings, parked next to the `waiting-label`; without it only the `waiting-label` parks) and
+`owner-note-max-age-minutes` (read by `note-turn`)). `note-turn` must stay on `UserPromptSubmit` in
+any Stop setup that uses the check, or the stored notes are never delivered. From another Stop setup:
 
 ```bash
 alfred-loop-check --level hub --config /path/config.json --thresholds /path/thresholds.json --hook
