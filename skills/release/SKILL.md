@@ -213,17 +213,41 @@ Where `{pr-number}` is the merged PR number found in Step 1, or `upstream merged
 
 ## Step 6 — Push and open PR
 
+**Title.** The pin PR title starts with the ID of the upstream item, found in this order:
+
+1. The upstream PR title's prefix matching `^[A-Z]{2,5}-[0-9]+: `.
+2. Else the upstream PR body's `Closes #N`, written `<upstream CODE>-N`, where the upstream CODE is the lookup of the upstream repo.
+3. Else (a cache-only bump with no item) the old title `alfred-agent: bump pin ...`, which is accepted as a CCW-140 warning.
+
+Example: `CCW-106: bump alfred-agent pin 2.29.0 -> 2.30.0`. The commit message in Step 5 is unchanged, because commits are not title-checked.
+
+```bash
+CL=$(command -v alfred-code-lookup || echo "${CLAUDE_PLUGIN_ROOT:-}/bin/alfred-code-lookup")
+CODE=$("$CL" {upstream owner}/{upstream repo}); RC=$?
+```
+
+CODE comes from alfred-code-lookup `<owner/repo>`, and here `<owner/repo>` is the upstream repo. The `code` in `.alfred/config.json` is this repo's own code, not the upstream's, so it never applies in this step. A code is never taken from memory. Branch on RC. A `CL` that is not executable, or any RC other than 0 or 1, counts as exit 2. Outcomes:
+
+- exit 0 (RC=0): use the code.
+- exit 1 (RC=1, no code, for example an ops repo): title without a prefix, plus one line in the PR body, "repo has no registry code".
+- exit 2 (any other RC, registry failure): open the PR without a prefix and add the body line "registry unreachable; title not coded". Do not substitute the config `code`.
+
+For a cache-only bump the lookup is not needed.
+
 ```bash
 cd "$CATALOG_DIR"
 # The lead role pushes and opens the PR (the review identity must not be the author or last pusher).
 command -v switch-role >/dev/null 2>&1 && switch-role lead
 git push -u origin "$BRANCH"
 
+# Coded title: <CODE>-<n> is the upstream item found above.
+# Cache-only bump with no item: the title is "{plugin-name}: bump pin {old-version} -> {new-version}"
+# instead (accepted as a CCW-140 warning).
 gh pr create \
   --repo Screenfields/alfred-cc-tools \
   --base main \
   --head "$BRANCH" \
-  --title "{plugin-name}: bump pin {old-version} → {new-version}" \
+  --title "<CODE>-<n>: bump {plugin-name} pin {old-version} -> {new-version}" \
   --body "$(cat <<'EOF'
 Bump {plugin-name} from {old-version} to {new-version}.
 

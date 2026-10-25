@@ -37,9 +37,22 @@ gh label create "quick-log" --color "#0075ca" --description "Unrefined quick-log
 ## Step 3 — Create the issue
 
 ```bash
-gh issue create \
+CL=$(command -v alfred-code-lookup || echo "${CLAUDE_PLUGIN_ROOT:-}/bin/alfred-code-lookup")
+CODE=$("$CL" {owner/repo}); RC=$?
+```
+
+CODE comes from alfred-code-lookup `<owner/repo>`; the `code` in `.alfred/config.json` is the fallback for the session's own repo only. A code is never taken from memory. Branch on RC. A `CL` that is not executable, or any RC other than 0 or 1, counts as exit 2. Outcomes:
+
+- exit 0 (RC=0): use the code.
+- exit 1 (RC=1, no code, for example an ops repo): title without a prefix, plus one line in the PR or issue body, "repo has no registry code".
+- exit 2 (any other RC, registry failure): use the config `code` if present for the own repo, otherwise no prefix plus the body line "registry unreachable; title not coded".
+
+An issue title starts with its own ID, which exists only after creation. Create the issue with a plain title and capture the URL, then edit the title.
+
+```bash
+URL=$(gh issue create \
   --repo {owner/repo} \
-  --title "{one-line title}" \
+  --title "<title>" \
   --label "quick-log" \
   --body "$(cat <<'EOF'
 ## Quick log
@@ -53,8 +66,16 @@ Logged during: {current task or PR description — one line}
 ---
 *Quick-log: refine acceptance criteria at pickup time.*
 EOF
-)"
+)")
 ```
+
+Set the coded title. `<n>` is the last path segment of the URL that the create call prints (`${URL##*/}`):
+
+```bash
+gh issue edit <n> --title "<CODE>-<n>: <title>" --repo {owner/repo}
+```
+
+With exit 1 or 2 from the lookup, skip the edit and put the body line from the outcomes above into the issue. The create-then-edit step briefly triggers a CCW-140 warning (the title check sees the uncoded title first); that is expected.
 
 ## Step 4 — Report and continue
 

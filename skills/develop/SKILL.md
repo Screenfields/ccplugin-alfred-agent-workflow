@@ -90,9 +90,23 @@ Use the `/commit` skill or follow commit conventions:
 - Stage specific files (never `git add -A`)
 - Imperative mood, max 72 chars
 - No AI/Claude/Anthropic references
-- Reference the issue: "fix #N" or "closes #N" in the body
+- Reference the issue: "fix #N" or "closes #N" in the body; when the commit belongs to an issue, the subject line is `<CODE>-<n>: <what changed>` (see `git-commit`)
 
 ## Step 6: Push and create PR
+
+**Title.** A PR title starts with the ID of the issue it implements, `<CODE>-<n>: <title>`, where `<n>` is the implemented issue (not the PR's own number, for example `CCW-128: ...`). The PR body keeps `Closes #{N}`.
+
+```bash
+CL=$(command -v alfred-code-lookup || echo "${CLAUDE_PLUGIN_ROOT:-}/bin/alfred-code-lookup")
+CODE=$("$CL" {owner}/{repo}); RC=$?
+```
+
+CODE comes from alfred-code-lookup `<owner/repo>`; the `code` in `.alfred/config.json` is the fallback for the session's own repo only. A code is never taken from memory. Branch on RC. A `CL` that is not executable, or any RC other than 0 or 1, counts as exit 2. Outcomes:
+
+- exit 0 (RC=0): use the code.
+- exit 1 (RC=1, no code, for example an ops repo): title without a prefix, plus one line in the PR or issue body, "repo has no registry code".
+- exit 2 (any other RC, registry failure): use the config `code` if present for the own repo, otherwise no prefix plus the body line "registry unreachable; title not coded".
+
 
 **Workers only commit, with any author. Every push, and the PR creation, uses the lead role.** The review identity (the `build`, `spec` and `review` roles are one GitHub login) reviews the PR, and GitHub does not count an approval from the PR's author or its last pusher. A push made with `build` would make the reviewer the last pusher and no approval could count.
 
@@ -100,7 +114,7 @@ Use the `/commit` skill or follow commit conventions:
 ```bash
 switch-role lead
 git -C <path> push -u origin feature/issue-{N}-{short-description}
-gh pr create --head feature/issue-{N}-{short-description} --title "{short title}" --body "Closes #{N}
+gh pr create --head feature/issue-{N}-{short-description} --title "<CODE>-<n>: <title>" --body "Closes #{N}
 
 ## Changes
 - {what changed}
@@ -112,7 +126,7 @@ gh pr create --head feature/issue-{N}-{short-description} --title "{short title}
 **If single-role devbox** (`switch-role` is not installed):
 ```bash
 git -C <path> push -u origin feature/issue-{N}-{short-description}
-gh pr create --head feature/issue-{N}-{short-description} --title "{short title}" --body "Closes #{N}
+gh pr create --head feature/issue-{N}-{short-description} --title "<CODE>-<n>: <title>" --body "Closes #{N}
 
 ## Changes
 - {what changed}
@@ -269,7 +283,7 @@ git worktree add <path> {branch}   # skip when the branch already has a worktree
 git -C <path> pull
 git -C <path> commit --allow-empty -m "<CODE>-<n>: lead re-push for review"
 git -C <path> push
-gh pr create --title "{same title}" --body "{same body}
+gh pr create --title "<CODE>-<n>: <title>" --body "{same body}
 
 Replaces #{old}."
 gh pr comment {old} --body "Recreated as #{new}"

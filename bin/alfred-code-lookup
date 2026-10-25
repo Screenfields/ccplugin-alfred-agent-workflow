@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# alfred-code-lookup — print a repo's current project code from the project
+# manager registry (CCW-122, AP-ADR0021, AP-1232).
+#
+#   alfred-code-lookup <owner/repo | git remote URL>
+#
+# The input is owner/repo or a git remote URL (https, ssh, or https with an
+# embedded token), parsed like repos_list in alfred-loop-check. Matching is
+# case-insensitive (the registry is lowercase).
+#
+# Registry: GET $PROJECT_MANAGER_URL/api/codes/export (default
+# https://project-manager.screenfields.net), 4 s limit enforced here. PM_TOKEN_RO,
+# when set, goes as a bearer header through a mode-600 header file, never argv.
+#
+# Exit 0: the code on stdout. A live row wins (latest assignedAt when several);
+#         a row with aliasOf is the successor of a retired code and counts.
+#         A repo with only retired rows resolves through the chain of live
+#         rows whose aliasOf names the retired code.
+# Exit 1: no current code. Retired with no successor ("repo retired; no
+#         current code") or not in the registry ("no code registered for X").
+# Exit 2: registry failure (unreachable, slow, 401/403, 5xx, not JSON) or bad
+#         input. Every non-zero exit writes exactly one line on stderr.
+set -u
+
+fail() { echo "$2" >&2; exit "$1"; }
+
+if [ $# -ne 1 ] || [ -z "$1" ]; then fail 2 "usage: alfred-code-lookup <owner/repo | git remote URL>"; fi
+in="$1"
+if printf '%s' "$in" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+  repo="$in"
+else
+  repo=$(printf '%s\n' "$in" \
+    | sed -nE 's#^(git@github\.com:|https?://([^@/]*@)?github\.com/|ssh://git@github\.com/)([^/]+/[^/]+)$#\3#p')
+fi
+repo="${repo%.git}"
+printf '%s' "$repo" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$' \
+  || fail 2 "cannot read owner/repo from the input"
+
+command -v jq >/dev/null 2>&1 || fail 2 "jq not found"
+command -v curl >/dev/null 2>&1 || fail 2 "curl not found"
+
+umask 077
+tmp=$(mktemp -d) || fail 2 "cannot create a temp dir"
+trap 'rm -rf "$tmp"' EXIT
+
+base="${PROJECT_MANAGER_URL:-https://project-manager.screenfields.net}"
+url="${base%/}/api/codes/export"
+shown=$(printf '%s' "$url" | sed -E 's#//[^@/]*@#//#')   # never echo userinfo
+hdr=()
+if [ -n "${PM_TOKEN_RO:-}" ]; then
+  printf 'Authorization: Bearer %s\n' "$PM_TOKEN_RO" > "$tmp/hdr"
+  hdr=(-H "@$tmp/hdr")
+fi
+
+http=$(timeout -k 1 4 curl -s --max-time 4 -o "$tmp/body" -w '%{http_code}' "${hdr[@]}" "$url" 2>/dev/null)
+rc=$?
+case "$rc" in
+  0) ;;
+  124|137) fail 2 "registry timed out after 4 s" ;;
+  *) fail 2 "registry unreachable ($shown)" ;;
+esac
+case "$http" in
+  200) ;;
+  401|403)
+    if [ -z "${PM_TOKEN_RO:-}" ]; then fail 2 "registry refused (HTTP $http); set PM_TOKEN_RO"; fi
+    fail 2 "registry refused (HTTP $http)" ;;
+  *) fail 2 "registry error (HTTP $http)" ;;
+esac
+
+res=$(jq -r --arg repo "$repo" '
+  def live: ((.retiredAt // "") == "");
+  def latest: sort_by(.assignedAt // "") | last;
+  def out($r): if ($r.code | type) == "string" and ($r.code | test("\\A[A-Z][A-Z0-9]{1,5}\\z"))
+               then "LIVE\t" + $r.code else "BADCODE" end;
+  .codes as $all
+  | if ($all | type) != "array" then "BAD"
+    else
+      ($all | map(select((.repo // "" | ascii_downcase) == ($repo | ascii_downcase)))) as $mine
+      | def succ($c; $d):
+          if $d > 20 then empty
+          else $all[] | select((.aliasOf // "" | ascii_downcase) == ($c | ascii_downcase)) as $r
+               | if ($r | live) then $r else succ($r.code; $d + 1) end
+          end;
+        if ($mine | length) == 0 then "NONE"
+        elif ($mine | map(select(live)) | length) > 0 then out($mine | map(select(live)) | latest)
+        else
+          ([$mine[] | succ(.code; 0)] ) as $s
+          | if ($s | length) > 0 then out($s | latest) else "RETIRED" end
+        end
+    end' "$tmp/body" 2>/dev/null) || fail 2 "registry reply is not valid JSON"
+
+case "$res" in
+  LIVE*) printf '%s\n' "${res#LIVE	}"; exit 0 ;;
+  BADCODE) fail 2 "registry reply has an invalid code" ;;
+  RETIRED) fail 1 "repo retired; no current code" ;;
+  NONE) fail 1 "no code registered for $repo" ;;
+  *) fail 2 "registry reply has no codes list" ;;
+esac

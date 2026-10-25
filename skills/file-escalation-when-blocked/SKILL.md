@@ -30,12 +30,28 @@ If the `Suggested actor` is upstream in the blocking chain, do NOT file a `level
 Create the issue in the **source repo** (same repo as the blocked issue):
 
 ```bash
-gh issue create \
+CL=$(command -v alfred-code-lookup || echo "${CLAUDE_PLUGIN_ROOT:-}/bin/alfred-code-lookup")
+CODE=$("$CL" {owner}/{repo}); RC=$?
+```
+
+CODE comes from alfred-code-lookup `<owner/repo>`; the `code` in `.alfred/config.json` is the fallback for the session's own repo only. A code is never taken from memory. Branch on RC. A `CL` that is not executable, or any RC other than 0 or 1, counts as exit 2. Outcomes:
+
+- exit 0 (RC=0): use the code.
+- exit 1 (RC=1, no code, for example an ops repo): title without a prefix, plus one line in the PR or issue body, "repo has no registry code".
+- exit 2 (any other RC, registry failure): use the config `code` if present for the own repo, otherwise no prefix plus the body line "registry unreachable; title not coded".
+
+An issue title starts with its own ID, which exists only after creation. Create the issue with the `Escalation: ...` title and capture the URL, then edit the title:
+
+```bash
+URL=$(gh issue create \
   --repo {owner}/{repo} \
   --title "Escalation: {one-line description of block}" \
   --label "escalation,level:1,urgency:p3" \
-  --body "$(cat /tmp/escalation-body.md)"
+  --body "$(cat /tmp/escalation-body.md)")
+gh issue edit <n> --title "<CODE>-<n>: Escalation: {one-line description of block}" --repo {owner}/{repo}
 ```
+
+`<n>` is the last path segment of the URL that the create call prints (`${URL##*/}`). With exit 1 or 2 from the lookup, skip the edit and put the body line from the outcomes above into the issue body. The create-then-edit step briefly triggers a CCW-140 warning (the title check sees the uncoded title first); that is expected.
 
 **Body format (escalation-schema: v1):**
 

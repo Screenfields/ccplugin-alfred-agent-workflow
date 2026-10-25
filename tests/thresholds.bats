@@ -13,10 +13,12 @@ setup() {
 }
 
 # literals_in <file> — digits or % left after removing the allowed references
-# (AP-ADRnnnn, AP-nnnn, AP#nnnn, doctrine NN). The frontmatter is not text.
+# (AP-ADRnnnn, AP-nnnn, AP#nnnn, doctrine NN, and, since CCW-122, example item
+# and PR IDs like CCW-139 and CCW#136, "PR #nnn" and "exit N" before punctuation or line end). The frontmatter
+# is not text.
 literals_in() {
   awk '/^---$/ && !seen {inside = !inside; if (!inside) seen = 1; next} !inside' "$1" \
-    | sed -E 's/AP-ADR[0-9]{4}//g; s/AP-[0-9]+//g; s/AP#[0-9]+//g; s/[Dd]octrines? [0-9]+//g' \
+    | sed -E 's/AP-ADR[0-9]{4}//g; s/AP-[0-9]+//g; s/AP#[0-9]+//g; s/[Dd]octrines? [0-9]+//g; s/\b(CC|CCW|CCC|AP)-[0-9]+\b//g; s/\b(CC|CCW|CCC|AP)#[0-9]+\b//g; s/PR #[0-9]{3,}\b//g; s/exit [0-9]+ ?([[:punct:]]|$)/\1/g' \
     | grep -nE '[0-9%]' || true
 }
 
@@ -95,6 +97,16 @@ names_in() {
   [ -n "$(literals_in "$BATS_TEST_TMPDIR/a.md")" ]
   [ -n "$(literals_in "$BATS_TEST_TMPDIR/b.md")" ]
   [ -z "$(literals_in "$BATS_TEST_TMPDIR/c.md")" ]
+  printf 'Title CCW-139: x, see CCW#136, PR #136, exit 2.\n' > "$BATS_TEST_TMPDIR/d.md"
+  printf 'Title CCW-139: x, stop after 3 rounds.\n' > "$BATS_TEST_TMPDIR/e.md"
+  [ -z "$(literals_in "$BATS_TEST_TMPDIR/d.md")" ]
+  [ -n "$(literals_in "$BATS_TEST_TMPDIR/e.md")" ]
+  printf 'If exit 1 (no code): x.\nAfter exit 2\n' > "$BATS_TEST_TMPDIR/f.md"
+  [ -z "$(literals_in "$BATS_TEST_TMPDIR/f.md")" ]
+  for bad in 'MAX-3 rounds' 'NOTE#5 limit' 'stop at PR #3' 'exit 2 times'; do
+    printf '%s\n' "$bad" > "$BATS_TEST_TMPDIR/g.md"
+    [ -n "$(literals_in "$BATS_TEST_TMPDIR/g.md")" ] || { echo "not caught: $bad"; return 1; }
+  done
 }
 
 @test "every threshold name used in the new texts resolves in the config (AC 3)" {
