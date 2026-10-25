@@ -103,6 +103,7 @@ twentyfive() {
   [[ "$reason" == *"Continue with the next one"* ]]
   [[ "$reason" == *"status:waiting-on-owner"* && "$reason" == *"status:waiting-on-peer"* ]]
   [[ "$reason" == *"comment what it waits for"* ]]
+  [[ "$reason" == *"not on a worker you started"* ]]
   [[ "$reason" == *"keep its state label (it holds the place of the item)"* ]]
 }
 
