@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
-# hooks/reply-timestamp.sh and lib/owner-turn.sh (CCW-141): the Europe/Amsterdam
-# time line injected on owner prompts. `date` is replaced by a fake on PATH
+# hooks/reply-timestamp.sh, lib/reply-time.sh and lib/owner-turn.sh (CCW-141,
+# CCW-180): the Europe/Amsterdam time line injected on every prompt. `date` is replaced by a fake on PATH
 # (FAKE_DATE is what it prints for the TZ format). No network, no model call.
 # shellcheck disable=SC2154  # $stderr is set by `run --separate-stderr`
 
@@ -34,10 +34,10 @@ silent() { [ "$status" -eq 0 ]; [ -z "$output" ]; }
 line_is() {
   [ "$status" -eq 0 ]
   [ "$(jq -r '.hookSpecificOutput.hookEventName' <<< "$output")" = "UserPromptSubmit" ]
-  [ "$(jq -r '.hookSpecificOutput.additionalContext' <<< "$output")" = "Owner prompt received at _[$1]_. Start your reply with this time line; if the turn runs longer than a few minutes, use a fresh TZ=Europe/Amsterdam time instead." ]
+  [ "$(jq -r '.hookSpecificOutput.additionalContext' <<< "$output")" = "Time now _[$1]_. Start your reply with this time line; if the turn runs longer than a few minutes, use a fresh TZ=Europe/Amsterdam time instead." ]
 }
 
-# --- AC 1: an owner prompt gets the line ---------------------------------------------------------------
+# --- AC 1: every non-worker prompt gets the line ---------------------------------------------------------------
 
 @test "owner prompt, source user: the line with the CEST time" {
   hook "$(prompt_json "please look" user)"
@@ -96,66 +96,83 @@ line_is() {
   silent
 }
 
-# --- AC 2: no line on machine turns --------------------------------------------------------------------
+# --- AC 1 (continued): machine turns get the line too -------------------------------------------------
 
-@test "sdk-cli entrypoint: no output" {
+@test "sdk-cli entrypoint: the line" {
   CLAUDE_CODE_ENTRYPOINT=sdk-cli hook "$(prompt_json "hello" user)"
-  silent
+  line_is "2026-10-22 18:40 CEST"
 }
 
-@test "unset entrypoint: no output" {
+@test "unset entrypoint: the line" {
   unset CLAUDE_CODE_ENTRYPOINT
   hook "$(prompt_json "hello" user)"
-  silent
+  line_is "2026-10-22 18:40 CEST"
 }
 
-@test "source system: no output" {
-  hook "$(prompt_json "hello" system)"; silent
+@test "source system, loop_wakeup, schedule_wakeup, poll_event: the line" {
+  for src in system loop_wakeup schedule_wakeup poll_event; do
+    echo "$src"
+    hook "$(prompt_json "hello" "$src")"
+    line_is "2026-10-22 18:40 CEST"
+  done
 }
 
-@test "source loop_wakeup: no output" {
-  hook "$(prompt_json "hello" loop_wakeup)"; silent
+@test "machine prefix <task-notification>: the line" {
+  hook "$(prompt_json "<task-notification>x" user)"; line_is "2026-10-22 18:40 CEST"
 }
 
-@test "source schedule_wakeup: no output" {
-  hook "$(prompt_json "hello" schedule_wakeup)"; silent
+@test "machine prefix <cross-session-message: the line" {
+  hook "$(prompt_json "<cross-session-message from=hub>" user)"; line_is "2026-10-22 18:40 CEST"
 }
 
-@test "source poll_event: no output" {
-  hook "$(prompt_json "hello" poll_event)"; silent
+@test "machine prefix [substrate wake]: the line" {
+  hook "$(prompt_json "[substrate wake] new mail" user)"; line_is "2026-10-22 18:40 CEST"
 }
 
-@test "machine prefix <task-notification>: no output" {
-  hook "$(prompt_json "<task-notification>x" user)"; silent
+@test "machine prefix <scheduled-task: the line" {
+  hook "$(prompt_json "<scheduled-task>" user)"; line_is "2026-10-22 18:40 CEST"
 }
 
-@test "machine prefix <cross-session-message: no output" {
-  hook "$(prompt_json "<cross-session-message from=hub>" user)"; silent
+@test "machine prefix [scheduled-task: the line" {
+  hook "$(prompt_json "[scheduled-task] x" user)"; line_is "2026-10-22 18:40 CEST"
 }
 
-@test "machine prefix [substrate wake]: no output" {
-  hook "$(prompt_json "[substrate wake] new mail" user)"; silent
+@test "a machine prefix after leading whitespace: the line" {
+  hook "$(prompt_json $'  \n[substrate wake] x' user)"; line_is "2026-10-22 18:40 CEST"
 }
 
-@test "machine prefix <scheduled-task: no output" {
-  hook "$(prompt_json "<scheduled-task>" user)"; silent
+@test "source absent plus a machine prefix: the line" {
+  hook "$(prompt_json "[substrate wake] x")"; line_is "2026-10-22 18:40 CEST"
 }
 
-@test "machine prefix [scheduled-task: no output" {
-  hook "$(prompt_json "[scheduled-task] x" user)"; silent
+@test "empty and whitespace-only prompts: the line" {
+  hook "$(prompt_json "" user)"; line_is "2026-10-22 18:40 CEST"
+  hook "$(prompt_json "   " user)"; line_is "2026-10-22 18:40 CEST"
 }
 
-@test "a machine prefix after leading whitespace: no output" {
-  hook "$(prompt_json $'  \n[substrate wake] x' user)"; silent
-}
+# --- AC 2: workers get nothing -------------------------------------------------------------------------
 
 @test "ALFRED_ROLE=worker: no output" {
   ALFRED_ROLE=worker hook "$(prompt_json "hello" user)"; silent
 }
 
-@test "empty and whitespace-only prompts: no output" {
-  hook "$(prompt_json "" user)"; silent
-  hook "$(prompt_json "   " user)"; silent
+@test "ALFRED_ROLE=worker with a log: emitted false, owner false" {
+  export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log"
+  ALFRED_ROLE=worker hook "$(prompt_json "hello" user)"; silent
+  [ "$(jq -c '{emitted, owner}' "$ALFRED_REPLY_TS_LOG")" = '{"emitted":false,"owner":false}' ]
+}
+
+# --- AC 3: the exact text ------------------------------------------------------------------------------
+
+@test "exact text, CEST" {
+  hook "$(prompt_json "hello" user)"
+  [ "$(jq -r '.hookSpecificOutput.additionalContext' <<< "$output")" = 'Time now _[2026-10-22 18:40 CEST]_. Start your reply with this time line; if the turn runs longer than a few minutes, use a fresh TZ=Europe/Amsterdam time instead.' ]
+  run ! grep -q 'Owner prompt received' <<< "$output"
+}
+
+@test "exact text, CET" {
+  FAKE_DATE="2026-12-01 09:05 CET" hook "$(prompt_json "hello" user)"
+  [ "$(jq -r '.hookSpecificOutput.additionalContext' <<< "$output")" = 'Time now _[2026-12-01 09:05 CET]_. Start your reply with this time line; if the turn runs longer than a few minutes, use a fresh TZ=Europe/Amsterdam time instead.' ]
 }
 
 # --- AC 3: fail-open -----------------------------------------------------------------------------------
@@ -180,23 +197,65 @@ line_is() {
   silent
 }
 
-@test "a lib that fails to source: exit 0, no output" {
+# plugin_copy <owner-turn: present|absent|broken> <reply-time: present|absent|broken> — a private plugin copy
+# in $BATS_TEST_TMPDIR/p with the hook and the chosen libs.
+plugin_copy() {
   mkdir -p "$BATS_TEST_TMPDIR/p/hooks" "$BATS_TEST_TMPDIR/p/lib"
   cp "$HOOK" "$BATS_TEST_TMPDIR/p/hooks/"
-  echo 'if (' > "$BATS_TEST_TMPDIR/p/lib/owner-turn.sh"
+  case "$1" in
+    present) cp "$ROOT/lib/owner-turn.sh" "$BATS_TEST_TMPDIR/p/lib/" ;;
+    broken) echo 'if (' > "$BATS_TEST_TMPDIR/p/lib/owner-turn.sh" ;;
+  esac
+  case "$2" in
+    present) cp "$ROOT/lib/reply-time.sh" "$BATS_TEST_TMPDIR/p/lib/" ;;
+    broken) echo 'if (' > "$BATS_TEST_TMPDIR/p/lib/reply-time.sh" ;;
+  esac
+}
+
+@test "owner-turn.sh absent: the line still shows, owner false" {
+  export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log"
+  plugin_copy absent present
+  run --separate-stderr "$BATS_TEST_TMPDIR/p/hooks/reply-timestamp.sh" <<< "$(prompt_json "hello" user)"
+  line_is "2026-10-22 18:40 CEST"
+  [ "$(jq -c '{owner, emitted}' "$ALFRED_REPLY_TS_LOG")" = '{"owner":false,"emitted":true}' ]
+}
+
+@test "owner-turn.sh broken: the line still shows, owner false" {
+  export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log"
+  plugin_copy broken present
+  run --separate-stderr "$BATS_TEST_TMPDIR/p/hooks/reply-timestamp.sh" <<< "$(prompt_json "hello" user)"
+  line_is "2026-10-22 18:40 CEST"
+  [ "$(jq -c '{owner, emitted}' "$ALFRED_REPLY_TS_LOG")" = '{"owner":false,"emitted":true}' ]
+}
+
+@test "reply-time.sh absent: exit 0, no output" {
+  plugin_copy present absent
+  run --separate-stderr "$BATS_TEST_TMPDIR/p/hooks/reply-timestamp.sh" <<< "$(prompt_json "hello" user)"
+  silent
+}
+
+@test "reply-time.sh broken: exit 0, no output" {
+  plugin_copy present broken
   run --separate-stderr "$BATS_TEST_TMPDIR/p/hooks/reply-timestamp.sh" <<< "$(prompt_json "hello" user)"
   silent
 }
 
 # --- debug log -----------------------------------------------------------------------------------------
 
-@test "ALFRED_REPLY_TS_LOG appends {ts, source, entrypoint, owner} for owner and machine turns" {
+@test "ALFRED_REPLY_TS_LOG appends {ts, source, entrypoint, owner, emitted} for owner and machine turns" {
   export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log"
   hook "$(prompt_json "hello" user)"
   hook "$(prompt_json "[substrate wake] x")"
   [ "$(wc -l < "$ALFRED_REPLY_TS_LOG")" -eq 2 ]
-  [ "$(jq -sc 'map({source, entrypoint, owner})' "$ALFRED_REPLY_TS_LOG")" = '[{"source":"user","entrypoint":"cli","owner":true},{"source":"","entrypoint":"cli","owner":false}]' ]
+  [ "$(jq -sc 'map({source, entrypoint, owner, emitted})' "$ALFRED_REPLY_TS_LOG")" = '[{"source":"user","entrypoint":"cli","owner":true,"emitted":true},{"source":"","entrypoint":"cli","owner":false,"emitted":true}]' ]
   [ "$(jq -r '.ts | test("^[0-9]{4}-")' < <(head -1 "$ALFRED_REPLY_TS_LOG"))" = "true" ]
+}
+
+@test "log: the worker line and the tzdata-missing line give emitted false, owner still filled" {
+  export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log"
+  ALFRED_ROLE=worker hook "$(prompt_json "hello" user)"
+  FAKE_DATE="2026-10-22 16:40 UTC" hook "$(prompt_json "hello" user)"
+  [ "$(jq -sc 'map({owner, emitted})' "$ALFRED_REPLY_TS_LOG")" = '[{"owner":false,"emitted":false},{"owner":true,"emitted":false}]' ]
 }
 
 @test "no log file is written without ALFRED_REPLY_TS_LOG" {
@@ -215,6 +274,22 @@ line_is() {
   grep -q 'substrate wake' "$ROOT/lib/owner-turn.sh"
 }
 
+@test "lib/reply-time.sh: reply_time_stamp <epoch> with the real date" {
+  [ -e /usr/share/zoneinfo/Europe/Amsterdam ] || skip "no Europe/Amsterdam tzdata"
+  rm "$BATS_TEST_TMPDIR/bin/date"
+  run bash -c '. "$1/lib/reply-time.sh" && reply_time_stamp 1792884600' _ "$ROOT"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2026-10-25 01:30 CEST" ]
+}
+
+@test "the wording lives only in lib/reply-time.sh; both hooks source it" {
+  grep -q 'Start your reply with this time line' "$ROOT/lib/reply-time.sh"
+  run ! grep -q 'Start your reply with this time line' "$HOOK"
+  run ! grep -q 'Start your reply with this time line' "$ROOT/hooks/stop.sh"
+  grep -q 'lib/reply-time.sh' "$HOOK"
+  grep -q 'lib/reply-time.sh' "$ROOT/hooks/stop.sh"
+}
+
 # --- AC 5: wired ---------------------------------------------------------------------------------------
 
 @test "hooks.json: reply-timestamp.sh is a UserPromptSubmit entry with a 5 s timeout; the existing entries stay" {
@@ -230,7 +305,17 @@ line_is() {
   grep -q 'hooks/reply-timestamp.sh' "$ROOT/README.md"
 }
 
-@test "owner-communication.md says the time line is injected" {
-  grep -q 'injected line' "$ROOT/hooks/owner-communication.md"
-  run ! grep -q 'Take the time fresh for each reply' "$ROOT/hooks/owner-communication.md"
+@test "owner-communication.md says every reply starts with the injected time line, wake replies included" {
+  md="$ROOT/hooks/owner-communication.md"
+  grep -q 'Time now' "$md"
+  grep -q 'wake replies included' "$md"
+  grep -q 'A reply to a wake turn is still a chat reply the owner reads' "$md"
+  grep -q 'A wake with no news produces no reply at all' "$md"
+  run ! grep -q 'Owner prompt received' "$md"
+  run ! grep -q 'Take the time fresh for each reply' "$md"
+}
+
+@test "README describes the per-prompt line for every prompt and names lib/reply-time.sh" {
+  grep -q 'lib/reply-time.sh' "$ROOT/README.md"
+  run ! grep -q 'every owner prompt' "$ROOT/README.md"
 }
