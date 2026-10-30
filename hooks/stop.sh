@@ -26,6 +26,9 @@ BRIDGE="${ALFRED_STOP_BRIDGE_BIN:-$ROOT/hooks/bridge-check.sh}"
 LOOP="${ALFRED_STOP_LOOP_BIN:-$ROOT/bin/alfred-loop-check}"
 TMP=""
 CHILD=""
+# shellcheck source=../lib/reply-time.sh
+# shellcheck disable=SC1091
+. "$ROOT/lib/reply-time.sh" 2>/dev/null || reply_time_line() { return 1; }
 
 # shellcheck disable=SC2317  # runs from the traps below
 cleanup() {
@@ -35,15 +38,37 @@ cleanup() {
 
 # on_signal: a TERM, INT or HUP (the entry timed out). Kill the running child,
 # print the bridge answer captured so far if it is a usable JSON object (a
-# bridge block must not be lost), and leave with 0.
+# bridge block must not be lost), and leave with 0. A block gets the time line
+# too, made in a child bounded to 1 s: the block text has priority, so if the
+# line cannot be made in that time the block goes out unchanged.
 # shellcheck disable=SC2317  # runs from the trap below
 on_signal() {
   [ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null
   if [ -n "$TMP" ] && [ "$(jq -r type "$TMP/bridge.out" 2>/dev/null)" = object ]; then
-    jq -c . "$TMP/bridge.out"
+    local bo tl
+    bo=$(jq -c . "$TMP/bridge.out")
+    if [ "$(jq -r '.decision // ""' <<< "$bo")" = block ]; then
+      # shellcheck disable=SC2016  # $1 and $2 expand in the child, not here
+      tl=$(timeout -k 0 1 bash -c '. "$1/lib/reply-time.sh" 2>/dev/null && reply_time_line && reply_time_log stop "$2" null true' _ "$ROOT" "${CLAUDE_CODE_ENTRYPOINT:-}" 2>/dev/null)
+      [ -n "$tl" ] && bo=$(jq -c --arg t "$tl" '.reason = ($t + "\n\n" + (.reason // ""))' <<< "$bo")
+    fi
+    printf '%s\n' "$bo"
   fi
   cleanup
   exit 0
+}
+
+# with_time_line <reason>: the reason with the time line and a blank line in
+# front, when the line can be made (not for a worker, not without tzdata, not
+# without lib/reply-time.sh); the reason unchanged otherwise. Logs when it adds.
+with_time_line() {
+  local tl
+  if tl=$(reply_time_line); then
+    reply_time_log stop "${CLAUDE_CODE_ENTRYPOINT:-}" null true
+    printf '%s\n\n%s' "$tl" "$1"
+  else
+    printf '%s' "$1"
+  fi
 }
 
 # read_part <file> <label> <var>: the part's output as one compact JSON object
@@ -101,6 +126,7 @@ main() {
     [$b, $l] | map(select(. != null) | .systemMessage // empty) + $ARGS.positional | join("\n")' "${WARN[@]}")
 
   if [ "${block:-0}" -gt 0 ]; then
+    reason=$(with_time_line "$reason")
     jq -cn --arg r "$reason" --arg m "$msgs" \
       '{decision: "block", reason: $r} + (if $m != "" then {systemMessage: $m} else {} end)'
   elif [ -n "$msgs" ]; then

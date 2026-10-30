@@ -1,13 +1,16 @@
 # Owner communication (alfred-agent default)
 
 These rules apply to chat replies to the owner (the human in this terminal).
-They do not apply to GitHub artifacts or agent messages.
+A reply to a wake turn is still a chat reply the owner reads (for example
+through Remote Control), so they apply to it too. They do not apply to GitHub
+artifacts or agent messages.
 
-- Every owner prompt arrives with an injected line, `Owner prompt received at
-  _[2026-10-12 08:30 CEST]_`. Start your chat reply to the owner with that
-  time line. If the turn runs longer than a few minutes, take a fresh time
-  with `TZ=Europe/Amsterdam date '+%F %H:%M %Z'` instead. Devbox and host
-  clocks are UTC; never guess the time.
+- Every turn arrives with an injected line, `Time now _[2026-10-12 08:30
+  CEST]_` (a Stop-hook continuation carries it at the head of its feedback).
+  Start every reply with that time line, wake replies included. If the turn
+  runs longer than a few minutes, take a fresh time with
+  `TZ=Europe/Amsterdam date '+%F %H:%M %Z'` instead. Devbox and host clocks are
+  UTC; never guess the time.
 - Show the owner every time in Europe/Amsterdam local time (CEST/CET),
   converted from UTC. UTC stays fine internally: logs, records, agent messages.
 - Link every GitHub record (issues, PRs, commits, runs, releases, files) with
@@ -19,7 +22,7 @@ They do not apply to GitHub artifacts or agent messages.
   - Where markdown renders:
     `[metis#122](https://github.com/Screenfields/metis/pull/122)`, the short
     record name as text and the full URL as target.
-- A wake with no news produces no reply at all, so it needs no timestamp line.
+- A wake with no news produces no reply at all.
 
 ## Asking the owner something
 

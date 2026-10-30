@@ -297,11 +297,14 @@ session on a menu (owner-join instead; alfred-platform#917). The
 hook is deterministic (`jq` only, no model call). Edit the `.md` file to
 change the rules.
 
-The timestamp itself is injected per prompt (CCW-141): the `UserPromptSubmit`
-hook `hooks/reply-timestamp.sh` adds the current Europe/Amsterdam time line to
-every owner prompt (not machine turns or workers; the test is
-`lib/owner-turn.sh`, shared with the loop check's `note-turn`). Debug log:
-`ALFRED_REPLY_TS_LOG=<file>`.
+The timestamp itself is injected per prompt (CCW-141, CCW-180): the `UserPromptSubmit`
+hook `hooks/reply-timestamp.sh` adds the current Europe/Amsterdam time line
+(`Time now _[...]_`) to every prompt, wake turns included; only `ALFRED_ROLE=worker`
+and unusable hook input get none. A Stop-hook continuation is not a prompt, so
+`hooks/stop.sh` puts the same line at the head of its block reason, only when it
+blocks. The wording is in `lib/reply-time.sh`. `lib/owner-turn.sh` (shared with the
+loop check's `note-turn`) now only fills the `owner` field of the debug
+log. Debug log: `ALFRED_REPLY_TS_LOG=<file>` ({ts, source, entrypoint, owner, emitted}).
 
 Note: files in `rules/` are **not** loaded into session context by Claude Code
 (verified on 2.1.296); anything every session must see goes through this hook.
