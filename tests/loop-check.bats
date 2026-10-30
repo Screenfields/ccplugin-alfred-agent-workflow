@@ -33,11 +33,12 @@ setup() {
   # that need other values copy the plugin to a private root instead.
   PLUG="$BATS_TEST_TMPDIR/plugin"
   mkdir -p "$PLUG"
-  cp -r "$ROOT/bin" "$ROOT/hooks" "$ROOT/config" "$PLUG/"
+  cp -r "$ROOT/bin" "$ROOT/hooks" "$ROOT/config" "$ROOT/lib" "$PLUG/"
   LCP="$PLUG/bin/alfred-loop-check"
   STOPP="$PLUG/hooks/stop.sh"
   echo '{"messages":[],"total_unread":0}' > "$STUB_DIR/inbox.json"
   STATEDIR="$CLAUDE_CONFIG_DIR/alfred-loop"
+  fake_date
 }
 
 # --- helpers -----------------------------------------------------------------
@@ -699,6 +700,21 @@ stop() {
 
 one_object() { [ "$(jq -s length <<< "$output")" -le 1 ]; }
 
+# fake_date — `date` on PATH prints FAKE_DATE (default 2026-10-22 18:40 CEST) for the
+# Europe/Amsterdam format and is the real one otherwise (CCW-180 time line).
+fake_date() {
+  cat > "$BATS_TEST_TMPDIR/bin/date" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  *"%F %H:%M %Z"*) printf '%s\n' "${FAKE_DATE-2026-10-22 18:40 CEST}" ;;
+  *) exec /usr/bin/date "$@" ;;
+esac
+FAKE
+  chmod +x "$BATS_TEST_TMPDIR/bin/date"
+}
+# time_line <stamp> — the exact injected text.
+time_line() { printf 'Time now _[%s]_. Start your reply with this time line; if the turn runs longer than a few minutes, use a fresh TZ=Europe/Amsterdam time instead.' "$1"; }
+
 @test "stop: bridge down and an actionable item, first stop: one block naming both" {
   bridge down; issues o/a "7:Fix:status:ready"
   stop
@@ -803,9 +819,55 @@ one_object() { [ "$(jq -s length <<< "$output")" -le 1 ]; }
   kill -TERM "$pid"
   wait "$pid"; rc=$?
   [ "$rc" -eq 0 ]
-  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
+  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "$(time_line "2026-10-22 18:40 CEST")"$'\n\n'"bridge down" ]
   sleep 0.5
   not pgrep -f "sleep 31.27" >/dev/null
+}
+
+# term_run — run the private stop.sh with a bridge
+# that blocks with "bridge down" and a loop part that hangs; send TERM after 1 s.
+# Output in $BATS_TEST_TMPDIR/out.txt, exit status in $rc, elapsed seconds in $took.
+term_run() {
+  printf '#!/bin/sh\necho {\\"decision\\":\\"block\\",\\"reason\\":\\"bridge down\\"}\n' > "$BATS_TEST_TMPDIR/b.sh"
+  printf '#!/bin/sh\nexec sleep 31.27\n' > "$BATS_TEST_TMPDIR/l.sh"
+  chmod +x "$BATS_TEST_TMPDIR/b.sh" "$BATS_TEST_TMPDIR/l.sh"
+  export ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/b.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/l.sh"
+  set -m
+  hook_json > "$BATS_TEST_TMPDIR/in.json"
+  "$STOPP" < "$BATS_TEST_TMPDIR/in.json" > "$BATS_TEST_TMPDIR/out.txt" 2>/dev/null 3>&- &
+  pid=$!
+  sleep 1
+  start=$SECONDS
+  kill -TERM "$pid"
+  wait "$pid"; rc=$?
+  took=$((SECONDS - start))
+}
+
+@test "stop: on_signal cuts the time line at 1 s: a date that hangs, the block goes out unchanged" {
+  printf '#!/usr/bin/env bash\ncase "$*" in\n  *"%%F %%H:%%M %%Z"*) exec sleep 31.31 ;;\n  *) exec /usr/bin/date "$@" ;;\nesac\n' > "$BATS_TEST_TMPDIR/bin/date"
+  chmod +x "$BATS_TEST_TMPDIR/bin/date"
+  term_run
+  [ "$rc" -eq 0 ]
+  [ "$took" -le 3 ]
+  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
+  [ "$(jq -r .decision "$BATS_TEST_TMPDIR/out.txt")" = "block" ]
+  sleep 0.5
+  not pgrep -f "sleep 31.31" >/dev/null
+  not pgrep -f "sleep 31.27" >/dev/null
+}
+
+@test "stop: on_signal with the lib absent: the block goes out unchanged" {
+  rm -rf "$PLUG/lib"
+  term_run
+  [ "$rc" -eq 0 ]
+  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
+}
+
+@test "stop: on_signal logs one line when it adds the time line" {
+  export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log" CLAUDE_CODE_ENTRYPOINT=cli
+  term_run
+  [ "$(wc -l < "$ALFRED_REPLY_TS_LOG")" -eq 1 ]
+  [ "$(jq -c '{source, entrypoint, owner, emitted}' "$ALFRED_REPLY_TS_LOG")" = '{"source":"stop","entrypoint":"cli","owner":null,"emitted":true}' ]
 }
 
 @test "stop: a hanging loop part is cut at its deadline: allowed with a warning" {
@@ -848,6 +910,104 @@ one_object() { [ "$(jq -s length <<< "$output")" -le 1 ]; }
 
 # --- wiring and the exit-code audit --------------------------------------------------------------------------
 
+# --- the time line at the head of a block (CCW-180, AC 4 and 5) ------------------------------------------
+
+@test "stop time line: bridge-down block: line, blank line, then the bridge reason" {
+  bridge down; issues o/a
+  stop
+  blocked
+  reason=$(jq -r .reason <<< "$output")
+  [ "$(sed -n 1p <<< "$reason")" = "$(time_line "2026-10-22 18:40 CEST")" ]
+  [ -z "$(sed -n 2p <<< "$reason")" ]
+  [[ "$(sed -n 3p <<< "$reason")" == "The alfred-wake bridge is not running"* ]]
+}
+
+@test "stop time line: loop (items) block: same shape, CET" {
+  bridge up; issues o/a "7:Fix:status:ready"
+  FAKE_DATE="2026-12-01 09:05 CET" stop
+  blocked
+  reason=$(jq -r .reason <<< "$output")
+  [ "$(sed -n 1p <<< "$reason")" = "$(time_line "2026-12-01 09:05 CET")" ]
+  [ -z "$(sed -n 2p <<< "$reason")" ]
+  [[ "$(sed -n 3p <<< "$reason")" != "" ]]
+  [[ "$reason" == *"o/a#7"* ]]
+}
+
+@test "stop time line: both parts block: one time line only" {
+  bridge down; issues o/a "7:Fix:status:ready"
+  stop
+  blocked
+  reason=$(jq -r .reason <<< "$output")
+  [ "$(grep -c 'Time now' <<< "$reason")" -eq 1 ]
+  [[ "$reason" == "$(time_line "2026-10-22 18:40 CEST")"$'\n\n'*"alfred-wake bridge is not running"* ]]
+  [[ "$reason" == *"o/a#7"* ]]
+}
+
+@test "stop time line: stop_hook_active true with a re-block: the line is present" {
+  bridge down; issues o/a "7:Fix:status:ready"
+  stop; blocked
+  issues o/a "7:Fix:status:ready" "8:New:status:ready"
+  at 5; stop true
+  blocked
+  [ "$(jq -r .reason <<< "$output" | sed -n 1p)" = "$(time_line "2026-10-22 18:40 CEST")" ]
+}
+
+@test "stop time line: an allowed stop is silent, no line" {
+  bridge up; issues o/a
+  stop
+  silent
+}
+
+@test "stop time line: allowed with only a systemMessage: no Time now anywhere" {
+  bridge down; issues o/a
+  stop true
+  [ "$status" -eq 0 ]
+  not blocked
+  [ -n "$(jq -r '.systemMessage // empty' <<< "$output")" ]
+  [[ "$output" != *"Time now"* ]]
+}
+
+@test "stop time line: ALFRED_ROLE=worker with a block: no line" {
+  bridge down; issues o/a
+  ALFRED_ROLE=worker stop
+  blocked
+  [[ "$output" != *"Time now"* ]]
+}
+
+@test "stop time line: zone UTC with a block: still blocks, no line, one stderr line" {
+  bridge down; issues o/a
+  FAKE_DATE="2026-10-22 16:40 UTC" stop
+  blocked
+  [[ "$output" != *"Time now"* ]]
+  [ "$(wc -l <<< "$stderr")" -eq 1 ]
+  [[ "$stderr" == *"no Europe/Amsterdam time"* ]]
+}
+
+@test "stop time line: lib absent: still blocks, no line" {
+  bridge down; issues o/a
+  rm -rf "$PLUG/lib"
+  stop
+  blocked
+  [ "$(jq -r .reason <<< "$output" | head -1)" != "" ]
+  [[ "$output" != *"Time now"* ]]
+}
+
+@test "stop time line: log line {source stop, entrypoint, owner null, emitted true}, entrypoint set and unset" {
+  export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log"
+  bridge down; issues o/a
+  CLAUDE_CODE_ENTRYPOINT=cli stop; blocked
+  stop; blocked
+  [ "$(wc -l < "$ALFRED_REPLY_TS_LOG")" -eq 2 ]
+  [ "$(jq -sc 'map({source, entrypoint, owner, emitted})' "$ALFRED_REPLY_TS_LOG")" = '[{"source":"stop","entrypoint":"cli","owner":null,"emitted":true},{"source":"stop","entrypoint":"","owner":null,"emitted":true}]' ]
+}
+
+@test "stop time line: no log when the stop allows" {
+  export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log"
+  bridge up; issues o/a
+  stop; silent
+  [ ! -e "$ALFRED_REPLY_TS_LOG" ]
+}
+
 @test "hooks.json: Stop runs stop.sh (not bridge-check.sh directly), #131's entries stay, note-turn is on UserPromptSubmit" {
   h="$ROOT/hooks/hooks.json"
   [ "$(jq -r '.hooks.Stop[0].hooks[0].command' "$h")" = '"${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh"' ]
@@ -860,7 +1020,7 @@ one_object() { [ "$(jq -s length <<< "$output")" -le 1 ]; }
 }
 
 @test "audit: hook-mode scripts hold no set -e/-u and no non-zero exit outside the cli-only lines" {
-  for f in "$ROOT/hooks/stop.sh" "$ROOT/bin/alfred-loop-check" "$ROOT/hooks/reply-timestamp.sh" "$ROOT/lib/owner-turn.sh"; do
+  for f in "$ROOT/hooks/stop.sh" "$ROOT/bin/alfred-loop-check" "$ROOT/hooks/reply-timestamp.sh" "$ROOT/lib/owner-turn.sh" "$ROOT/lib/reply-time.sh"; do
     not grep -nE '^\s*set\s+-[a-z]*[eu]' "$f"
     bad=$(grep -nE '\bexit +[1-9]' "$f" | grep -v 'cli-only' || true)
     [ -z "$bad" ] || { echo "$f: $bad"; return 1; }
