@@ -183,7 +183,7 @@ ln -s "$BRANCH/tests/stub/curl" "$T/bin/curl"
 # Passive recorders beside the plugin's hooks, and the permissions the
 # background-task rows need.
 jq -n --arg u "jq -c . >> $T/ups-in.jsonl" --arg s "jq -c '{stop_hook_active, last_assistant_message}' >> $T/stop-in.jsonl" '{
-  permissions: {allow: ["Bash(sleep *)", "Bash(echo *)"]},
+  permissions: {allow: ["Bash(sleep *)", "Bash(echo *)", "Bash(python3 *)"]},
   hooks: {
     UserPromptSubmit: [{hooks: [{type: "command", command: $u}]}],
     Stop: [{hooks: [{type: "command", command: $s}]}]}}' > "$T/settings.json"
@@ -348,6 +348,13 @@ evaluate() {
     "$(if [ -n "$rec" ]; then lib_owner "$LIBDIR" "$src" "$prompt"; else echo none; fi)" \
     "$emit" "$from" "$line" "$reply" "$([ "$notex" = yes ] && echo ' note=not-exercised')"
   case "$ROW" in fail) RC_FAIL=1 ;; notex) RC_NOTEX=1 ;; esac
+  # A row that is not proven shows what its window held, so the finding can be
+  # read without the (removed) transcript: entry type, attachment type, command
+  # mode, time, and the first 50 characters of the text.
+  if [ "$ROW" != proven ]; then
+    jq -rc '"  window: " + ([.type, (.attachment.type // ""), (.attachment.commandMode // ""), (.timestamp // ""),
+      ((.attachment.prompt // .attachment.content // .message.content // "") | tojson | .[0:50])] | join(" | "))' "$win" 2>/dev/null | head -40
+  fi
 }
 
 # typed_row <name> <origin> <text> — type a prompt, wait for its Stop, print the row.
@@ -409,7 +416,7 @@ sleep 4
 
 # mid-turn queued <task-notification>
 snap
-send "Start the shell command: sleep 5; echo MID-MARK with the Bash tool in the background (run_in_background true). Then run the shell command: sleep 25 with the Bash tool in the foreground. Then reply with the word done."
+send "Start the shell command: sleep 5; echo MID-MARK with the Bash tool in the background (run_in_background true). Then run the shell command: python3 -c \"import time; time.sleep(25)\" with the Bash tool in the foreground (a standalone sleep is blocked by the harness). Then reply with the word done."
 if wait_stops "$M_STOP"; then
   sleep 3
   evaluate mid-turn-task-notification real mid
