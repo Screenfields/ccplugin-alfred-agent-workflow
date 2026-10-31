@@ -237,7 +237,7 @@ SPY
 @test "record: only epochs and flags are stored, never prompt or reply text" {
   hook "$(prompt_json "SECRET-PROMPT-TEXT" user)"
   stop_turn 5 "SECRET-REPLY-TEXT"
-  [ "$(jq -r '[.[] | type] | unique | join(",")' "$SF")" = "boolean,number" ]
+  [ "$(jq -r '[.[] | type] | unique | join(",")' "$SF")" = "array,boolean,number" ]
   run ! grep -q 'SECRET' "$SF"
 }
 
@@ -266,12 +266,12 @@ SPY
   [ -e "$STATE/old3.json" ]
 }
 
-@test "record: another key in the file (CCW-184's injected, flagged) survives a prompt and a Stop" {
-  seed '{"injected":[1,2],"flagged":true,"last_activity":1700000000,"open":false}'
+@test "record: a key of another writer survives a prompt and a Stop" {
+  seed '{"other":[1,2],"keep":true,"last_activity":1700000000,"open":false}'
   at 100000
   hook "$(prompt_json "hello" user)"
   stop_turn 100010 "ok"
-  [ "$(sget '{injected, flagged}|tojson')" = '{"injected":[1,2],"flagged":true}' ]
+  [ "$(sget '{other, keep}|tojson')" = '{"other":[1,2],"keep":true}' ]
 }
 
 # --- AC 4: Stop record, silent turns, mid-turn wakes, interrupted turns -------------------------------------------
@@ -443,10 +443,10 @@ oob() {
 }
 
 @test "cannot decide: after an out of range key the state heals: the key is dropped, other keys stay, the next prompt is gated normally" {
-  at 100000; seed '{"last_activity":1e30,"open":false,"injected":[1,2]}'
+  at 100000; seed '{"last_activity":1e30,"open":false,"other":[1,2]}'
   hook "$(prompt_json "hello" user)"; line_is "2026-10-22 18:40 CEST"
   [ "$(sget 'has("last_activity")')" = "false" ]
-  [ "$(sget '.injected|tojson')" = "[1,2]" ]
+  [ "$(sget '.other|tojson')" = "[1,2]" ]
   at 100030; hook "$(prompt_json "again" user)"; silent       # open, line_at just written: suppressed
 }
 
@@ -700,4 +700,49 @@ plugin_copy() {
   hook "$(prompt_json "hello" user)"        # fake date: 2026-10-22 18:40 CEST
   line_is "2026-10-22 18:40 CEST"
   run ! grep -q '15' <<< "$(jq -r '.hookSpecificOutput.additionalContext' <<< "$output")"
+}
+
+# --- CCW-184: rule text, README, baseline doc and lib header greps ---------------------------------------
+
+@test "rule text: owner-communication.md states the accuracy rule and names the threshold, no literal number" {
+  f="$ROOT/hooks/owner-communication.md"
+  txt=$(tr '\n' ' ' < "$f" | tr -s ' ')
+  [[ "$txt" == *"never estimated, extrapolated or carried over from an earlier turn or reading"* ]]
+  [[ "$txt" == *"no older than the tolerance (\`reply-time-tolerance-minutes\`)"* ]]
+  [[ "$txt" == *"A Stop-hook check compares the time line with the clock and flags a wrong one once per turn"* ]]
+  [[ "$txt" == *"never a guessed one"* && "$txt" == *"A wake with no news produces no reply at all"* ]]
+  bullet=$(awk '/^- A reply starts/ {f=1} /^- Show the owner/ {f=0} f' "$f" | sed 's/2026-10-12 08:30//')
+  [ -n "$bullet" ]
+  ! grep -qE '[0-9]' <<< "$bullet"
+}
+
+@test "README: names the script, the state directory, the switch with its exact value, the threshold, the limits and the arithmetic" {
+  r=$(tr '\n' ' ' < "$ROOT/README.md" | tr -s ' ')
+  for s in 'hooks/reply-audit.sh' 'alfred-reply-ts/' 'ALFRED_REPLY_TS_AUDIT=0' 'only the exact value `0`' 'reply-time-tolerance-minutes' \
+           'an interrupted turn (no Stop recorded) leaves its epoch in the list' 'a Stop that blocks leaves the stored `open` false' \
+           'a long turn may end with its first injected time' 'a time read at 07:20:58' 'third part of the Stop entry' \
+           '(19 s)' '<bridge|loop|audit> part gave unusable output, ignored' '<bridge|loop|audit> part timed out, stop allowed'; do
+    [[ "$r" == *"$s"* ]] || { echo "README lacks: $s"; return 1; }
+  done
+  [[ "$r" != *"never flags"* ]]
+}
+
+@test "baseline doc: the audit section is there and the CCW-180 'neither read nor written here' sentence is gone" {
+  f="$ROOT/docs/baseline/reply-time-line.md"
+  txt=$(tr '\n' ' ' < "$f" | tr -s ' ')
+  run ! grep -q 'neither' "$f"
+  run ! grep -q 'read nor written here' <<< "$txt"
+  run ! grep -qi 'reserved for CCW-184' "$f"
+  for s in '## Stamp audit' '| `injected` |' '| `flagged` |' 'Restart rule.' 'Limits (also in the README)' 'reply-time-tolerance-minutes' 'ALFRED_REPLY_TS_AUDIT=0' \
+           'An interrupted turn (no Stop recorded)' 'Late-reading window' 'bounded (10 polls of 0.1 s'; do
+    [[ "$txt" == *"$s"* ]] || { echo "baseline lacks: $s"; return 1; }
+  done
+}
+
+@test "lib: the Reserved-for-CCW-184 comment is replaced, the audit's keys are declared once in the header" {
+  f="$ROOT/lib/reply-time.sh"
+  run ! grep -qi 'Reserved for CCW-184' "$f"
+  run ! grep -q 'neither read nor written here' "$f"
+  [ "$(grep -c '^#   injected  ' "$f")" -eq 1 ]
+  [ "$(grep -c '^#   flagged  ' "$f")" -eq 1 ]
 }

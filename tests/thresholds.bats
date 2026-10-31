@@ -169,3 +169,10 @@ names_in() {
   done
   grep -q 'failed-review-max' "$ROOT/skills/platform-design-basis/SKILL.md"
 }
+
+@test "reply-time-tolerance-minutes resolves to 2 and is a number (CCW-184)" {
+  run "$CFG" get reply-time-tolerance-minutes
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+  [ "$(jq -r '.["reply-time-tolerance-minutes"] | type' "$ROOT/config/thresholds.json")" = number ]
+}
