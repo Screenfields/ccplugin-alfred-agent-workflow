@@ -1,56 +1,79 @@
 #!/usr/bin/env bash
-# Live check for CCW-180 slice A (not run by CI; `bats tests/` does not enter
-# subdirectories): on the real harness, does every kind of turn get the
-# Europe/Amsterdam time line in its context?
+# Live check for CCW-180 (idle gate; not run by CI, `bats tests/` does not enter
+# subdirectories): on the real harness, does the hook inject the Europe/Amsterdam
+# time line when the session was idle, and only then?
 #
 #   reply-timestamp.sh <branch-dir>                      the builder's run
 #   reply-timestamp.sh --canary <ts.log> <transcript>    the lead's run (below)
 #
-# <branch-dir> is the checkout under test. Both modes read only; the default
-# mode makes real `claude` calls (about 8 short turns, one run).
+# <branch-dir> is the checkout under test. The default mode makes real `claude`
+# calls (about 14 short turns, one run); --canary reads only.
+#
+# Seeding: the gate reads $CFG/alfred-reply-ts/<session-uuid>.json (CFG is
+# ${CLAUDE_CONFIG_DIR:-$HOME/.claude}). Before each row the script writes it:
+#   idle   {"last_activity":<now-7200>,"open":false}   expect a line
+#   fresh  {"last_activity":<now-60>,"open":false}     expect none
+# so no row waits for the real 15 minutes. Cleanup removes both session files.
 #
 # One line per row:
-#   wake=<name> origin=<real|synthetic-typed|stop-stub|canary> real-type=<proven|unproven>
+#   wake=<name> variant=<idle|fresh|mid|stop> expect=<line|none|line-first-prompt-only>
+#   origin=<real|synthetic-typed|stop-stub> real-type=<proven|unproven>
 #   ups-fired=<yes|no> source=<..> prompt-head=<first 40 chars, \n escaped>
-#   hook-owner=<true|false|none> lib-owner=<true|false|none> emitted=<true|false|none>
+#   hook-owner=<true|false|none> lib-owner-on-stored-text=<true|false|none>
+#   emitted=<true|false|none> gap=<seconds|null|none>
 #   line-from=<this-event|turn-prompt|stop-feedback|none> line-in-context=<yes|no>
 #   reply-starts-with-line=<yes|no|no-text>
+# lib-owner-on-stored-text is is_owner_turn computed here on the stored prompt
+# text, not the hook's own value (that is hook-owner).
 # A row is proven only from what the transcript and the logs hold; a timeout
-# never counts as proof either way. reply-starts-with-line is reported, not gated.
+# never counts as proof either way.
+#
+# Gating: the exit code gates on HOOK FACTS only: UserPromptSubmit fired, the
+# line is in the context or absent from it as the row expects, and the log's
+# `emitted` agrees. reply-starts-with-line is REPORTED per row and never gated: it
+# measures the model, and the lead's canary judges the reply text.
 #
 # Exit codes, default run:
-#   0  every row other than the cross-session one is proven and has a line in
-#      its context. Prints cross-session=pending-canary: the typed
+#   0  every row is proven. Prints cross-session=pending-canary: the typed
 #      cross-session variants (origin=synthetic-typed real-type=unproven) prove
-#      only that the hook emits for that text; the real type is the lead's
-#      --canary run.
-#   1  at least one row was exercised and definitively lacks a line in its
-#      context (the hand-back case; takes precedence over 3).
+#      only that the hook gates that text as any other; the real type is the
+#      lead's --canary run.
+#   1  at least one row was exercised and its hook facts contradict its
+#      expectation (the hand-back case; takes precedence over 3). A prompt hook
+#      that did not fire for an idle row counts here.
 #   2  usage.
 #   3  the run cannot prove a row: a row was not exercised, the branch hooks did
-#      not load (no `emitted` key in ts.log after the typed row), or a wait
+#      not load (no `emitted` key in ts.log after the first row), or a wait
 #      timed out.
+#
+# Rows: typed prompt, [substrate wake] and two synthetic <cross-session-message>
+# variants, each idle and fresh; idle <task-notification> idle and fresh; a
+# mid-turn queued <task-notification> (seeded idle for the turn's first prompt:
+# the line comes from that prompt only, the queued arrival has emitted:false and
+# no line); a Stop-hook continuation (no line in the block reason).
 #
 # Exit codes, --canary (run it on a session started with the branch plugin and
 # ALFRED_REPLY_TS_LOG=<ts.log>, after it received one real message from another
-# session):
-#   0  proven: a transcript user entry starting "Another Claude session sent a
+# session). A consistency check: a real message in a fresh session legitimately
+# gets no line, so the line is not required.
+#   0  consistent: a transcript user entry starting "Another Claude session sent a
 #      message:" exists, a ts.log line with an `emitted` key matches it within
-#      5 s and has emitted:true, and a hook_additional_context attachment
-#      (hookEvent UserPromptSubmit) holding the time line follows the entry.
-#   1  the line is missing: the entry exists and the log is usable, but no log
-#      line matches within 5 s, or the match has emitted:false, or no such
-#      attachment follows the entry.
+#      5 s, and its `emitted` equals whether a hook_additional_context
+#      attachment (hookEvent UserPromptSubmit) holding the time line follows the
+#      entry.
+#   1  inconsistent: the log says one thing and the context the other, or no log
+#      line matches within 5 s.
 #   2  usage.
 #   3  nothing to prove: no matching entry, or the log is unreadable or holds no
 #      line with an `emitted` key.
-# It prints only the first 40 characters of the entry.
+# It prints the first 40 characters of the entry, the gap, emitted, and whether
+# the first reply starts with a time line (reported, not gated).
 #
 # Recording (default run): `--settings $T/settings.json` adds two passive hooks
 # beside the plugin's: UserPromptSubmit appends the raw event to ups-in.jsonl,
 # Stop appends {stop_hook_active, last_assistant_message} to stop-in.jsonl. If
 # those settings hooks do not merge with the plugin's (no ups-in record after the
-# typed row), ups-fired falls back to the event's ts.log line (the script prints
+# first row), ups-fired falls back to the event's ts.log line (the script prints
 # settings-hooks-merged=no and loses the raw prompt text).
 #
 # Isolation (the pattern of tests/live/owner-note.sh):
@@ -64,10 +87,10 @@
 #     CLAUDE_CODE_SESSION_ID and every AGENT_RUNS_* are unset, gh and curl are
 #     the tests/stub copies; HOME stays real because the login is in ~/.claude;
 #   - every wait is bounded to 120 s; cleanup stops the session by pid, kills
-#     the tmux server of this run, and removes T and the session directories
-#     Claude Code made for $T/work and $T/work2. The workitem hooks may write
-#     session files under ~/.claude/alfred-workitem/; the run does not prevent
-#     that.
+#     the tmux server of this run, removes the two seeded state files and their
+#     .tmp.*, and removes T and the session directories Claude Code made for
+#     $T/work and $T/work2. The workitem hooks may write session files under
+#     ~/.claude/alfred-workitem/; the run does not prevent that.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
@@ -108,7 +131,7 @@ if [ "${1:-}" = "--canary" ]; then
   match=$(jq -c -s --argjson e "$entry" '
     def abs: if . < 0 then -. else . end;
     ($e.ts | sub("\\.[0-9]+"; "") | fromdateiso8601) as $et
-    | [.[] | select(type == "object" and has("emitted") and .source != "stop")
+    | [.[] | select(type == "object" and has("emitted"))
        | . + {d: (((.ts | fromdateiso8601) - $et) | abs)}]
     | map(select(.d <= 5)) | sort_by(.d) | first // empty' "$LOG" 2>/dev/null)
   idx=$(jq -r '.i' <<< "$entry")
@@ -117,15 +140,29 @@ if [ "${1:-}" = "--canary" ]; then
     [to_entries[] | select(.key > $i) | .value
      | select(.attachment.type == "hook_additional_context" and .attachment.hookEvent == "UserPromptSubmit"
               and ((.attachment.content | tojson) | test($re)))] | length' "$TR" 2>/dev/null || echo 0)
-  m_owner=none; m_emitted=none; m_source=none
+  # The first assistant text after the entry (reported, not gated).
+  first_reply=$(jq -r -s --argjson i "$idx" '
+    [to_entries[] | select(.key > $i) | .value | select(.type == "assistant")
+     | (.message.content | if type == "string" then . else (map(.text? // "") | join("")) end)
+     | select(length > 0)] | first // ""' "$TR" 2>/dev/null)
+  reply=no-text
+  if [ -n "$first_reply" ]; then
+    if jq -en --arg t "$first_reply" --arg re "$REPLY_RE" '$t | test($re)' >/dev/null 2>&1; then reply=yes; else reply=no; fi
+  fi
+  m_owner=none; m_emitted=none; m_source=none; m_gap=none
   if [ -n "$match" ]; then
     m_owner=$(jq -r '.owner' <<< "$match"); m_emitted=$(jq -r '.emitted' <<< "$match"); m_source=$(jq -r '.source' <<< "$match")
+    m_gap=$(jq -r '.gap | if . == null then "null" else tostring end' <<< "$match")
   fi
+  in_ctx=no; [ "${attach:-0}" -ge 1 ] && in_ctx=yes
   rc=0
-  [ -n "$match" ] && [ "$m_emitted" = true ] && [ "${attach:-0}" -ge 1 ] || rc=1
-  printf 'wake=cross-session origin=canary real-type=%s entry=%s source=%s owner=%s emitted=%s lib-owner=%s line-in-context=%s\n' \
-    "$([ "$rc" -eq 0 ] && echo proven || echo unproven)" "$(head40 "$text")" "$m_source" "$m_owner" "$m_emitted" \
-    "$(lib_owner "$HERE/../../lib" "" "$text")" "$([ "${attach:-0}" -ge 1 ] && echo yes || echo no)"
+  [ -n "$match" ] || rc=1
+  if [ -n "$match" ]; then
+    { [ "$m_emitted" = true ] && [ "$in_ctx" = yes ]; } || { [ "$m_emitted" = false ] && [ "$in_ctx" = no ]; } || rc=1
+  fi
+  printf 'wake=cross-session origin=canary real-type=%s entry=%s source=%s hook-owner=%s emitted=%s gap=%s lib-owner-on-stored-text=%s line-in-context=%s reply-starts-with-line=%s\n' \
+    "$([ "$rc" -eq 0 ] && echo proven || echo unproven)" "$(head40 "$text")" "$m_source" "$m_owner" "$m_emitted" "$m_gap" \
+    "$(lib_owner "$HERE/../../lib" "" "$text")" "$in_ctx" "$reply"
   exit "$rc"
 fi
 
@@ -144,6 +181,7 @@ T=$(mktemp -d /tmp/ccw180-live-XXXXXX) || exit 2
 case "$T" in /tmp/ccw180-live-??????) ;; *) echo "unexpected temp dir $T" >&2; exit 2 ;; esac
 
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+RTS="$CFG/alfred-reply-ts"
 SOCK="ccw180-$$"
 UUID1=$(cat /proc/sys/kernel/random/uuid)
 UUID2=$(cat /proc/sys/kernel/random/uuid)
@@ -166,6 +204,7 @@ cleanup() {
   stop_child
   TM kill-server 2>/dev/null || true
   rm -rf "$CFG/projects/$(mangle "$T/work")" "$CFG/projects/$(mangle "$T/work2")"
+  rm -f "$RTS/$UUID1.json" "$RTS/$UUID2.json" "$RTS/$UUID1.json.tmp."* "$RTS/$UUID2.json.tmp."*
   rm -rf "$T"
 }
 trap cleanup EXIT
@@ -276,15 +315,27 @@ ctx_count() {
     and ((.attachment.content | tojson) | test($re)))] | length' "$1" 2>/dev/null || echo 0
 }
 
-# evaluate <name> <origin> <kind: typed|idle|mid|stop> — compute and print one row
-# from the window that starts at the snap. Sets ROW (proven|fail|notex).
+# seed <session-uuid> <idle|fresh> — write the gate's state file. Idle: last
+# activity two hours ago. Fresh: a minute ago. Only the epochs and flags the gate
+# reads; nothing else.
+seed() {
+  local now age
+  now=$(date +%s)
+  case "$2" in idle) age=7200 ;; *) age=60 ;; esac
+  mkdir -p "$RTS" && jq -nc --argjson t "$((now - age))" '{last_activity: $t, open: false}' > "$RTS/$1.json"
+}
+
+# evaluate <name> <origin> <kind: typed|idle|mid|stop> <variant> <expect> — compute
+# and print one row from the window that starts at the snap. Sets ROW
+# (proven|fail|notex). The verdict uses hook facts only: the hook fired, the line
+# is in the context or not, the log's `emitted` agrees. The reply is reported.
 evaluate() {
-  local name="$1" origin="$2" kind="$3" win="$T/win.jsonl" skip=0
-  local n_ctx n_target rec tsl src prompt hown emit from line reply notex=no
+  local name="$1" origin="$2" kind="$3" variant="$4" expect="$5" win="$T/win.jsonl" skip=0
+  local n_ctx n_target rec tsl tsl0 src prompt hown emit emit0 gap from line reply notex=no
   case "$kind" in mid|stop) skip=1 ;; esac
   sed -n "$((M_TR + 1)),\$p" "$TR" 2>/dev/null > "$win"
   tail -n +"$((M_UPS + 1))" "$T/ups-in.jsonl" 2>/dev/null > "$T/wups.jsonl"
-  tail -n +"$((M_TS + 1))" "$T/ts.log" 2>/dev/null | jq -c 'select(type == "object" and has("emitted") and .source != "stop")' 2>/dev/null > "$T/wts.jsonl"
+  tail -n +"$((M_TS + 1))" "$T/ts.log" 2>/dev/null | jq -c 'select(type == "object" and has("emitted"))' 2>/dev/null > "$T/wts.jsonl"
 
   # ups-fired, and the event's record
   rec=""
@@ -296,15 +347,17 @@ evaluate() {
   fi
   [ "$n_target" -ge 1 ] || n_target=0
   tsl=$(jq -c -s --argjson k "$skip" '.[$k] // empty' "$T/wts.jsonl" 2>/dev/null)
+  tsl0=$(jq -c -s '.[0] // empty' "$T/wts.jsonl" 2>/dev/null)
   src=none; prompt=""
   if [ -n "$rec" ]; then src=$(jq -r '.source // ""' <<< "$rec"); prompt=$(jq -r '.prompt // ""' <<< "$rec"); fi
   [ -n "$rec" ] || { [ -n "$tsl" ] && src=$(jq -r '.source // ""' <<< "$tsl"); }
-  [ "$kind" = stop ] && tsl=$(tail -n +"$((M_TS + 1))" "$T/ts.log" 2>/dev/null | jq -c 'select(.source == "stop")' 2>/dev/null | head -1)
-  hown=none; emit=none
+  hown=none; emit=none; emit0=none; gap=none
   if [ -n "$tsl" ]; then
     hown=$(jq -r '.owner | if . == null then "none" else tostring end' <<< "$tsl")
     emit=$(jq -r '.emitted | tostring' <<< "$tsl")
+    gap=$(jq -r '.gap | if . == null then "null" else tostring end' <<< "$tsl")
   fi
+  [ -n "$tsl0" ] && emit0=$(jq -r '.emitted | tostring' <<< "$tsl0")
 
   # the line in the context
   from=none
@@ -317,7 +370,7 @@ evaluate() {
       else notex=yes; fi ;;
     mid)
       if jq -e -s 'any(.[]; .attachment.type == "queued_command" and .attachment.commandMode == "task-notification" and ((.attachment.prompt // "") | startswith("<task-notification>")))' "$win" >/dev/null 2>&1; then
-        if [ "$n_target" -ge 1 ] && [ "$n_ctx" -ge 2 ]; then from=this-event
+        if [ "$n_ctx" -ge 2 ]; then from=this-event
         elif [ "$n_ctx" -ge 1 ]; then from=turn-prompt; fi
       else notex=yes; fi ;;
     stop)
@@ -328,7 +381,7 @@ evaluate() {
   esac
   line=no; [ "$from" != none ] && line=yes
 
-  # the reply
+  # the reply (reported, not gated)
   reply=no-text
   local last
   last=$(tail -n +"$((M_STOP + 1))" "$T/stop-in.jsonl" 2>/dev/null | jq -rs 'last | .last_assistant_message // ""' 2>/dev/null)
@@ -338,15 +391,30 @@ evaluate() {
 
   local ups=no real=unproven
   [ "$n_target" -ge 1 ] && ups=yes
+  # The verdict, from hook facts.
+  ROW=proven
   if [ "$notex" = yes ]; then ROW=notex
-  elif [ "$line" = yes ]; then ROW=proven
-  else ROW=fail; fi
+  else
+    case "$kind:$expect" in
+      typed:line|idle:line)
+        { [ "$line" = yes ] && [ "$emit" = true ]; } || ROW=fail ;;
+      typed:none|idle:none)
+        if [ "$ups" = no ] || [ "$emit" = none ]; then ROW=notex
+        elif [ "$line" = yes ] || [ "$emit" != false ]; then ROW=fail; fi ;;
+      mid:*)
+        if [ "$n_target" -lt 1 ]; then ROW=notex
+        elif [ "$from" = turn-prompt ] && [ "$emit0" = true ] && [ "$emit" = false ]; then ROW=proven
+        else ROW=fail; fi ;;
+      stop:*)
+        [ "$from" = stop-feedback ] && ROW=fail ;;
+    esac
+  fi
   [ "$ROW" = proven ] && [ "$origin" != synthetic-typed ] && real=proven
   if [ "$kind" = stop ] && [ "$notex" = yes ]; then ups=no; fi
-  printf 'wake=%s origin=%s real-type=%s ups-fired=%s source=%s prompt-head=%s hook-owner=%s lib-owner=%s emitted=%s line-from=%s line-in-context=%s reply-starts-with-line=%s%s\n' \
-    "$name" "$origin" "$real" "$ups" "$src" "$(head40 "$prompt")" "$hown" \
+  printf 'wake=%s variant=%s expect=%s origin=%s real-type=%s ups-fired=%s source=%s prompt-head=%s hook-owner=%s lib-owner-on-stored-text=%s emitted=%s gap=%s line-from=%s line-in-context=%s reply-starts-with-line=%s%s\n' \
+    "$name" "$variant" "$expect" "$origin" "$real" "$ups" "$src" "$(head40 "$prompt")" "$hown" \
     "$(if [ -n "$rec" ]; then lib_owner "$LIBDIR" "$src" "$prompt"; else echo none; fi)" \
-    "$emit" "$from" "$line" "$reply" "$([ "$notex" = yes ] && echo ' note=not-exercised')"
+    "$emit" "$gap" "$from" "$line" "$reply" "$([ "$notex" = yes ] && echo ' note=not-exercised')"
   case "$ROW" in fail) RC_FAIL=1 ;; notex) RC_NOTEX=1 ;; esac
   # A row that is not proven shows what its window held, so the finding can be
   # read without the (removed) transcript: entry type, attachment type, command
@@ -357,28 +425,63 @@ evaluate() {
   fi
 }
 
-# typed_row <name> <origin> <text> — type a prompt, wait for its Stop, print the row.
+# row_expect <variant: idle|fresh> — the expectation the variant carries.
+row_expect() { if [ "$1" = idle ]; then echo line; else echo none; fi; }
+
+# typed_row <name> <origin> <text> <idle|fresh> — seed, type a prompt, wait for
+# its Stop, print the row.
 typed_row() {
+  seed "$CUR" "$4"
   snap
   send "$3"
   if ! wait_stops "$M_STOP"; then
-    echo "wake=$1: no Stop within 120 s" >&2
+    echo "wake=$1 variant=$4: no Stop within 120 s" >&2
     RC_NOTEX=1
     return 1
   fi
   sleep 2
-  evaluate "$1" "$2" typed
+  evaluate "$1" "$2" typed "$4" "$(row_expect "$4")"
+  sleep 4
+}
+
+# idle_notification_row <idle|fresh> — end a turn that started a background
+# command, then wait for the <task-notification> to start a new one. The seed is
+# written again after the starting turn's Stop, which moves last_activity.
+idle_notification_row() {
+  local variant="$1" i=0
+  seed "$CUR" "$variant"
+  snap
+  send "Run the shell command: sleep 20; echo IDLE-MARK with the Bash tool, in the background (run_in_background true). Then reply with the word started and end your turn."
+  if wait_stops "$M_STOP"; then
+    sleep 3
+    seed "$CUR" "$variant"
+    snap
+    while [ "$i" -lt 90 ]; do
+      if tail -n +"$((M_TR + 1))" "$TR" 2>/dev/null | jq -e -s 'any(.[]; .type == "user" and ((.message.content | if type == "string" then . else (map(.text? // "") | join("")) end) | startswith("<task-notification>")))' >/dev/null 2>&1; then
+        break
+      fi
+      sleep 2
+      i=$((i + 2))
+    done
+    wait_stops "$M_STOP" || echo "wake=idle-task-notification variant=$variant: no Stop after the notification within 120 s" >&2
+    sleep 2
+    evaluate idle-task-notification real idle "$variant" "$(row_expect "$variant")"
+  else
+    echo "wake=idle-task-notification variant=$variant: the starting turn gave no Stop within 120 s" >&2
+    RC_NOTEX=1
+  fi
   sleep 4
 }
 
 # --- session 1 ------------------------------------------------------------------------
 
 unset TMUX
+CUR="$UUID1"
 tm_start "$T/work" "$UUID1"
 
-typed_row typed real "reply with the word ok" || { tm_stop; exit 3; }
+typed_row typed real "reply with the word ok" idle || { tm_stop; exit 3; }
 if [ "$(lines "$T/ts.log")" -lt 1 ] || ! jq -e -s 'any(.[]; type == "object" and has("emitted"))' "$T/ts.log" >/dev/null 2>&1; then
-  echo "the branch hooks did not load: no emitted key in ts.log after the typed row (see $T)" >&2
+  echo "the branch hooks did not load: no emitted key in ts.log after the first row (see $T)" >&2
   exit 3
 fi
 if [ "$(lines "$T/ups-in.jsonl")" -ge 1 ]; then
@@ -387,39 +490,25 @@ else
   echo "settings-hooks-merged=no (ups-fired falls back to the ts.log line)"
   UPS_SRC=tslog
 fi
+typed_row typed real "reply with the word ok" fresh
 
-typed_row substrate-wake real "[substrate wake] live check: reply with the word ok"
-typed_row cross-session-1 synthetic-typed '<cross-session-message from="live-check">ping</cross-session-message>'
-typed_row cross-session-2 synthetic-typed 'Another Claude session sent a message: <cross-session-message from="live-check">ping</cross-session-message>'
+typed_row substrate-wake real "[substrate wake] live check: reply with the word ok" idle
+typed_row substrate-wake real "[substrate wake] live check: reply with the word ok" fresh
+typed_row cross-session-1 synthetic-typed '<cross-session-message from="live-check">ping</cross-session-message>' idle
+typed_row cross-session-1 synthetic-typed '<cross-session-message from="live-check">ping</cross-session-message>' fresh
+typed_row cross-session-2 synthetic-typed 'Another Claude session sent a message: <cross-session-message from="live-check">ping</cross-session-message>' idle
+typed_row cross-session-2 synthetic-typed 'Another Claude session sent a message: <cross-session-message from="live-check">ping</cross-session-message>' fresh
 
-# idle <task-notification>: end the turn, then wait for the notification to start a new one.
-snap
-send "Run the shell command: sleep 8; echo IDLE-MARK with the Bash tool, in the background (run_in_background true). Then reply with the word started and end your turn."
-if wait_stops "$M_STOP"; then
-  snap
-  i=0
-  while [ "$i" -lt 90 ]; do
-    if tail -n +"$((M_TR + 1))" "$TR" 2>/dev/null | jq -e -s 'any(.[]; .type == "user" and ((.message.content | if type == "string" then . else (map(.text? // "") | join("")) end) | startswith("<task-notification>")))' >/dev/null 2>&1; then
-      break
-    fi
-    sleep 2
-    i=$((i + 2))
-  done
-  wait_stops "$M_STOP" || echo "wake=idle-task-notification: no Stop after the notification within 120 s" >&2
-  sleep 2
-  evaluate idle-task-notification real idle
-else
-  echo "wake=idle-task-notification: the starting turn gave no Stop within 120 s" >&2
-  RC_NOTEX=1
-fi
-sleep 4
+idle_notification_row idle
+idle_notification_row fresh
 
-# mid-turn queued <task-notification>
+# mid-turn queued <task-notification>: idle for the turn's first prompt only.
+seed "$CUR" idle
 snap
 send "Start the shell command: sleep 5; echo MID-MARK with the Bash tool in the background (run_in_background true). Then run the shell command: python3 -c \"import time; time.sleep(25)\" with the Bash tool in the foreground (a standalone sleep is blocked by the harness). Then reply with the word done."
 if wait_stops "$M_STOP"; then
   sleep 3
-  evaluate mid-turn-task-notification real mid
+  evaluate mid-turn-task-notification real mid mid line-first-prompt-only
 else
   echo "wake=mid-turn-task-notification: no Stop within 120 s" >&2
   RC_NOTEX=1
@@ -429,12 +518,14 @@ tm_stop
 # --- session 2: the Stop-hook continuation ---------------------------------------------------
 
 mkdir -p "$T/work2"
+CUR="$UUID2"
 tm_start "$T/work2" "$UUID2" "ALFRED_STOP_BRIDGE_BIN=$T/stub-bridge.sh ALFRED_STOP_LOOP_BIN=$T/stub-loop.sh"
+seed "$CUR" idle
 snap
 send "say hi"
 if wait_stops "$((M_STOP + 1))"; then
   sleep 3
-  evaluate stop-continuation stop-stub stop
+  evaluate stop-continuation stop-stub stop stop none
 else
   if [ -e "$T/stub-bridge.blocked" ]; then
     echo "wake=stop-continuation: the stub blocked but no continuation Stop within 120 s" >&2
