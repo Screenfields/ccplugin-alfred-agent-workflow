@@ -41,6 +41,8 @@
 #   1  at least one row was exercised and its hook facts contradict its
 #      expectation (the hand-back case; takes precedence over 3). A prompt hook
 #      that did not fire for an idle row counts here.
+#      A UserPromptSubmit that fired for the Stop continuation counts here too
+#      (it contradicts the coverage table), with a message on stderr.
 #   2  usage.
 #   3  the run cannot prove a row: a row was not exercised, the branch hooks did
 #      not load (no `emitted` key in ts.log after the first row), or a wait
@@ -136,13 +138,19 @@ if [ "${1:-}" = "--canary" ]; then
     | map(select(.d <= 5)) | sort_by(.d) | first // empty' "$LOG" 2>/dev/null)
   idx=$(jq -r '.i' <<< "$entry")
   text=$(jq -r '.text' <<< "$entry")
-  attach=$(jq -s --argjson i "$idx" --arg re "$LINE_RE" '
-    [to_entries[] | select(.key > $i) | .value
+  # Both queries look only at the message's own turn: the entries after it up to
+  # the next real user entry (a prompt; an attachment or a tool_result does not
+  # end the turn). A line injected for a later prompt is not credited to it.
+  # shellcheck disable=SC2016  # a jq program, not shell
+  WIN='def isprompt: .value.type == "user" and (.value.message.content | if type == "string" then true else any(.[]?; .type != "tool_result") end);
+    def turn($i): [to_entries[] | select(.key > $i)] as $a | ($a | map(isprompt) | index(true)) as $n | (if $n == null then $a else $a[:$n] end) | map(.value);'
+  attach=$(jq -s --argjson i "$idx" --arg re "$LINE_RE" "$WIN"'
+    [turn($i)[]
      | select(.attachment.type == "hook_additional_context" and .attachment.hookEvent == "UserPromptSubmit"
               and ((.attachment.content | tojson) | test($re)))] | length' "$TR" 2>/dev/null || echo 0)
-  # The first assistant text after the entry (reported, not gated).
-  first_reply=$(jq -r -s --argjson i "$idx" '
-    [to_entries[] | select(.key > $i) | .value | select(.type == "assistant")
+  # The first assistant text of that turn (reported, not gated).
+  first_reply=$(jq -r -s --argjson i "$idx" "$WIN"'
+    [turn($i)[] | select(.type == "assistant")
      | (.message.content | if type == "string" then . else (map(.text? // "") | join("")) end)
      | select(length > 0)] | first // ""' "$TR" 2>/dev/null)
   reply=no-text
@@ -241,7 +249,8 @@ printf '#!/bin/sh\nexit 0\n' > "$T/stub-loop.sh"
 chmod +x "$T/stub-bridge.sh" "$T/stub-loop.sh"
 
 for v in $(compgen -e | grep '^AGENT_RUNS_'); do unset "$v"; done
-unset ALFRED_ROLE ALFRED_LOOP_CHECK CLAUDE_CODE_SESSION_ID TMUX
+# ALFRED_REPLY_TS_NOW is unset so the seeding here and the hook share the real clock.
+unset ALFRED_ROLE ALFRED_LOOP_CHECK CLAUDE_CODE_SESSION_ID TMUX ALFRED_REPLY_TS_NOW
 unset CLAUDE_CODE_BRIDGE_SESSION_ID CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN
 export ALFRED_SESSION_CHECK=0 ALFRED_SESSION_NUDGE=0 ALFRED_WAKE_STOP_CHECK=0
 export ALFRED_WAKE_STATE_DIR="$T/wake" ALFRED_WAKE_NO_UPGRADE=1 ALFRED_WAKE_BUZZ=off
@@ -406,7 +415,13 @@ evaluate() {
         elif [ "$from" = turn-prompt ] && [ "$emit0" = true ] && [ "$emit" = false ]; then ROW=proven
         else ROW=fail; fi ;;
       stop:*)
-        [ "$from" = stop-feedback ] && ROW=fail ;;
+        if [ "$from" = stop-feedback ]; then ROW=fail
+        elif [ "$ups" = yes ]; then
+          # A UserPromptSubmit for a Stop continuation contradicts the coverage
+          # table (a continuation is not a prompt): a hook fact, so exit 1.
+          echo "wake=$name: UserPromptSubmit fired for the Stop continuation; the coverage table says it does not (hand back to the lead)" >&2
+          ROW=fail
+        fi ;;
     esac
   fi
   [ "$ROW" = proven ] && [ "$origin" != synthetic-typed ] && real=proven
