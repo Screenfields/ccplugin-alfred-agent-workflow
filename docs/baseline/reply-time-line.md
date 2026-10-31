@@ -57,8 +57,16 @@ At every Stop of a non-worker session with a session id (allowed, blocked, and
 `stop_hook_active` true), `stop.sh` records its clock reading, taken before any
 part runs, and whether `last_assistant_message` held a non-whitespace
 character. Only a non-empty final message moves `last_activity`, so a wake with
-no news does not use up the line. Cost on an allowed Stop: at most 50 ms
-(measured in the PR).
+no news does not use up the line.
+
+The record runs as a background child started right after the clock reading, in
+parallel with the bridge and loop parts (design lever C2), and `stop.sh` waits
+for it before any output, so it adds close to no wall time (bound: 50 ms on an
+allowed Stop, measured in the PR). The child ignores TERM, INT and HUP and
+`on_signal` waits for it (about 45 ms) instead of killing it, so a signalled
+Stop leaves no half-written `*.json.tmp.*` file and still prints the bridge
+answer. Only SIGKILL could leave a temp file; a day-old one is pruned when a
+session's file is first created.
 
 ## Debug log
 

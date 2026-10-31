@@ -974,6 +974,50 @@ FAKE
   [ "$status" -eq 0 ]
 }
 
+# The record is a background child beside the parts (CCW-180, C2). A slow `mv` in
+# front of PATH makes it outlast the quiet parts, so these cases catch a missing wait.
+slow_mv() {
+  real=$(command -v mv)
+  printf '#!/bin/sh\nsleep 1.37\nexec %s "$@"\n' "$real" > "$BATS_TEST_TMPDIR/bin/mv"
+  chmod +x "$BATS_TEST_TMPDIR/bin/mv"
+}
+
+@test "stop record: stop.sh waits for the record before it exits, on an allowed and on a blocked Stop" {
+  slow_mv
+  printf '#!/bin/sh\nexit 0\n' > "$BATS_TEST_TMPDIR/quiet.sh"; chmod +x "$BATS_TEST_TMPDIR/quiet.sh"
+  jq -cn '{session_id: "s1", stop_hook_active: false, last_assistant_message: "ok"}' > "$BATS_TEST_TMPDIR/stop-in.json"
+  ALFRED_REPLY_TS_NOW=1793000000 ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/quiet.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/quiet.sh" \
+    "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json" > "$BATS_TEST_TMPDIR/out.txt" 2>&1
+  [ "$(rtget .last_stop)" = 1793000000 ]
+  [ ! -s "$BATS_TEST_TMPDIR/out.txt" ]
+  printf '#!/bin/sh\necho {\\"decision\\":\\"block\\",\\"reason\\":\\"bridge down\\"}\n' > "$BATS_TEST_TMPDIR/b.sh"; chmod +x "$BATS_TEST_TMPDIR/b.sh"
+  ALFRED_REPLY_TS_NOW=1793000100 ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/b.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/quiet.sh" \
+    "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json" > "$BATS_TEST_TMPDIR/out.txt" 2>&1
+  [ "$(rtget .last_stop)" = 1793000100 ]
+  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
+  [ -z "$(ls "$RTDIR" | grep tmp)" ]
+}
+
+@test "stop record: TERM during the record lets it finish: fail-open output, exit 0, state written, no temp file left" {
+  slow_mv
+  printf '#!/bin/sh\necho {\\"decision\\":\\"block\\",\\"reason\\":\\"bridge down\\"}\n' > "$BATS_TEST_TMPDIR/b.sh"
+  printf '#!/bin/sh\nexit 0\n' > "$BATS_TEST_TMPDIR/quiet.sh"
+  chmod +x "$BATS_TEST_TMPDIR/b.sh" "$BATS_TEST_TMPDIR/quiet.sh"
+  jq -cn '{session_id: "s1", stop_hook_active: false, last_assistant_message: "ok"}' > "$BATS_TEST_TMPDIR/stop-in.json"
+  export ALFRED_REPLY_TS_NOW=1793000000 ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/b.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/quiet.sh"
+  set -m
+  "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json" > "$BATS_TEST_TMPDIR/out.txt" 2>/dev/null 3>&- &
+  pid=$!
+  sleep 0.5
+  ls "$RTDIR" | grep -q 'tmp'           # the record is mid-write
+  kill -TERM "$pid"
+  wait "$pid"; rc=$?
+  [ "$rc" -eq 0 ]
+  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
+  [ "$(rtget .last_stop)" = 1793000000 ]
+  [ -z "$(ls "$RTDIR" | grep tmp)" ]
+}
+
 @test "hooks.json: Stop runs stop.sh (not bridge-check.sh directly), #131's entries stay, note-turn is on UserPromptSubmit" {
   h="$ROOT/hooks/hooks.json"
   [ "$(jq -r '.hooks.Stop[0].hooks[0].command' "$h")" = '"${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh"' ]

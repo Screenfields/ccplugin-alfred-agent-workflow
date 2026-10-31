@@ -23,6 +23,8 @@
 # final message (last_assistant_message) was non-empty, go into
 # alfred-reply-ts/<session_id>.json for the idle gate of hooks/reply-timestamp.sh
 # (CCW-180; fields in lib/reply-time.sh). It never adds a time line to a block.
+# The record runs as a background child beside the parts (no added wall time) and
+# is waited for before the output; on a TERM it is allowed to finish, not killed.
 #
 # Test overrides: ALFRED_STOP_BRIDGE_BIN, ALFRED_STOP_LOOP_BIN,
 # ALFRED_STOP_BRIDGE_SECONDS, ALFRED_STOP_LOOP_SECONDS.
@@ -32,6 +34,7 @@ BRIDGE="${ALFRED_STOP_BRIDGE_BIN:-$ROOT/hooks/bridge-check.sh}"
 LOOP="${ALFRED_STOP_LOOP_BIN:-$ROOT/bin/alfred-loop-check}"
 TMP=""
 CHILD=""
+REC=""
 # shellcheck source=../lib/reply-time.sh
 # shellcheck disable=SC1091
 . "$ROOT/lib/reply-time.sh" 2>/dev/null || { reply_time_now() { return 1; }; reply_time_note_stop() { return 0; }; }
@@ -48,6 +51,9 @@ cleanup() {
 # shellcheck disable=SC2317  # runs from the trap below
 on_signal() {
   [ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null
+  # The record is never killed: it ignores these signals and takes about 45 ms,
+  # so let it finish. A killed write would leave a *.json.tmp.* file.
+  [ -n "$REC" ] && wait "$REC" 2>/dev/null
   if [ -n "$TMP" ] && [ "$(jq -r type "$TMP/bridge.out" 2>/dev/null)" = object ]; then
     jq -c . "$TMP/bridge.out"
   fi
@@ -94,7 +100,11 @@ main() {
   TMP=$(mktemp -d) || return
   cat > "$TMP/in"
   # Record this Stop (CCW-180): its clock and whether the final message was empty.
-  reply_time_note_stop "$START" "$TMP/in"
+  # A background child, in parallel with the parts so it adds no wall time. It
+  # ignores TERM, INT and HUP (a signalled hook lets it finish rather than leave a
+  # half-written temp file) and main waits for it before any output.
+  ( trap '' TERM INT HUP; reply_time_note_stop "$START" "$TMP/in" ) &
+  REC=$!
 
   local deadline
   deadline=$(jq -r '.["loop-check-deadline-seconds"] // 10 | floor' "$ROOT/config/thresholds.json" 2>/dev/null)
@@ -107,6 +117,9 @@ main() {
   run_part loop "$deadline" "$LOOP" --hook
   read_part "$TMP/loop.out" loop l
 
+  # The record is done before anything is printed.
+  wait "$REC" 2>/dev/null
+  REC=""
   local msgs reason block
   block=$(jq -rn --argjson b "${b:-null}" --argjson l "${l:-null}" '[$b, $l] | map(select(. != null and .decision == "block")) | length')
   reason=$(jq -rn --argjson b "${b:-null}" --argjson l "${l:-null}" '[$b, $l] | map(select(. != null and .decision == "block") | .reason // "") | join("\n\n")')
