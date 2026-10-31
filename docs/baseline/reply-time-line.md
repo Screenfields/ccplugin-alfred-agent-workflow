@@ -71,7 +71,10 @@ no news does not use up the line. Cost on an allowed Stop: at most 50 ms
   wake arrives at or after the threshold; suppression keys on the injection.
 - An interrupted turn leaves no Stop and stays open; a prompt less than T after
   its injection gets no line, one at T or more does.
-- `open` stays `false` after a blocked Stop's continuation is still running.
+- A blocked Stop is recorded, so `open` is `false` while its Stop-hook continuation
+  still runs (no prompt hook fires for it). A wake during that continuation, after
+  a blocked Stop whose final message was empty, is gated as a new turn and can get
+  a second line.
 - Whether the model puts the line on the first reply only is not checked by the
   hooks. The live script reports the reply text; the lead's canary judges it.
 - The state is merged without a lock. Two windows (the merge, about 20 ms; gate
