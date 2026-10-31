@@ -38,5 +38,6 @@
   "chase-max-tries": 3,
   "loop-check-max-blocks-per-hour": 6,
   "deviation-min-seconds": 60,
-  "owner-note-max-age-minutes": 60
+  "owner-note-max-age-minutes": 60,
+  "reply-time-idle-minutes": 15
 }

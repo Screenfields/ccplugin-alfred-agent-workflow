@@ -18,6 +18,14 @@
 # (10), under this entry's 20 s timeout. Kill switch for the loop part:
 # ALFRED_LOOP_CHECK=0 (see bin/alfred-loop-check).
 #
+# It also records every Stop of a non-worker session, first thing and under the
+# one clock reading it takes before any part runs: the reading, and whether the
+# final message (last_assistant_message) was non-empty, go into
+# alfred-reply-ts/<session_id>.json for the idle gate of hooks/reply-timestamp.sh
+# (CCW-180; fields in lib/reply-time.sh). It never adds a time line to a block.
+# The record runs as a background child beside the parts (no added wall time) and
+# is waited for before the output; on a TERM it is allowed to finish, not killed.
+#
 # Test overrides: ALFRED_STOP_BRIDGE_BIN, ALFRED_STOP_LOOP_BIN,
 # ALFRED_STOP_BRIDGE_SECONDS, ALFRED_STOP_LOOP_SECONDS.
 
@@ -26,9 +34,10 @@ BRIDGE="${ALFRED_STOP_BRIDGE_BIN:-$ROOT/hooks/bridge-check.sh}"
 LOOP="${ALFRED_STOP_LOOP_BIN:-$ROOT/bin/alfred-loop-check}"
 TMP=""
 CHILD=""
+REC=""
 # shellcheck source=../lib/reply-time.sh
 # shellcheck disable=SC1091
-. "$ROOT/lib/reply-time.sh" 2>/dev/null || reply_time_line() { return 1; }
+. "$ROOT/lib/reply-time.sh" 2>/dev/null || { reply_time_now() { return 1; }; reply_time_note_stop() { return 0; }; }
 
 # shellcheck disable=SC2317  # runs from the traps below
 cleanup() {
@@ -38,37 +47,18 @@ cleanup() {
 
 # on_signal: a TERM, INT or HUP (the entry timed out). Kill the running child,
 # print the bridge answer captured so far if it is a usable JSON object (a
-# bridge block must not be lost), and leave with 0. A block gets the time line
-# too, made in a child bounded to 1 s: the block text has priority, so if the
-# line cannot be made in that time the block goes out unchanged.
+# bridge block must not be lost), and leave with 0.
 # shellcheck disable=SC2317  # runs from the trap below
 on_signal() {
   [ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null
+  # The record is never killed: it ignores these signals and takes about 45 ms,
+  # so let it finish. A killed write would leave a *.json.tmp.* file.
+  [ -n "$REC" ] && wait "$REC" 2>/dev/null
   if [ -n "$TMP" ] && [ "$(jq -r type "$TMP/bridge.out" 2>/dev/null)" = object ]; then
-    local bo tl
-    bo=$(jq -c . "$TMP/bridge.out")
-    if [ "$(jq -r '.decision // ""' <<< "$bo")" = block ]; then
-      # shellcheck disable=SC2016  # $1 and $2 expand in the child, not here
-      tl=$(timeout -k 0 1 bash -c '. "$1/lib/reply-time.sh" 2>/dev/null && reply_time_line && reply_time_log stop "$2" null true' _ "$ROOT" "${CLAUDE_CODE_ENTRYPOINT:-}" 2>/dev/null)
-      [ -n "$tl" ] && bo=$(jq -c --arg t "$tl" '.reason = ($t + "\n\n" + (.reason // ""))' <<< "$bo")
-    fi
-    printf '%s\n' "$bo"
+    jq -c . "$TMP/bridge.out"
   fi
   cleanup
   exit 0
-}
-
-# with_time_line <reason>: the reason with the time line and a blank line in
-# front, when the line can be made (not for a worker, not without tzdata, not
-# without lib/reply-time.sh); the reason unchanged otherwise. Logs when it adds.
-with_time_line() {
-  local tl
-  if tl=$(reply_time_line); then
-    reply_time_log stop "${CLAUDE_CODE_ENTRYPOINT:-}" null true
-    printf '%s\n\n%s' "$tl" "$1"
-  else
-    printf '%s' "$1"
-  fi
 }
 
 # read_part <file> <label> <var>: the part's output as one compact JSON object
@@ -103,10 +93,18 @@ run_part() {
 
 main() {
   WARN=()
+  # The one clock reading of this Stop, taken before anything else runs.
+  START=$(reply_time_now 2>/dev/null) || START=""
   command -v jq >/dev/null 2>&1 || { echo "stop: jq missing, checks skipped" >&2; return; }
   command -v timeout >/dev/null 2>&1 || { echo "stop: timeout missing, checks skipped" >&2; return; }
   TMP=$(mktemp -d) || return
   cat > "$TMP/in"
+  # Record this Stop (CCW-180): its clock and whether the final message was empty.
+  # A background child, in parallel with the parts so it adds no wall time. It
+  # ignores TERM, INT and HUP (a signalled hook lets it finish rather than leave a
+  # half-written temp file) and main waits for it before any output.
+  ( trap '' TERM INT HUP; reply_time_note_stop "$START" "$TMP/in" ) &
+  REC=$!
 
   local deadline
   deadline=$(jq -r '.["loop-check-deadline-seconds"] // 10 | floor' "$ROOT/config/thresholds.json" 2>/dev/null)
@@ -119,6 +117,9 @@ main() {
   run_part loop "$deadline" "$LOOP" --hook
   read_part "$TMP/loop.out" loop l
 
+  # The record is done before anything is printed.
+  wait "$REC" 2>/dev/null
+  REC=""
   local msgs reason block
   block=$(jq -rn --argjson b "${b:-null}" --argjson l "${l:-null}" '[$b, $l] | map(select(. != null and .decision == "block")) | length')
   reason=$(jq -rn --argjson b "${b:-null}" --argjson l "${l:-null}" '[$b, $l] | map(select(. != null and .decision == "block") | .reason // "") | join("\n\n")')
@@ -126,7 +127,6 @@ main() {
     [$b, $l] | map(select(. != null) | .systemMessage // empty) + $ARGS.positional | join("\n")' "${WARN[@]}")
 
   if [ "${block:-0}" -gt 0 ]; then
-    reason=$(with_time_line "$reason")
     jq -cn --arg r "$reason" --arg m "$msgs" \
       '{decision: "block", reason: $r} + (if $m != "" then {systemMessage: $m} else {} end)'
   elif [ -n "$msgs" ]; then

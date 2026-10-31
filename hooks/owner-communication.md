@@ -5,12 +5,16 @@ A reply to a wake turn is still a chat reply the owner reads (for example
 through Remote Control), so they apply to it too. They do not apply to GitHub
 artifacts or agent messages.
 
-- Every turn arrives with an injected line, `Time now _[2026-10-12 08:30
-  CEST]_` (a Stop-hook continuation carries it at the head of its feedback).
-  Start every reply with that time line, wake replies included. If the turn
-  runs longer than a few minutes, take a fresh time with
-  `TZ=Europe/Amsterdam date '+%F %H:%M %Z'` instead. Devbox and host clocks are
-  UTC; never guess the time.
+- A reply starts with the time line only when this turn's context carries an
+  injected `Time now` line (a new set of actions), for example
+  `Time now _[2026-10-12 08:30 CEST]_`. The hook injects it on the first turn
+  after the session was idle for `reply-time-idle-minutes` or more, whether the
+  turn started with your message or with a wake. Start the first reply of that
+  turn with the injected time line. Otherwise a reply carries no time line:
+  replies later in the same set of actions get none. The time to use is the
+  injected one, or a fresh `TZ=Europe/Amsterdam date '+%F %H:%M %Z'` reading
+  when the turn runs longer than a few minutes, never a guessed one. Devbox and
+  host clocks are UTC.
 - Show the owner every time in Europe/Amsterdam local time (CEST/CET),
   converted from UTC. UTC stays fine internally: logs, records, agent messages.
 - Link every GitHub record (issues, PRs, commits, runs, releases, files) with

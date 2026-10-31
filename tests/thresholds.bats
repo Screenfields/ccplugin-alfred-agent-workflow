@@ -56,6 +56,13 @@ names_in() {
   [ "$("$CFG" get workable-states | jq -r length)" = "5" ]
 }
 
+@test "reply-time-idle-minutes resolves to a whole number (CCW-180), start value 15" {
+  run "$CFG" get reply-time-idle-minutes
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^[0-9]+$ ]]
+  [ "$output" = "15" ]
+}
+
 @test "an unknown name exits 2 and prints nothing on stdout" {
   out=$("$CFG" get no-such-threshold 2>/dev/null) && return 1
   [ -z "$out" ]

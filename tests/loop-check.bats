@@ -38,7 +38,7 @@ setup() {
   STOPP="$PLUG/hooks/stop.sh"
   echo '{"messages":[],"total_unread":0}' > "$STUB_DIR/inbox.json"
   STATEDIR="$CLAUDE_CONFIG_DIR/alfred-loop"
-  fake_date
+  RTDIR="$CLAUDE_CONFIG_DIR/alfred-reply-ts"
 }
 
 # --- helpers -----------------------------------------------------------------
@@ -700,21 +700,6 @@ stop() {
 
 one_object() { [ "$(jq -s length <<< "$output")" -le 1 ]; }
 
-# fake_date — `date` on PATH prints FAKE_DATE (default 2026-10-22 18:40 CEST) for the
-# Europe/Amsterdam format and is the real one otherwise (CCW-180 time line).
-fake_date() {
-  cat > "$BATS_TEST_TMPDIR/bin/date" <<'FAKE'
-#!/usr/bin/env bash
-case "$*" in
-  *"%F %H:%M %Z"*) printf '%s\n' "${FAKE_DATE-2026-10-22 18:40 CEST}" ;;
-  *) exec /usr/bin/date "$@" ;;
-esac
-FAKE
-  chmod +x "$BATS_TEST_TMPDIR/bin/date"
-}
-# time_line <stamp> — the exact injected text.
-time_line() { printf 'Time now _[%s]_. Start your reply with this time line; if the turn runs longer than a few minutes, use a fresh TZ=Europe/Amsterdam time instead.' "$1"; }
-
 @test "stop: bridge down and an actionable item, first stop: one block naming both" {
   bridge down; issues o/a "7:Fix:status:ready"
   stop
@@ -819,55 +804,9 @@ time_line() { printf 'Time now _[%s]_. Start your reply with this time line; if 
   kill -TERM "$pid"
   wait "$pid"; rc=$?
   [ "$rc" -eq 0 ]
-  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "$(time_line "2026-10-22 18:40 CEST")"$'\n\n'"bridge down" ]
+  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
   sleep 0.5
   not pgrep -f "sleep 31.27" >/dev/null
-}
-
-# term_run — run the private stop.sh with a bridge
-# that blocks with "bridge down" and a loop part that hangs; send TERM after 1 s.
-# Output in $BATS_TEST_TMPDIR/out.txt, exit status in $rc, elapsed seconds in $took.
-term_run() {
-  printf '#!/bin/sh\necho {\\"decision\\":\\"block\\",\\"reason\\":\\"bridge down\\"}\n' > "$BATS_TEST_TMPDIR/b.sh"
-  printf '#!/bin/sh\nexec sleep 31.27\n' > "$BATS_TEST_TMPDIR/l.sh"
-  chmod +x "$BATS_TEST_TMPDIR/b.sh" "$BATS_TEST_TMPDIR/l.sh"
-  export ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/b.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/l.sh"
-  set -m
-  hook_json > "$BATS_TEST_TMPDIR/in.json"
-  "$STOPP" < "$BATS_TEST_TMPDIR/in.json" > "$BATS_TEST_TMPDIR/out.txt" 2>/dev/null 3>&- &
-  pid=$!
-  sleep 1
-  start=$SECONDS
-  kill -TERM "$pid"
-  wait "$pid"; rc=$?
-  took=$((SECONDS - start))
-}
-
-@test "stop: on_signal cuts the time line at 1 s: a date that hangs, the block goes out unchanged" {
-  printf '#!/usr/bin/env bash\ncase "$*" in\n  *"%%F %%H:%%M %%Z"*) exec sleep 31.31 ;;\n  *) exec /usr/bin/date "$@" ;;\nesac\n' > "$BATS_TEST_TMPDIR/bin/date"
-  chmod +x "$BATS_TEST_TMPDIR/bin/date"
-  term_run
-  [ "$rc" -eq 0 ]
-  [ "$took" -le 3 ]
-  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
-  [ "$(jq -r .decision "$BATS_TEST_TMPDIR/out.txt")" = "block" ]
-  sleep 0.5
-  not pgrep -f "sleep 31.31" >/dev/null
-  not pgrep -f "sleep 31.27" >/dev/null
-}
-
-@test "stop: on_signal with the lib absent: the block goes out unchanged" {
-  rm -rf "$PLUG/lib"
-  term_run
-  [ "$rc" -eq 0 ]
-  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
-}
-
-@test "stop: on_signal logs one line when it adds the time line" {
-  export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log" CLAUDE_CODE_ENTRYPOINT=cli
-  term_run
-  [ "$(wc -l < "$ALFRED_REPLY_TS_LOG")" -eq 1 ]
-  [ "$(jq -c '{source, entrypoint, owner, emitted}' "$ALFRED_REPLY_TS_LOG")" = '{"source":"stop","entrypoint":"cli","owner":null,"emitted":true}' ]
 }
 
 @test "stop: a hanging loop part is cut at its deadline: allowed with a warning" {
@@ -910,102 +849,173 @@ term_run() {
 
 # --- wiring and the exit-code audit --------------------------------------------------------------------------
 
-# --- the time line at the head of a block (CCW-180, AC 4 and 5) ------------------------------------------
+# --- no time line in a block reason, and the Stop record (CCW-180, AC 4 and 5) --------------------------------
 
-@test "stop time line: bridge-down block: line, blank line, then the bridge reason" {
+@test "stop: a bridge-down block starts with the bridge reason, not a time line" {
   bridge down; issues o/a
   stop
   blocked
-  reason=$(jq -r .reason <<< "$output")
-  [ "$(sed -n 1p <<< "$reason")" = "$(time_line "2026-10-22 18:40 CEST")" ]
-  [ -z "$(sed -n 2p <<< "$reason")" ]
-  [[ "$(sed -n 3p <<< "$reason")" == "The alfred-wake bridge is not running"* ]]
+  [[ "$(jq -r .reason <<< "$output" | sed -n 1p)" == "The alfred-wake bridge is not running"* ]]
+  [[ "$output" != *"Time now"* ]]
 }
 
-@test "stop time line: loop (items) block: same shape, CET" {
-  bridge up; issues o/a "7:Fix:status:ready"
-  FAKE_DATE="2026-12-01 09:05 CET" stop
-  blocked
-  reason=$(jq -r .reason <<< "$output")
-  [ "$(sed -n 1p <<< "$reason")" = "$(time_line "2026-12-01 09:05 CET")" ]
-  [ -z "$(sed -n 2p <<< "$reason")" ]
-  [[ "$(sed -n 3p <<< "$reason")" != "" ]]
-  [[ "$reason" == *"o/a#7"* ]]
-}
-
-@test "stop time line: both parts block: one time line only" {
+@test "stop: a loop (items) block and a block of both parts carry no time line; the reasons are joined by one blank line" {
   bridge down; issues o/a "7:Fix:status:ready"
   stop
   blocked
   reason=$(jq -r .reason <<< "$output")
-  [ "$(grep -c 'Time now' <<< "$reason")" -eq 1 ]
-  [[ "$reason" == "$(time_line "2026-10-22 18:40 CEST")"$'\n\n'*"alfred-wake bridge is not running"* ]]
-  [[ "$reason" == *"o/a#7"* ]]
+  [[ "$reason" != *"Time now"* ]]
+  [[ "$reason" == "The alfred-wake bridge is not running"*$'\n\n'*"o/a#7"* ]]
 }
 
-@test "stop time line: stop_hook_active true with a re-block: the line is present" {
+@test "stop: stop_hook_active true with a re-block: no time line" {
   bridge down; issues o/a "7:Fix:status:ready"
   stop; blocked
   issues o/a "7:Fix:status:ready" "8:New:status:ready"
   at 5; stop true
   blocked
-  [ "$(jq -r .reason <<< "$output" | sed -n 1p)" = "$(time_line "2026-10-22 18:40 CEST")" ]
+  [[ "$output" != *"Time now"* ]]
 }
 
-@test "stop time line: an allowed stop is silent, no line" {
-  bridge up; issues o/a
-  stop
+@test "stop: a block writes no debug-log line (the source stop line is gone)" {
+  export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log"
+  bridge down; issues o/a
+  stop; blocked
+  [ ! -e "$ALFRED_REPLY_TS_LOG" ]
+}
+
+@test "stop: no source of a time line is left in stop.sh (with_time_line, on_signal child, source stop)" {
+  run ! grep -qE 'with_time_line|reply_time_line|reply_time_log|Time now' "$ROOT/hooks/stop.sh"
+  run ! grep -q 'timeout -k 0 1 bash -c' "$ROOT/hooks/stop.sh"
+}
+
+# rt_stop <final message> [active] [session] — run the private stop.sh and a fixed clock (RT_NOW). With quiet
+# parts by default; RT_REAL=1 runs the real parts (the `bridge` and `issues` stubs of the other cases).
+rt_stop() {
+  jq -cn --arg m "$1" --argjson a "${2:-false}" --arg s "${3:-s1}" --arg c "$PROJ" \
+    '{session_id: $s, stop_hook_active: $a, cwd: $c, last_assistant_message: $m}' > "$BATS_TEST_TMPDIR/stop-in.json"
+  printf '#!/bin/sh\nexit 0\n' > "$BATS_TEST_TMPDIR/quiet.sh"; chmod +x "$BATS_TEST_TMPDIR/quiet.sh"
+  if [ -n "${RT_REAL:-}" ]; then
+    ALFRED_REPLY_TS_NOW=${RT_NOW:-1793000000} run --separate-stderr "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json"
+  else
+    ALFRED_REPLY_TS_NOW=${RT_NOW:-1793000000} ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/quiet.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/quiet.sh" \
+      run --separate-stderr "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json"
+  fi
+}
+rtget() { jq -r "$1" "$RTDIR/${2:-s1}.json"; }
+
+@test "stop record: an allowed Stop writes last_stop, stop_nonempty, open false and last_activity, and prints nothing" {
+  rt_stop "all done"
   silent
+  [ "$(jq -c . "$RTDIR/s1.json")" = '{"last_stop":1793000000,"stop_nonempty":true,"open":false,"last_activity":1793000000}' ]
 }
 
-@test "stop time line: allowed with only a systemMessage: no Time now anywhere" {
+@test "stop record: an empty final message writes no last_activity and leaves the stored one" {
+  mkdir -p "$RTDIR"; echo '{"last_activity":1700000000,"open":true}' > "$RTDIR/s1.json"
+  rt_stop ""
+  silent
+  [ "$(jq -c . "$RTDIR/s1.json")" = '{"last_activity":1700000000,"open":false,"last_stop":1793000000,"stop_nonempty":false}' ]
+}
+
+@test "stop record: a blocked Stop and a Stop with stop_hook_active true are recorded too" {
   bridge down; issues o/a
-  stop true
+  RT_REAL=1 RT_NOW=1793000000 rt_stop "first" false
+  blocked
+  [ "$(rtget .last_stop)" = 1793000000 ]
+  RT_REAL=1 RT_NOW=1793000050 rt_stop "second" true
+  [ "$(rtget .last_stop)" = 1793000050 ]
+  [ "$(rtget .last_activity)" = 1793000050 ]
+}
+
+@test "stop record: the clock is read once, before any part runs (a part that takes seconds does not age it)" {
+  printf '#!/bin/sh\nsleep 2\n' > "$BATS_TEST_TMPDIR/slow.sh"; chmod +x "$BATS_TEST_TMPDIR/slow.sh"
+  cat > "$BATS_TEST_TMPDIR/bin/date" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  *"+%s"*) n=$(cat "$CNT" 2>/dev/null || echo 0); echo $((n + 1)) > "$CNT"; echo $((1793000000 + n * 130)) ;;
+  *) exec /usr/bin/date "$@" ;;
+esac
+FAKE
+  chmod +x "$BATS_TEST_TMPDIR/bin/date"
+  export CNT="$BATS_TEST_TMPDIR/cnt"
+  unset ALFRED_REPLY_TS_NOW
+  jq -cn '{session_id: "s1", stop_hook_active: false, last_assistant_message: "ok"}' > "$BATS_TEST_TMPDIR/stop-in.json"
+  ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/slow.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/slow.sh" "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json"
+  [ "$(rtget .last_stop)" = 1793000000 ]
+  [ "$(cat "$CNT")" -eq 1 ]
+}
+
+@test "stop record: ALFRED_ROLE=worker writes and reads nothing; no session_id writes nothing" {
+  ALFRED_ROLE=worker rt_stop "ok"
+  [ ! -e "$RTDIR" ]
+  jq -cn '{last_assistant_message: "ok"}' > "$BATS_TEST_TMPDIR/stop-in.json"
+  ALFRED_REPLY_TS_NOW=1793000000 run --separate-stderr "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json"
   [ "$status" -eq 0 ]
-  not blocked
-  [ -n "$(jq -r '.systemMessage // empty' <<< "$output")" ]
-  [[ "$output" != *"Time now"* ]]
+  [ ! -e "$RTDIR" ]
 }
 
-@test "stop time line: ALFRED_ROLE=worker with a block: no line" {
-  bridge down; issues o/a
-  ALFRED_ROLE=worker stop
-  blocked
-  [[ "$output" != *"Time now"* ]]
+@test "stop record: garbage, empty or non-object stdin writes nothing, exits 0, no block" {
+  for in in "garbage {" "" "[1]" '"x"'; do
+    printf '%s' "$in" > "$BATS_TEST_TMPDIR/stop-in.json"
+    ALFRED_REPLY_TS_NOW=1793000000 run --separate-stderr "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json"
+    [ "$status" -eq 0 ]; not blocked
+  done
+  [ ! -e "$RTDIR" ]
 }
 
-@test "stop time line: zone UTC with a block: still blocks, no line, one stderr line" {
-  bridge down; issues o/a
-  FAKE_DATE="2026-10-22 16:40 UTC" stop
-  blocked
-  [[ "$output" != *"Time now"* ]]
-  [ "$(wc -l <<< "$stderr")" -eq 1 ]
-  [[ "$stderr" == *"no Europe/Amsterdam time"* ]]
-}
-
-@test "stop time line: lib absent: still blocks, no line" {
+@test "stop record: lib absent, or an unwritable state directory: the Stop still goes through, exit 0, a block still blocks" {
   bridge down; issues o/a
   rm -rf "$PLUG/lib"
-  stop
-  blocked
-  [ "$(jq -r .reason <<< "$output" | head -1)" != "" ]
-  [[ "$output" != *"Time now"* ]]
+  RT_REAL=1 rt_stop "ok"; blocked
+  [ ! -e "$RTDIR" ]
+  cp -r "$ROOT/lib" "$PLUG/"
+  mkdir -p "$CLAUDE_CONFIG_DIR"; echo x > "$RTDIR"
+  RT_REAL=1 rt_stop "ok"; blocked
+  [ "$status" -eq 0 ]
 }
 
-@test "stop time line: log line {source stop, entrypoint, owner null, emitted true}, entrypoint set and unset" {
-  export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log"
-  bridge down; issues o/a
-  CLAUDE_CODE_ENTRYPOINT=cli stop; blocked
-  stop; blocked
-  [ "$(wc -l < "$ALFRED_REPLY_TS_LOG")" -eq 2 ]
-  [ "$(jq -sc 'map({source, entrypoint, owner, emitted})' "$ALFRED_REPLY_TS_LOG")" = '[{"source":"stop","entrypoint":"cli","owner":null,"emitted":true},{"source":"stop","entrypoint":"","owner":null,"emitted":true}]' ]
+# The record is a background child beside the parts (CCW-180, C2). A slow `mv` in
+# front of PATH makes it outlast the quiet parts, so these cases catch a missing wait.
+slow_mv() {
+  real=$(command -v mv)
+  printf '#!/bin/sh\nsleep 1.37\nexec %s "$@"\n' "$real" > "$BATS_TEST_TMPDIR/bin/mv"
+  chmod +x "$BATS_TEST_TMPDIR/bin/mv"
 }
 
-@test "stop time line: no log when the stop allows" {
-  export ALFRED_REPLY_TS_LOG="$BATS_TEST_TMPDIR/ts.log"
-  bridge up; issues o/a
-  stop; silent
-  [ ! -e "$ALFRED_REPLY_TS_LOG" ]
+@test "stop record: stop.sh waits for the record before it exits, on an allowed and on a blocked Stop" {
+  slow_mv
+  printf '#!/bin/sh\nexit 0\n' > "$BATS_TEST_TMPDIR/quiet.sh"; chmod +x "$BATS_TEST_TMPDIR/quiet.sh"
+  jq -cn '{session_id: "s1", stop_hook_active: false, last_assistant_message: "ok"}' > "$BATS_TEST_TMPDIR/stop-in.json"
+  ALFRED_REPLY_TS_NOW=1793000000 ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/quiet.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/quiet.sh" \
+    "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json" > "$BATS_TEST_TMPDIR/out.txt" 2>&1
+  [ "$(rtget .last_stop)" = 1793000000 ]
+  [ ! -s "$BATS_TEST_TMPDIR/out.txt" ]
+  printf '#!/bin/sh\necho {\\"decision\\":\\"block\\",\\"reason\\":\\"bridge down\\"}\n' > "$BATS_TEST_TMPDIR/b.sh"; chmod +x "$BATS_TEST_TMPDIR/b.sh"
+  ALFRED_REPLY_TS_NOW=1793000100 ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/b.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/quiet.sh" \
+    "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json" > "$BATS_TEST_TMPDIR/out.txt" 2>&1
+  [ "$(rtget .last_stop)" = 1793000100 ]
+  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
+  [ -z "$(ls "$RTDIR" | grep tmp)" ]
+}
+
+@test "stop record: TERM during the record lets it finish: fail-open output, exit 0, state written, no temp file left" {
+  slow_mv
+  printf '#!/bin/sh\necho {\\"decision\\":\\"block\\",\\"reason\\":\\"bridge down\\"}\n' > "$BATS_TEST_TMPDIR/b.sh"
+  printf '#!/bin/sh\nexit 0\n' > "$BATS_TEST_TMPDIR/quiet.sh"
+  chmod +x "$BATS_TEST_TMPDIR/b.sh" "$BATS_TEST_TMPDIR/quiet.sh"
+  jq -cn '{session_id: "s1", stop_hook_active: false, last_assistant_message: "ok"}' > "$BATS_TEST_TMPDIR/stop-in.json"
+  export ALFRED_REPLY_TS_NOW=1793000000 ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/b.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/quiet.sh"
+  set -m
+  "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json" > "$BATS_TEST_TMPDIR/out.txt" 2>/dev/null 3>&- &
+  pid=$!
+  sleep 0.5
+  ls "$RTDIR" | grep -q 'tmp'           # the record is mid-write
+  kill -TERM "$pid"
+  wait "$pid"; rc=$?
+  [ "$rc" -eq 0 ]
+  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
+  [ "$(rtget .last_stop)" = 1793000000 ]
+  [ -z "$(ls "$RTDIR" | grep tmp)" ]
 }
 
 @test "hooks.json: Stop runs stop.sh (not bridge-check.sh directly), #131's entries stay, note-turn is on UserPromptSubmit" {
