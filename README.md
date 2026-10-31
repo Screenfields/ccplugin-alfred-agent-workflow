@@ -317,6 +317,25 @@ state. The gate, the fields and the wording are in `lib/reply-time.sh`; `lib/own
 (shared with the loop check's `note-turn`) only fills the `owner` field of the debug log.
 Debug log: `ALFRED_REPLY_TS_LOG=<file>` ({ts, source, entrypoint, owner, emitted, gap}).
 
+A shown time must be true (CCW-184). `hooks/reply-audit.sh` is the third part of the Stop entry:
+it reads `last_assistant_message`, and when the reply starts with a stamp (`_[YYYY-MM-DD HH:MM CET|CEST]_`,
+or `Time now _[...]_`) that is in the future, or more than `reply-time-tolerance-minutes` behind both
+the clock and every time injected this turn, it blocks the Stop once with the correct time. It
+never asks for a stamp: a reply without one, an empty reply, a worker and any failure of the check
+are silent. The injected times and a `flagged` flag are two more keys of the state file in
+`alfred-reply-ts/` (one file per session, epochs and flags only): the prompt hook adds the epoch it
+injected (newest 8) and clears the flag, and a prompt that arrives after a recorded Stop restarts the
+list. The clock is the one `stop.sh` reads before any part runs, so a slow part does not age a fresh
+stamp. `ALFRED_REPLY_TS_AUDIT=0` (only the exact value `0`) turns the audit off: it reads nothing and
+`stop.sh` does not start it; the idle gate keeps working. Known limits: an interrupted turn (no
+Stop recorded) leaves its epoch in the list into the next turn, so a stamp carried over from it can
+pass; a Stop that blocks leaves the stored `open` false although the turn continues, so a prompt
+that arrives in that continuation restarts the list and a stamp that uses the turn's first injected
+time can then be flagged; a long turn may end with its first injected time, which the rule allows;
+and a time read at 07:20:58, stamped 07:20 and sent after 07:23:00 can be flagged although it was
+true when read (bounded by the reply's generation time, one short extra turn). The check is a net,
+not a promise: a reply that follows the rule can still be flagged in these cases.
+
 Note: files in `rules/` are **not** loaded into session context by Claude Code
 (verified on 2.1.296); anything every session must see goes through this hook.
 
@@ -477,14 +496,23 @@ whether to block the stop once. Items parked as waiting on the owner or on a pee
 
 ### One Stop entry
 
-`hooks/stop.sh` is the plugin's only Stop entry for this: it runs `bridge-check.sh` (unchanged)
-and the loop check with the same stdin, and emits **at most one JSON object**. Precedence: a block
-from either part blocks, with one reason (a paragraph for the bridge, then the items and inbox);
+`hooks/stop.sh` is the plugin's only Stop entry for this: it runs `bridge-check.sh` (unchanged),
+the loop check and the stamp audit `hooks/reply-audit.sh` with the same stdin, and emits **at most
+one JSON object**. Precedence: a block from any part blocks, with one reason (a paragraph for the
+audit, then the bridge, then the items and inbox);
 all warnings are joined into one `systemMessage`. Garbage or a timeout from a part becomes a
 warning, never raw output and never a block. Worst case is 5 s for the bridge plus
-`loop-check-deadline-seconds` for the loop part, under the entry's 20 s timeout. Hook-mode scripts
+`loop-check-deadline-seconds` for the loop part plus 1 s for the audit, and 1 s of kill grace per part
+(19 s), under the entry's 20 s timeout. Hook-mode scripts
 use no `set -e`/`set -u` and always exit 0 (CI audits this); a syntax error would exit 2, which
 blocks, so CI also runs `bash -n` on every hook.
+
+The Stop record (the state write for the idle gate) runs as a background child beside the parts and
+ignores TERM, INT and HUP, so a signalled hook does not leave a half-written file. `stop.sh` waits
+for it before it starts the audit and before it prints. On a TERM of the entry it waits for the record
+at most about 1 s, prints the bridge answer and exits 0. A record still unfinished then is left to
+finish by itself after `stop.sh` has gone; if the input it still had to read is gone, that Stop is
+not recorded, and the gate sees the older state (at worst one extra or one missing time line).
 
 ### Required binaries
 
@@ -504,7 +532,8 @@ Printed on stderr as `alfred-loop-check: <text>` (and, where the stop decision c
 `no state for this chain, stop allowed` · `state not written, stop allowed` ·
 `state not written, the note is lost`. Stderr and the friction file only, never the owner's screen:
 `block cap reached, stop allowed` and `no progress since the last block, stop allowed`. From `stop.sh`:
-`<bridge|loop> part gave unusable output, ignored` and `<bridge|loop> part timed out, stop allowed`.
+`<bridge|loop|audit> part gave unusable output, ignored` and `<bridge|loop|audit> part timed out, stop allowed`.
+From `hooks/reply-audit.sh`, stderr only: `reply-audit: reply-time-tolerance-minutes unreadable, no audit`.
 
 ### Known false blocks
 
