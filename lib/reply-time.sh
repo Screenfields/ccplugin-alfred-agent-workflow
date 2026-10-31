@@ -61,9 +61,13 @@
 #   last_stop      epoch (start clock of stop.sh) of the latest Stop
 #   stop_nonempty  whether that Stop's final message was non-empty
 #   last_activity  last_stop of the latest Stop whose final message was non-empty
-# Reserved for CCW-184, neither read nor written here: `injected` (epochs) and
-# `flagged`. Every write merges into the stored object, so keys of other
-# writers survive.
+# Fields the stamp audit (CCW-184) owns, declared here once and described with its
+# functions at the end of this file:
+#   injected       epochs injected in this turn, newest 8 (restarted by a prompt
+#                  that finds open false; extended by a prompt that injects)
+#   flagged        a flag was issued this turn (cleared by every non-worker prompt;
+#                  set only by reply_time_note_flag)
+# Every write merges into the stored object, so keys of other writers survive.
 #
 # Idle gate: emit when (last_activity is absent or now - last_activity >= T) and
 # not (open and now - line_at is in 0..T-1), with T = reply-time-idle-minutes * 60.
@@ -162,12 +166,14 @@ reply_time_gate() {
 # and stale temp files). Runs only when a session's file is first created.
 _rt_prune() { find "$1" -maxdepth 1 -type f -mmin +1440 -delete 2>/dev/null; return 0; }
 
-# _rt_merge <session_id> <json object>: merge the object into the stored one
-# (temp file, then mv). A missing, garbage or non-object file is replaced; an
+# _rt_merge <session_id> <json object> [jq filter]: merge the object into the stored
+# one (temp file, then mv). A missing, garbage or non-object file is replaced; an
 # owned key with a bad type or an out of range epoch is dropped; keys of other
-# writers are kept. A state that is a directory is refused.
+# writers are kept. The optional filter runs on the healed object, with $m (the
+# object) in scope, before `. + $m` (CCW-184: the audit's list and flag are computed
+# there, from the merge's own read). A state that is a directory is refused.
 _rt_merge() {
-  local f dir tmp
+  local f dir tmp prog
   f=$(reply_time_state_file "$1") || return 1
   dir=${f%/*}
   [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || { echo "reply-timestamp: state directory not writable" >&2; return 1; }
@@ -175,13 +181,16 @@ _rt_merge() {
   [ -d "$f" ] && { echo "reply-timestamp: state is a directory, not written" >&2; return 1; }
   [ -e "$f" ] || _rt_prune "$dir"
   tmp="$f.tmp.$$"
-  if { { { [ -f "$f" ] && jq -c --argjson m "$2" '
-           def ok: type == "number" and . >= 1000000000 and . <= 9999999999 and . == floor;
-           (if type == "object" then . else {} end)
-           | reduce ("last_prompt", "last_stop", "last_activity", "line_at") as $k (.; if has($k) and (.[$k] | ok | not) then del(.[$k]) else . end)
-           | reduce ("open", "stop_nonempty") as $k (.; if has($k) and ((.[$k] | type) != "boolean") then del(.[$k]) else . end)
-           | . + $m' "$f" > "$tmp"; } \
-         || jq -nc --argjson m "$2" '$m' > "$tmp"; } && mv -f "$tmp" "$f"; } 2>/dev/null; then
+  # shellcheck disable=SC2016  # $k and $m are jq variables
+  prog='def ok: type == "number" and . >= 1000000000 and . <= 9999999999 and . == floor;
+        (if type == "object" then . else {} end)
+        | reduce ("last_prompt", "last_stop", "last_activity", "line_at") as $k (.; if has($k) and (.[$k] | ok | not) then del(.[$k]) else . end)
+        | reduce ("open", "stop_nonempty", "flagged") as $k (.; if has($k) and ((.[$k] | type) != "boolean") then del(.[$k]) else . end)
+        | if has("injected") and (((.injected | type) != "array") or (.injected | all(ok) | not)) then del(.injected) else . end
+        | ('"${3:-.}"')
+        | . + $m'
+  if { { { [ -f "$f" ] && jq -c --argjson m "$2" "$prog" "$f" > "$tmp"; } \
+         || jq -nc --argjson m "$2" "{} | $prog" > "$tmp"; } && mv -f "$tmp" "$f"; } 2>/dev/null; then
     return 0
   fi
   rm -f "$tmp" 2>/dev/null
@@ -190,13 +199,21 @@ _rt_merge() {
 }
 
 reply_time_note_prompt() {
-  local m
+  local m filter
   [ "${ALFRED_ROLE:-}" = "worker" ] && return 0
   _rt_epoch "${2:-}" || return 1
   m="{\"last_prompt\":$2,\"open\":true"
   [ "${3:-}" = true ] && m="$m,\"line_at\":$2"
+  # The audit's fields (CCW-184), computed from the merge's own read. A Stop
+  # recorded since the list was last extended is `open` false: restart the list.
+  # An injection adds its epoch (newest 8). Every prompt clears the flag.
+  # shellcheck disable=SC2016  # $stopped and $m are jq variables
+  filter='(.open == false) as $stopped
+    | .injected = (if $stopped then [] else (.injected // []) end)
+    | if $m.line_at != null then .injected = ((.injected + [$m.line_at]) | unique | .[-8:]) else . end
+    | .flagged = false'
   # The gate has already written its one stderr line when it hit an anomaly.
-  if [ "${RT_ANOMALY:-0}" = 1 ]; then _rt_merge "${1:-}" "$m}" 2>/dev/null; else _rt_merge "${1:-}" "$m}"; fi
+  if [ "${RT_ANOMALY:-0}" = 1 ]; then _rt_merge "${1:-}" "$m}" "$filter" 2>/dev/null; else _rt_merge "${1:-}" "$m}" "$filter"; fi
 }
 
 reply_time_note_stop() {
@@ -213,4 +230,80 @@ reply_time_note_stop() {
     m="{\"last_stop\":$now,\"stop_nonempty\":false,\"open\":false}"
   fi
   _rt_merge "$sid" "$m"
+}
+
+# --- the stamp audit (CCW-184) ----------------------------------------------
+# hooks/reply-audit.sh, run by hooks/stop.sh as its third part, uses these. The
+# audit owns two more keys of the state file: `injected` (the epochs injected in
+# this turn, newest 8, written by reply_time_note_prompt) and `flagged` (a flag
+# was issued this turn). A prompt after a recorded Stop (stored open false)
+# restarts `injected` and clears `flagged`; the audit itself only ever sets
+# `flagged`, and only through reply_time_note_flag.
+#   reply_time_audit_off
+#       Return 0 when ALFRED_REPLY_TS_AUDIT=0 (exactly 0): the audit is off.
+#   reply_time_audit_state <session_id>
+#       stdout: "<flagged>|<epoch> <epoch> ..." (flagged true or false, the epochs
+#       space separated, possibly none). Return 1 with no output when the state is
+#       absent, a directory, not an object, or an owned audit key is unusable (not
+#       a boolean, not an array of epochs). Epochs are vetted by _rt_epoch.
+#   reply_time_note_flag <session_id>
+#       Record flagged:true (merge write). Return 1 when it cannot be written.
+#   reply_time_stamp_head <text>
+#       stdout: "<Y> <M> <D> <h> <m> <CET|CEST>" of a leading stamp, with or without
+#       the "Time now " prefix, after optional whitespace; else nothing, return 1.
+#   reply_time_stamp_epoch <Y> <M> <D> <h> <m> <zone>
+#       stdout: the epoch of that wall time; the zone token decides the offset (CET
+#       +3600, CEST +7200). Return 1 on an invalid date or an epoch out of range.
+#   reply_time_verdict <stamp_epoch> <now_epoch> <tolerance_min> [injected_epoch...]
+#       stdout: ok | future | stale. Both sides are floored to the minute first.
+#       future: the stamp's minute is after now's. ok: within the tolerance of now's
+#       minute or of any injected epoch's minute. stale: neither. All arguments must
+#       be vetted epochs (the callers do).
+reply_time_audit_off() { [ "${ALFRED_REPLY_TS_AUDIT:-}" = 0 ]; }
+
+reply_time_audit_state() {
+  local f out e
+  f=$(reply_time_state_file "${1:-}") || return 1
+  [ -f "$f" ] || return 1
+  out=$(jq -r '
+    def ok: type == "number" and . >= 1000000000 and . <= 9999999999 and . == floor;
+    if type != "object" then "bad"
+    elif .flagged != null and (.flagged | type) != "boolean" then "bad"
+    elif .injected != null and ((.injected | type) != "array" or (.injected | all(ok) | not)) then "bad"
+    else [(.flagged // false | tostring), ((.injected // []) | map(tostring) | join(" "))] | join("|") end' "$f" 2>/dev/null)
+  case "$out" in ''|bad) return 1 ;; esac
+  for e in ${out#*|}; do _rt_epoch "$e" || return 1; done
+  printf '%s\n' "$out"
+}
+
+reply_time_note_flag() { _rt_merge "${1:-}" '{"flagged":true}'; }
+
+reply_time_stamp_head() {
+  local re='^[[:space:]]*(Time now )?_\[([0-9]{4})-([0-9]{2})-([0-9]{2}) ([0-9]{2}):([0-9]{2}) (CEST|CET)\]_'
+  [[ "${1:-}" =~ $re ]] || return 1
+  printf '%s %s %s %s %s %s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}" \
+    "${BASH_REMATCH[5]}" "${BASH_REMATCH[6]}" "${BASH_REMATCH[7]}"
+}
+
+reply_time_stamp_epoch() {
+  local utc off
+  utc=$(date -u -d "$1-$2-$3 $4:$5:00" +%s 2>/dev/null) || return 1
+  case "$6" in CEST) off=7200 ;; CET) off=3600 ;; *) return 1 ;; esac
+  _rt_epoch "$utc" || return 1
+  utc=$((utc - off))
+  _rt_epoch "$utc" || return 1
+  printf '%s\n' "$utc"
+}
+
+reply_time_verdict() {
+  local s=$(($1 / 60)) n=$(($2 / 60)) tol=$3 e d
+  shift 3
+  if [ "$s" -gt "$n" ]; then echo future; return 0; fi
+  d=$((n - s))
+  if [ "$d" -le "$tol" ]; then echo ok; return 0; fi
+  for e in "$@"; do
+    d=$((e / 60 - s))
+    if [ "${d#-}" -le "$tol" ]; then echo ok; return 0; fi
+  done
+  echo stale
 }

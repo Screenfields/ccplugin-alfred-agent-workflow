@@ -39,5 +39,6 @@
   "loop-check-max-blocks-per-hour": 6,
   "deviation-min-seconds": 60,
   "owner-note-max-age-minutes": 60,
-  "reply-time-idle-minutes": 15
+  "reply-time-idle-minutes": 15,
+  "reply-time-tolerance-minutes": 2
 }

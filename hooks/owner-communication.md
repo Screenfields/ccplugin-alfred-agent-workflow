@@ -14,7 +14,12 @@ artifacts or agent messages.
   replies later in the same set of actions get none. The time to use is the
   injected one, or a fresh `TZ=Europe/Amsterdam date '+%F %H:%M %Z'` reading
   when the turn runs longer than a few minutes, never a guessed one. Devbox and
-  host clocks are UTC.
+  host clocks are UTC. The time line is the injected value of this turn, or a
+  fresh `TZ=Europe/Amsterdam date '+%F %H:%M %Z'` reading no older than the
+  tolerance (`reply-time-tolerance-minutes`) when the reply is written; never
+  estimated, extrapolated or carried over from an earlier turn or reading. A
+  Stop-hook check compares the time line with the clock and flags a wrong one
+  once per turn.
 - Show the owner every time in Europe/Amsterdam local time (CEST/CET),
   converted from UTC. UTC stays fine internally: logs, records, agent messages.
 - Link every GitHub record (issues, PRs, commits, runs, releases, files) with
