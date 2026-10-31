@@ -978,7 +978,7 @@ FAKE
 # front of PATH makes it outlast the quiet parts, so these cases catch a missing wait.
 slow_mv() {
   real=$(command -v mv)
-  printf '#!/bin/sh\nsleep 1.37\nexec %s "$@"\n' "$real" > "$BATS_TEST_TMPDIR/bin/mv"
+  printf '#!/bin/sh\nsleep %s\nexec %s "$@"\n' "${1:-1.37}" "$real" > "$BATS_TEST_TMPDIR/bin/mv"
   chmod +x "$BATS_TEST_TMPDIR/bin/mv"
 }
 
@@ -1018,6 +1018,58 @@ slow_mv() {
   [ -z "$(ls "$RTDIR" | grep tmp)" ]
 }
 
+# The record child ignores TERM (trap ''), and so do its own children (an ignored
+# signal survives exec). A real timeout signals the whole process group, so this is
+# the case that exercises the trap; the test above signals the stop.sh pid only.
+@test "stop record: TERM to the whole process group lets the record finish: exit 0, bridge answer, state written, no temp file" {
+  slow_mv
+  printf '#!/bin/sh\necho {\\"decision\\":\\"block\\",\\"reason\\":\\"bridge down\\"}\n' > "$BATS_TEST_TMPDIR/b.sh"
+  printf '#!/bin/sh\nexit 0\n' > "$BATS_TEST_TMPDIR/quiet.sh"
+  chmod +x "$BATS_TEST_TMPDIR/b.sh" "$BATS_TEST_TMPDIR/quiet.sh"
+  jq -cn '{session_id: "s1", stop_hook_active: false, last_assistant_message: "ok"}' > "$BATS_TEST_TMPDIR/stop-in.json"
+  export ALFRED_REPLY_TS_NOW=1793000000 ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/b.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/quiet.sh"
+  set -m
+  "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json" > "$BATS_TEST_TMPDIR/out.txt" 2>/dev/null 3>&- &
+  pid=$!
+  sleep 0.5
+  ls "$RTDIR" | grep -q 'tmp'           # the record is mid-write
+  kill -TERM -- "-$pid"                 # the group: stop.sh, the record subshell, the slow mv and its sleep
+  wait "$pid"; rc=$?
+  set +m
+  [ "$rc" -eq 0 ]
+  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
+  [ "$(rtget .last_stop)" = 1793000000 ]
+  [ -z "$(ls "$RTDIR" | grep tmp)" ]
+}
+
+@test "stop record: TERM waits for the record at most about 1 s; an unfinished record finishes by itself afterwards" {
+  slow_mv 4
+  printf '#!/bin/sh\necho {\\"decision\\":\\"block\\",\\"reason\\":\\"bridge down\\"}\n' > "$BATS_TEST_TMPDIR/b.sh"
+  printf '#!/bin/sh\nexit 0\n' > "$BATS_TEST_TMPDIR/quiet.sh"
+  chmod +x "$BATS_TEST_TMPDIR/b.sh" "$BATS_TEST_TMPDIR/quiet.sh"
+  jq -cn '{session_id: "s1", stop_hook_active: false, last_assistant_message: "ok"}' > "$BATS_TEST_TMPDIR/stop-in.json"
+  export ALFRED_REPLY_TS_NOW=1793000000 ALFRED_STOP_BRIDGE_BIN="$BATS_TEST_TMPDIR/b.sh" ALFRED_STOP_LOOP_BIN="$BATS_TEST_TMPDIR/quiet.sh"
+  set -m
+  "$STOPP" < "$BATS_TEST_TMPDIR/stop-in.json" > "$BATS_TEST_TMPDIR/out.txt" 2>/dev/null 3>&- &
+  pid=$!
+  sleep 0.5
+  t0=$(date +%s%N)
+  kill -TERM -- "-$pid"
+  wait "$pid"; rc=$?
+  set +m
+  t1=$(date +%s%N)
+  [ "$rc" -eq 0 ]
+  [ "$(jq -r .reason "$BATS_TEST_TMPDIR/out.txt")" = "bridge down" ]
+  [ "$(( (t1 - t0) / 1000000 ))" -lt 2000 ]           # bounded: not the 3.5 s the record still needs
+  [ -z "$(rtget .last_stop 2>/dev/null | grep -x 1793000000)" ]    # not recorded yet when stop.sh left
+  for _ in $(seq 1 60); do
+    [ "$(rtget .last_stop 2>/dev/null)" = 1793000000 ] && break
+    sleep 0.1
+  done
+  [ "$(rtget .last_stop)" = 1793000000 ]               # the orphaned record finished its write
+  [ -z "$(ls "$RTDIR" | grep tmp)" ]
+}
+
 @test "hooks.json: Stop runs stop.sh (not bridge-check.sh directly), #131's entries stay, note-turn is on UserPromptSubmit" {
   h="$ROOT/hooks/hooks.json"
   [ "$(jq -r '.hooks.Stop[0].hooks[0].command' "$h")" = '"${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh"' ]
@@ -1030,7 +1082,7 @@ slow_mv() {
 }
 
 @test "audit: hook-mode scripts hold no set -e/-u and no non-zero exit outside the cli-only lines" {
-  for f in "$ROOT/hooks/stop.sh" "$ROOT/bin/alfred-loop-check" "$ROOT/hooks/reply-timestamp.sh" "$ROOT/lib/owner-turn.sh" "$ROOT/lib/reply-time.sh"; do
+  for f in "$ROOT/hooks/stop.sh" "$ROOT/bin/alfred-loop-check" "$ROOT/hooks/reply-timestamp.sh" "$ROOT/lib/owner-turn.sh" "$ROOT/lib/reply-time.sh" "$ROOT/hooks/reply-audit.sh"; do
     not grep -nE '^\s*set\s+-[a-z]*[eu]' "$f"
     bad=$(grep -nE '\bexit +[1-9]' "$f" | grep -v 'cli-only' || true)
     [ -z "$bad" ] || { echo "$f: $bad"; return 1; }
