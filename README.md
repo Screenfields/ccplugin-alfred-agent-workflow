@@ -290,21 +290,32 @@ that devbox has no Buzz identity), then all leads.
 The plugin ships a `SessionStart` hook (`hooks/hooks.json` →
 `hooks/owner-communication.sh`) that adds the rules in
 `hooks/owner-communication.md` to every session's context: a fresh
-Europe/Amsterdam timestamp line at the top of each chat reply to the owner,
-local time for anything shown to the owner, full-URL links for every
+Europe/Amsterdam time line at the top of the first reply of a new set of actions
+(after an idle period), local time for anything shown to the owner, full-URL links for every
 GitHub record, and how to ask the owner a question without blocking the
 session on a menu (owner-join instead; alfred-platform#917). The
 hook is deterministic (`jq` only, no model call). Edit the `.md` file to
 change the rules.
 
-The timestamp itself is injected per prompt (CCW-141, CCW-180): the `UserPromptSubmit`
-hook `hooks/reply-timestamp.sh` adds the current Europe/Amsterdam time line
-(`Time now _[...]_`) to every prompt, wake turns included; only `ALFRED_ROLE=worker`
-and unusable hook input get none. A Stop-hook continuation is not a prompt, so
-`hooks/stop.sh` puts the same line at the head of its block reason, only when it
-blocks. The wording is in `lib/reply-time.sh`. `lib/owner-turn.sh` (shared with the
-loop check's `note-turn`) now only fills the `owner` field of the debug
-log. Debug log: `ALFRED_REPLY_TS_LOG=<file>` ({ts, source, entrypoint, owner, emitted}).
+The time line is injected, and only when a new set of actions starts (CCW-141, CCW-180):
+the `UserPromptSubmit` hook `hooks/reply-timestamp.sh` adds the current Europe/Amsterdam
+time line (`Time now _[...]_`) to a turn when the session was idle for
+`reply-time-idle-minutes` (the value is in `config/thresholds.json`) or more since the end of
+its last turn with a non-empty final message, or when the gate cannot tell (a first prompt, no
+or unusable state, no session id, an unwritable state directory). The model cannot measure
+idleness, so the injection is the gate: it starts the first reply of that turn with the line
+and puts none on the later replies of the set, so the first reply of a set is the only one
+that carries it. The gate looks at the clock and the state only, never at the wake type, and
+a Stop-hook block reason never carries a line. State is one file per session,
+`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-reply-ts/<session_id>.json`, with epochs and flags
+only (no prompt or reply text): the hook records every non-worker prompt, and `hooks/stop.sh`
+records every Stop with the one clock reading it takes before any part runs and whether the
+final message was empty. A turn that ended with an empty final message (a wake with no news)
+does not use up the line. Files a day old or older are pruned when a session's file is first
+created. `ALFRED_ROLE=worker`, and hook input that is not one JSON object, get no line and no
+state. The gate, the fields and the wording are in `lib/reply-time.sh`; `lib/owner-turn.sh`
+(shared with the loop check's `note-turn`) only fills the `owner` field of the debug log.
+Debug log: `ALFRED_REPLY_TS_LOG=<file>` ({ts, source, entrypoint, owner, emitted, gap}).
 
 Note: files in `rules/` are **not** loaded into session context by Claude Code
 (verified on 2.1.296); anything every session must see goes through this hook.
