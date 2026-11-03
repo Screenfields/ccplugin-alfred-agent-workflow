@@ -134,12 +134,12 @@ models_json() { # ids... -> {"data":[{"id":..}]}
   grep -q '^MAX_TOKENS=8000 .*32000 glm-5.3 and kimi-k3' "$SKILL"
 }
 
-@test "plugin version is 2.42.0" {
-  [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = 2.42.0 ]
+@test "plugin version is 2.43.0" {
+  [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = 2.43.0 ]
 }
 
 @test "no file under tests or .claude-plugin still carries the previous version" {
-  run grep -rn '2\.41\.0' "$BATS_TEST_DIRNAME" "$BATS_TEST_DIRNAME/../.claude-plugin"
+  run grep -rn '2\.42\.0' "$BATS_TEST_DIRNAME" "$BATS_TEST_DIRNAME/../.claude-plugin"
   [ "$status" -eq 1 ]
   [ -z "$output" ]
 }

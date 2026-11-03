@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Test double for curl (CCW-194). Appends its full argv to $CURL_ARGV_LOG and,
+# for each `-H @<file>` argument, records the file's mode at call time. Prints
+# a fixture chat completion.
+{
+  printf 'ARGV:'
+  for a in "$@"; do printf ' [%s]' "$a"; done
+  printf '\n'
+  prev=""
+  for a in "$@"; do
+    if [ "$prev" = "-H" ] && [ "${a#@}" != "$a" ]; then
+      f="${a#@}"
+      printf 'HDRFILE: %s MODE: %s\n' "$f" "$(stat -c %a "$f")"
+    fi
+    prev="$a"
+  done
+} >> "$CURL_ARGV_LOG"
+printf '%s\n' '{"choices":[{"finish_reason":"stop","message":{"content":"ok"}}]}'

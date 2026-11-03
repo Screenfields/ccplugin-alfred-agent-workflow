@@ -101,6 +101,12 @@ Fire all four queries simultaneously — three external via LiteLLM, one sub-age
 # (e.g. for a non-default cluster). Defaulted via shell parameter expansion.
 LITELLM_URL="${LITELLM_URL:-https://litellm.screenfields.net}"
 
+# Temp directory for the auth header file (the key must never reach curl's
+# argv). Created before the credential check so the trap also covers the
+# no-key exit 1 path; EXIT only, so it runs on success and on early exit.
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
 # Credential lookup: env var first, `op` CLI only as a fallback when present.
 # Spoke devboxes do NOT have `op` installed (by design — installing it would
 # give a devbox reach over the whole 1Password vault to solve a
@@ -123,6 +129,7 @@ if [ -z "$LITELLM_KEY" ]; then
   echo "  Neither is available in this environment." >&2
   exit 1
 fi
+( umask 077; printf 'Authorization: Bearer %s\n' "$LITELLM_KEY" > "$tmp/hdr" ); chmod 600 "$tmp/hdr"
 PROMPT=$(cat /tmp/ecr-prompt.txt)
 
 # Timeout: 180s for OpenAI/Google; 400s glm-5.3; 600s kimi-k3; 400s deepseek-v4.1-flash
@@ -131,7 +138,7 @@ PROMPT=$(cat /tmp/ecr-prompt.txt)
 TIMEOUT=180    # override per the table: 400 glm-5.3, 600 kimi-k3, 400 deepseek-v4.1-flash
 MAX_TOKENS=8000  # override per the table: 32000 glm-5.3 and kimi-k3, 32000 deepseek-v4.1-flash
 RESULT=$(curl -s --max-time "$TIMEOUT" "$LITELLM_URL/v1/chat/completions" \
-  -H "Authorization: Bearer $LITELLM_KEY" \
+  -H @"$tmp/hdr" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" '{model: "MODEL_ID", messages: [{role: "user", content: $p}], max_tokens: $mt, metadata: {tags: ["ecr"]}}')"); CURL_EXIT=$?
 if   [ $CURL_EXIT -eq 28 ]; then echo "TIMEOUT (>${TIMEOUT}s)"
@@ -204,7 +211,7 @@ LiteLLM proxy is reachable via the `LITELLM_URL` env var. Default if unset: `htt
 
 **Requires platform-routing context.** The skill is only usable from machines where `litellm.screenfields.net` resolves through the internal-routing path (in-cluster pods via CoreDNS catalog, or platform machines with the equivalent local resolver override). On those hosts the public CF gate is bypassed and the request reaches LiteLLM directly over the tailnet. From environments without that override the request hits public CF and is rejected.
 
-**Auth:** LiteLLM virtual key via `Authorization: Bearer <key>` (the ecr-reviews key). Read `LITELLM_API_KEY` from the environment first; fall back to the `op` CLI only when it's installed and the env var is unset. Fail with an actionable message naming both routes if neither is available — never send an empty or missing key.
+**Auth:** LiteLLM virtual key via an `Authorization: Bearer <key>` header read from a mode-600 file in a temp directory (`-H @"$tmp/hdr"`), so the key never appears in any process's argv (the ecr-reviews key). Read `LITELLM_API_KEY` from the environment first; fall back to the `op` CLI only when it's installed and the env var is unset. Fail with an actionable message naming both routes if neither is available — never send an empty or missing key.
 
 Available top-tier models:
 ```
