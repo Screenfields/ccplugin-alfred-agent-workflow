@@ -12,7 +12,7 @@ setup() {
   export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
   export LITELLM_URL="http://litellm.invalid"
   export LITELLM_API_KEY="sk-fake-secret-key"
-  EXPECTED="gpt-5.4 gemini-3.1-pro glm-5.3 kimi-k3 deepseek-v4.1-flash o3"
+  EXPECTED="gpt-6-astra gemini-4-argon glm-5.3 kimi-k3 deepseek-v4.1-flash gpt-6.1-sol"
 }
 
 models_json() { # ids... -> {"data":[{"id":..}]}
@@ -28,14 +28,14 @@ models_json() { # ids... -> {"data":[{"id":..}]}
 }
 
 @test "a model missing from the key: exits non-zero and names it" {
-  models_json gpt-5.4 gemini-3.1-pro kimi-k3 deepseek-v4.1-flash o3
+  models_json gpt-6-astra gemini-4-argon kimi-k3 deepseek-v4.1-flash gpt-6.1-sol
   run "$CHK"
   [ "$status" -eq 1 ]
   [[ "$output" == *"MISSING: glm-5.3"* ]]
 }
 
 @test "the retired ids are reported missing when the skill still names them" {
-  models_json gpt-5.4 gemini-3.1-pro o3
+  models_json gpt-6-astra gemini-4-argon gpt-6.1-sol
   sed 's/glm-5\.3/glm-5.1/' "$SKILL" > "$BATS_TEST_TMPDIR/old.md"
   run "$CHK" --skill "$BATS_TEST_TMPDIR/old.md"
   [ "$status" -eq 1 ]
@@ -51,7 +51,7 @@ models_json() { # ids... -> {"data":[{"id":..}]}
 }
 
 @test "HTTP error from the endpoint: exits 2" {
-  models_json o3
+  models_json gpt-6.1-sol
   printf 401 > "$STUB_DIR/code"
   run "$CHK"
   [ "$status" -eq 2 ]
@@ -96,33 +96,52 @@ models_json() { # ids... -> {"data":[{"id":..}]}
   for m in glm-5.1 kimi-k2 deepseek-v4-pro; do
     if grep -qi -- "$m" "$SKILL"; then false; fi
   done
+  for m in gpt-5.4 gemini-3.1-pro claude-opus-4-8 "Opus 4.8" "GPT 5.4" "Gemini 3.1 Pro"; do
+    if grep -qiF -- "$m" "$SKILL"; then false; fi
+  done
+  if grep -qiw -- o3 "$SKILL"; then false; fi
 }
 
 @test "panel table: glm-5.3 has 400s and 32000 and a reasoning note" {
   line=$(grep '^| `glm-5.3`' "$SKILL")
   [[ "$line" == *"reasoning"* ]]
   [[ "$line" == *"| 400s | 32000 |" ]]
-  grep -q '^| `gpt-5.4`' "$SKILL"
-  grep -q '^| `gemini-3.1-pro`' "$SKILL"
 }
 
-@test "alternatives table: kimi-k3 600s slow, deepseek-v4.1-flash budget, o3" {
+@test "panel table: gpt-6-astra and gemini-4-argon are reasoning models at 180s and 8000" {
+  for m in gpt-6-astra gemini-4-argon; do
+    line=$(grep "^| \`$m\`" "$SKILL")
+    [[ "$line" == *"| 180s | 8000 |" ]]
+    [[ "$line" == *"reasoning model"* ]]
+  done
+}
+
+@test "alternatives table: kimi-k3 600s slow, deepseek-v4.1-flash budget, gpt-6.1-sol" {
   line=$(grep '^| `kimi-k3`' "$SKILL")
   [[ "$line" == *"slow, untested to completion"* ]]
   [[ "$line" == *"| 600s |"* ]]
   grep '^| `deepseek-v4.1-flash`' "$SKILL" | grep -qi budget
-  grep -q '^| `o3`' "$SKILL"
+  line=$(grep '^| `gpt-6.1-sol`' "$SKILL")
+  [[ "$line" == *"non-quota"* ]]
+  [[ "$line" == *"| 180s | 8000 |" ]]
+  if grep -q '^| `o3`' "$SKILL"; then false; fi
 }
 
 @test "bash template comments match the table" {
   grep -q '^# Timeout: .*400s glm-5.3; 600s kimi-k3' "$SKILL"
   grep -q '^# max_tokens: .*32000 for glm-5.3 and kimi-k3' "$SKILL"
-  grep -q '^TIMEOUT=90 .*400 glm-5.3, 600 kimi-k3' "$SKILL"
+  grep -q '^TIMEOUT=180 .*400 glm-5.3, 600 kimi-k3' "$SKILL"
   grep -q '^MAX_TOKENS=8000 .*32000 glm-5.3 and kimi-k3' "$SKILL"
 }
 
-@test "plugin version is 2.41.0" {
-  [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = 2.41.0 ]
+@test "plugin version is 2.42.0" {
+  [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = 2.42.0 ]
+}
+
+@test "no file under tests or .claude-plugin still carries the previous version" {
+  run grep -rn '2\.41\.0' "$BATS_TEST_DIRNAME" "$BATS_TEST_DIRNAME/../.claude-plugin"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
 }
 
 # --- parser strictness: a reworded table must fail loudly, never drop models ---
@@ -146,28 +165,28 @@ mutate() { # sed-expr -> $BATS_TEST_TMPDIR/mut.md
 }
 
 @test "a section with zero ids: exit 2" {
-  mutate '/^| `\(kimi-k3\|deepseek-v4.1-flash\|o3\)`/d'
+  mutate '/^| `\(kimi-k3\|deepseek-v4.1-flash\|gpt-6.1-sol\)`/d'
   run "$CHK" --list --skill "$BATS_TEST_TMPDIR/mut.md"
   [ "$status" -eq 2 ]
   [[ "$output" == *"no model ids"* ]]
 }
 
 @test "a row with no backticked id: exit 2" {
-  mutate 's/^| `o3` |/| o3 |/'
+  mutate 's/^| `gpt-6.1-sol` |/| gpt-6.1-sol |/'
   run "$CHK" --list --skill "$BATS_TEST_TMPDIR/mut.md"
   [ "$status" -eq 2 ]
   [[ "$output" == *"unparsable row"* ]]
 }
 
 @test "a bolded id is still parsed" {
-  mutate 's/^| `o3` |/| **`o3`** |/'
+  mutate 's/^| `gpt-6.1-sol` |/| **`gpt-6.1-sol`** |/'
   run "$CHK" --list --skill "$BATS_TEST_TMPDIR/mut.md"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf '%s\n' $EXPECTED)" ]
 }
 
 @test "a missing space after the pipe is still parsed" {
-  mutate 's/^| `o3` |/|`o3` |/'
+  mutate 's/^| `gpt-6.1-sol` |/|`gpt-6.1-sol` |/'
   run "$CHK" --list --skill "$BATS_TEST_TMPDIR/mut.md"
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf '%s\n' $EXPECTED)" ]
@@ -176,7 +195,7 @@ mutate() { # sed-expr -> $BATS_TEST_TMPDIR/mut.md
 # --- fetch failures and cleanup ---
 
 @test "curl failure (code 000): exits 2" {
-  models_json o3
+  models_json gpt-6.1-sol
   printf 000 > "$STUB_DIR/code"
   run "$CHK"
   [ "$status" -eq 2 ]
