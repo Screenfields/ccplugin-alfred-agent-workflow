@@ -25,17 +25,17 @@ Query three external top-tier AI models via LiteLLM **plus** a Claude sub-agent 
 
 | Model ID | Provider | Strength | Timeout | max_tokens |
 |----------|----------|----------|---------|------------|
-| `gpt-5.4` | OpenAI | Strongest overall reasoning, thorough implementation details | 90s | 8000 |
-| `gemini-3.1-pro` | Google | Practical, concise, good at catching operational risks | 90s | 8000 |
+| `gpt-6-astra` | OpenAI | Strongest overall reasoning, thorough implementation details; reasoning model | 180s | 8000 |
+| `gemini-4-argon` | Google | Practical, concise, good at catching operational risks; reasoning model | 180s | 8000 |
 | `glm-5.3` | Fireworks (Zhipu) | Strong structured analysis, good at edge cases; thinking model that spends most of its tokens on reasoning (about 11.5k completion tokens on a 10.8k-token prompt) | 400s | 32000 |
 
 ### Self-Review Sub-Agent (4th voice — via Agent tool)
 
-Spawn a Claude sub-agent using the **highest model available in the Max subscription** with the same anonymized prompt. This gives a same-provider but highest-tier perspective running independently of the currently active session model.
+Spawn a Claude sub-agent using the **highest Claude model the Agent tool accepts** with the same anonymized prompt. This gives a same-provider but highest-tier perspective running independently of the currently active session model.
 
-| Runtime | Max subscription highest model | Agent tool `model` param |
+| Runtime | Highest Claude model | Agent tool `model` param |
 |---------|-------------------------------|--------------------------|
-| Claude Code | Opus 4.8 | `claude-opus-4-8` |
+| Claude Code | Fable 5.1 (`claude-fable-5-1`) | `fable` |
 
 The sub-agent is given the ECR prompt and asked to return: verdict, top-3 insights, and specific conditions. It runs **in parallel** with the LiteLLM calls — this is intentional: parallel execution prevents the self-voice from being anchored by the external panel before forming its own opinion.
 
@@ -45,11 +45,11 @@ The sub-agent is given the ECR prompt and asked to return: verdict, top-3 insigh
 |----------|----------|----------|---------|------------|
 | `kimi-k3` | Fireworks (Moonshot) | Alternative to GLM-5.3, strong on complex reasoning; thinking model; slow, untested to completion (timed out at 300s) | 600s | 32000 |
 | `deepseek-v4.1-flash` | Fireworks (DeepSeek) | Budget option, good for code-heavy reviews | 400s | 32000 |
-| `o3` | OpenAI | Deep reasoning — **only if gpt-5.4 fails for a non-quota reason**; same provider means o3 also fails on quota errors | 90s | 8000 |
+| `gpt-6.1-sol` | OpenAI | Alternative OpenAI model — **only if gpt-6-astra fails for a non-quota reason**; same provider means gpt-6.1-sol also fails on quota errors | 180s | 8000 |
 
 ### Rules
 - External panel: always use models from **different providers** for diverse perspectives
-- **Quota failures are provider-wide:** if gpt-5.4 returns RateLimitError, o3 will too — substitute a Fireworks model instead, not o3
+- **Quota failures are provider-wide:** if gpt-6-astra returns RateLimitError, gpt-6.1-sol will too — substitute a Fireworks model instead, not gpt-6.1-sol
 - Sub-agent always uses the highest available Claude model — not the currently-running model
 - Run all four queries **in parallel** for speed
 - For quick validations: 2 external models + sub-agent (3 voices total)
@@ -125,10 +125,10 @@ if [ -z "$LITELLM_KEY" ]; then
 fi
 PROMPT=$(cat /tmp/ecr-prompt.txt)
 
-# Timeout: 90s for OpenAI/Google; 400s glm-5.3; 600s kimi-k3; 400s deepseek-v4.1-flash
+# Timeout: 180s for OpenAI/Google; 400s glm-5.3; 600s kimi-k3; 400s deepseek-v4.1-flash
 # max_tokens: 8000 for OpenAI/Google; 32000 for glm-5.3 and kimi-k3 (thinking models burn
 # most of their tokens on reasoning; 12000 left glm-5.3 and deepseek-v4.1-flash with no content); 32000 for deepseek-v4.1-flash
-TIMEOUT=90     # override per the table: 400 glm-5.3, 600 kimi-k3, 400 deepseek-v4.1-flash
+TIMEOUT=180    # override per the table: 400 glm-5.3, 600 kimi-k3, 400 deepseek-v4.1-flash
 MAX_TOKENS=8000  # override per the table: 32000 glm-5.3 and kimi-k3, 32000 deepseek-v4.1-flash
 RESULT=$(curl -s --max-time "$TIMEOUT" "$LITELLM_URL/v1/chat/completions" \
   -H "Authorization: Bearer $LITELLM_KEY" \
@@ -147,7 +147,7 @@ fi
 
 ```
 Agent(
-  model: "claude-opus-4-8",
+  model: "fable",
   prompt: "You are acting as an independent peer reviewer in an Expert Consulting Review (ECR).
 Your task: review the following anonymized proposal and return exactly:
 1. Verdict: APPROVE | APPROVE WITH CONDITIONS | REQUEST CHANGES
@@ -162,7 +162,7 @@ Do not explain your role. Return the review directly.
 )
 ```
 
-The sub-agent runs at `claude-opus-4-8` (highest model in the Max subscription) regardless of which Claude model the lead session is using, ensuring a highest-tier independent perspective. Its output feeds directly into the synthesis step.
+The sub-agent runs at `fable` (Fable 5.1, `claude-fable-5-1`, the highest Claude model the Agent tool accepts) regardless of which Claude model the lead session is using, ensuring a highest-tier independent perspective. Its output feeds directly into the synthesis step.
 
 ### Step 4: Synthesize Results
 
@@ -180,10 +180,10 @@ Format:
 
 | Voice | Provider | Verdict | Key insight |
 |-------|----------|---------|-------------|
-| GPT 5.4 | OpenAI | ... | ... |
-| Gemini 3.1 Pro | Google | ... | ... |
+| GPT-6 Astra | OpenAI | ... | ... |
+| Gemini 4 Argon | Google | ... | ... |
 | GLM-5.3 | Fireworks | TIMEOUT (>400s) | — |
-| Claude Opus 4.8 | Anthropic (sub-agent) | ... | ... |
+| Claude Fable 5.1 | Anthropic (sub-agent) | ... | ... |
 
 ### Consensus
 [What responding voices agree on]
@@ -208,12 +208,12 @@ LiteLLM proxy is reachable via the `LITELLM_URL` env var. Default if unset: `htt
 
 Available top-tier models:
 ```
-gpt-5.4              OpenAI
-gemini-3.1-pro       Google
+gpt-6-astra          OpenAI
+gemini-4-argon       Google
 glm-5.3              Fireworks (Zhipu)
 kimi-k3              Fireworks (Moonshot)
 deepseek-v4.1-flash  Fireworks (DeepSeek)
-o3                   OpenAI (reasoning)
+gpt-6.1-sol          OpenAI
 ```
 
 The key's model list changes. Run `${CLAUDE_PLUGIN_ROOT}/bin/ecr-models-check` to confirm every model named in the two tables above is on the `ecr-reviews` key (`GET /v1/models`); it exits non-zero and names the missing ones, and prints `skipped: no LITELLM_API_KEY` when the key is absent.
@@ -255,7 +255,7 @@ ECR virtual key: `op://sf-platform/litellm/virtual-key/ecr-reviews/password` —
 1. User provides design document or decision
 2. Agent writes prompt with real names
 3. Agent anonymizes prompt (Step 2 — MANDATORY, verify with grep)
-4. Agent queries 3 external models via LiteLLM **and** spawns Claude Opus 4.8 sub-agent — all 4 in parallel
+4. Agent queries 3 external models via LiteLLM **and** spawns Claude Fable 5.1 sub-agent — all 4 in parallel
 5. Agent synthesizes 4-voice results into consensus + conditions
 6. Agent presents actionable summary to user
 7. If approved: update document with ECR decisions log
