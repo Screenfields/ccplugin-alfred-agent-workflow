@@ -269,7 +269,9 @@ before the token exists.
 Out-of-band resolution steps (human executes):
 1. Admin creates the GitHub App installation manually (bypasses the spoke's auth flow)
 2. Admin verifies token validity:
-   curl -H "Authorization: Bearer $(cat /path/to/token)" \
+   tmp=$(mktemp -d) && trap 'rm -rf "$tmp"' EXIT
+   ( umask 077; printf 'Authorization: Bearer %s\n' "$(cat /path/to/token)" > "$tmp/hdr" ); chmod 600 "$tmp/hdr"
+   curl -H @"$tmp/hdr" \
         https://api.github.com/repos/Screenfields/{project-name}
 3. Admin confirms to the spoke (via agent-messaging or direct) that the token is valid
 4. Spoke proceeds with the rest of the onboarding checklist

@@ -129,3 +129,64 @@ run_block() { # json -> stdout of the template's output block
   [ "$status" -eq 1 ]
   [ -z "$output" ]
 }
+
+# CCW-194: the gateway key stays off curl's command line.
+
+@test "CCW-194: no argv Authorization header in the ecr or onboard skill" {
+  ONBOARD="$BATS_TEST_DIRNAME/../skills/onboard/SKILL.md"
+  run grep -nE -e "-H \"Authorization|-H 'Authorization" "$SKILL" "$ONBOARD"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
+@test "CCW-194: the ecr template passes the header as a file" {
+  grep -qF -e '-H @"$tmp/hdr"' "$SKILL"
+}
+
+@test "CCW-194: onboard has no curl or --header line with Bearer \$ or \$(cat, and uses -H @" {
+  ONBOARD="$BATS_TEST_DIRNAME/../skills/onboard/SKILL.md"
+  if grep -E 'curl|--header' "$ONBOARD" | grep -qE -e 'Bearer \$|\$\(cat'; then false; fi
+  grep -qF -e '-H @' "$ONBOARD"
+}
+
+# The whole template fence: from the '# LITELLM_URL:' line to the closing fence line.
+setup_template() {
+  awk '/^# LITELLM_URL:/{on=1} on&&/^```/{exit} on{print}' "$SKILL" \
+    | sed 's/MODEL_ID/fixture-model/' > "$BATS_TEST_TMPDIR/template.sh"
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/template.sh")" -ge 30 ]
+  [ "$(tail -n1 "$BATS_TEST_TMPDIR/template.sh")" = fi ]
+  mkdir -p "$BATS_TEST_TMPDIR/t" "$BATS_TEST_TMPDIR/bin"
+  ln -sf "$BATS_TEST_DIRNAME/stub/curl-argv" "$BATS_TEST_TMPDIR/bin/curl"
+  export CURL_ARGV_LOG="$BATS_TEST_TMPDIR/curl-argv.log" # outside $BATS_TEST_TMPDIR/t
+  : > "$CURL_ARGV_LOG"
+  SAVED=""
+  if [ -e /tmp/ecr-prompt.txt ]; then SAVED="$BATS_TEST_TMPDIR/prompt.saved"; cp -p /tmp/ecr-prompt.txt "$SAVED"; fi
+  echo "fixture prompt" > /tmp/ecr-prompt.txt
+}
+
+teardown_template() {
+  if [ -n "${SAVED:-}" ]; then cp -p "$SAVED" /tmp/ecr-prompt.txt; else rm -f /tmp/ecr-prompt.txt; fi
+}
+
+@test "CCW-194: template run keeps the key out of argv, header file is mode 600 under TMPDIR, temp dir is gone" {
+  setup_template
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" LITELLM_API_KEY=FAKEKEY-ccw194-Zq7 TMPDIR="$BATS_TEST_TMPDIR/t" bash "$BATS_TEST_TMPDIR/template.sh"
+  teardown_template
+  [ "$status" -eq 0 ]
+  [ "$output" = ok ]
+  [ -s "$CURL_ARGV_LOG" ]
+  if grep -q 'FAKEKEY-ccw194-Zq7' "$CURL_ARGV_LOG"; then false; fi
+  grep -q ' MODE: 600$' "$CURL_ARGV_LOG"
+  grep -q "^HDRFILE: $BATS_TEST_TMPDIR/t/" "$CURL_ARGV_LOG"
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/t")" ]
+}
+
+@test "CCW-194: template without a credential exits 1, makes no curl call, leaves no temp dir" {
+  setup_template
+  run env -u LITELLM_API_KEY PATH="$BATS_TEST_TMPDIR/bin:/usr/bin:/bin" TMPDIR="$BATS_TEST_TMPDIR/t" bash "$BATS_TEST_TMPDIR/template.sh"
+  teardown_template
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ERROR: no LiteLLM credential available for the ECR skill."* ]]
+  [ ! -s "$CURL_ARGV_LOG" ]
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/t")" ]
+}
