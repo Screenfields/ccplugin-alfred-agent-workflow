@@ -44,7 +44,7 @@ The sub-agent is given the ECR prompt and asked to return: verdict, top-3 insigh
 | Model ID | Provider | Use when | Timeout | max_tokens |
 |----------|----------|----------|---------|------------|
 | `kimi-k3` | Fireworks (Moonshot) | Alternative to GLM-5.3, strong on complex reasoning; thinking model; slow, untested to completion (timed out at 300s) | 600s | 32000 |
-| `deepseek-v4.1-flash` | Fireworks (DeepSeek) | Budget option, good for code-heavy reviews | 180s | 12000 |
+| `deepseek-v4.1-flash` | Fireworks (DeepSeek) | Budget option, good for code-heavy reviews | 400s | 32000 |
 | `o3` | OpenAI | Deep reasoning — **only if gpt-5.4 fails for a non-quota reason**; same provider means o3 also fails on quota errors | 90s | 8000 |
 
 ### Rules
@@ -125,17 +125,18 @@ if [ -z "$LITELLM_KEY" ]; then
 fi
 PROMPT=$(cat /tmp/ecr-prompt.txt)
 
-# Timeout: 90s for OpenAI/Google; 400s glm-5.3; 600s kimi-k3; 180s deepseek-v4.1-flash
+# Timeout: 90s for OpenAI/Google; 400s glm-5.3; 600s kimi-k3; 400s deepseek-v4.1-flash
 # max_tokens: 8000 for OpenAI/Google; 32000 for glm-5.3 and kimi-k3 (thinking models burn
-# most of their tokens on reasoning; 12000 left glm-5.3 with no content); 12000 for deepseek-v4.1-flash
-TIMEOUT=90     # override per the table: 400 glm-5.3, 600 kimi-k3, 180 deepseek-v4.1-flash
-MAX_TOKENS=8000  # override per the table: 32000 glm-5.3 and kimi-k3, 12000 deepseek-v4.1-flash
+# most of their tokens on reasoning; 12000 left glm-5.3 and deepseek-v4.1-flash with no content); 32000 for deepseek-v4.1-flash
+TIMEOUT=90     # override per the table: 400 glm-5.3, 600 kimi-k3, 400 deepseek-v4.1-flash
+MAX_TOKENS=8000  # override per the table: 32000 glm-5.3 and kimi-k3, 32000 deepseek-v4.1-flash
 RESULT=$(curl -s --max-time "$TIMEOUT" "$LITELLM_URL/v1/chat/completions" \
   -H "Authorization: Bearer $LITELLM_KEY" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" '{model: "MODEL_ID", messages: [{role: "user", content: $p}], max_tokens: $mt, metadata: {tags: ["ecr"]}}')"); CURL_EXIT=$?
 if   [ $CURL_EXIT -eq 28 ]; then echo "TIMEOUT (>${TIMEOUT}s)"
 elif [ -z "$RESULT" ];       then echo "ERROR (empty response)"
+elif echo "$RESULT" | jq -e '.choices[0].finish_reason == "length" and ((.choices[0].message.content // "") == "")' >/dev/null 2>&1; then echo "TRUNCATED (reasoning used the whole budget)"
 else echo "$RESULT" | jq -r '.choices[0].message.content // "ERROR (unexpected response)"'
 fi
 ```
@@ -191,7 +192,7 @@ Format:
 [Numbered list]
 ```
 
-If one or more voices timed out, include them in the table with `TIMEOUT (>Xs)` and note the partial panel count in the verdict header (e.g. `Verdict (3/4 voices)`). A partial panel is still useful; a silently-partial panel is not.
+If one or more voices timed out or were truncated, include them in the table with `TIMEOUT (>Xs)` (or `TRUNCATED` when the reply hit the length limit with no content) and note the partial panel count in the verdict header (e.g. `Verdict (3/4 voices)`). A partial panel is still useful; a silently-partial panel is not.
 
 ## Anonymization Rules
 
