@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # CCW-189 and CCW-191: ECR template budgets, the output branch that makes a
 # length-truncated, contentless reply visible as TRUNCATED, and (CCW-191) the
-# option A panel: gpt-6-astra, gemini-4-argon, gpt-6.1-sol fallback, Claude voice on fable.
+# option A panel: gpt-6-astra, gemini-4-argon, gpt-6.1-sol fallback, Claude voice on opus.
 
 setup() {
   SKILL="$BATS_TEST_DIRNAME/../skills/ecr/SKILL.md"
@@ -75,26 +75,27 @@ run_block() { # json -> stdout of the template's output block
 
 # CCW-191: option A panel, Claude voice and timeout decision
 
-@test "CCW-191: runtime table row names Fable 5.1 and the fable alias" {
-  grep -qxF '| Claude Code | Fable 5.1 (`claude-fable-5-1`) | `fable` |' "$SKILL"
+@test "CCW-191: runtime table row names Opus 5.5 and the opus alias" {
+  grep -qxF '| Claude Code | Opus 5.5 (`claude-opus-5-5`) | `opus` |' "$SKILL"
 }
 
-@test "CCW-191: the Agent example has model fable and no other model line" {
+@test "CCW-191: the Agent example has model opus and no other model line" {
   awk '/^Agent\(/{on=1} on{print} on&&/^\)/{exit}' "$SKILL" > "$BATS_TEST_TMPDIR/agent.txt"
   [ -s "$BATS_TEST_TMPDIR/agent.txt" ]
   [ "$(grep -c 'model:' "$BATS_TEST_TMPDIR/agent.txt")" -eq 1 ]
-  grep -qxF '  model: "fable",' "$BATS_TEST_TMPDIR/agent.txt"
+  grep -qxF '  model: "opus",' "$BATS_TEST_TMPDIR/agent.txt"
 }
 
-@test "CCW-191: the sub-agent prose, Step 4 table and full flow name Fable 5.1" {
-  grep -q '^The sub-agent runs at `fable` (Fable 5\.1, `claude-fable-5-1`' "$SKILL"
-  grep -qF '| Claude Fable 5.1 | Anthropic (sub-agent) |' "$SKILL"
-  grep -qF 'spawns Claude Fable 5.1 sub-agent' "$SKILL"
+@test "CCW-191: the sub-agent prose, Step 4 table and full flow name Opus 5.5" {
+  grep -q '^The sub-agent runs at `opus` (Opus 5\.5, `claude-opus-5-5`' "$SKILL"
+  grep -qF '| Claude Opus 5.5 | Anthropic (sub-agent) |' "$SKILL"
+  grep -qF 'spawns Claude Opus 5.5 sub-agent' "$SKILL"
 }
 
-@test "CCW-191: the only claude- id is claude-fable-5-1 and opus appears nowhere" {
-  [ "$(grep -o 'claude-[a-z0-9-]*' "$SKILL" | sort -u)" = claude-fable-5-1 ]
-  [ "$(grep -ci opus "$SKILL")" -eq 0 ]
+@test "CCW-196: the only claude- id is claude-opus-5-5 and no Fable or fable remains" {
+  [ "$(grep -o 'claude-[a-z0-9-]*' "$SKILL" | sort -u)" = claude-opus-5-5 ]
+  [ "$(grep -ci fable "$SKILL")" -eq 0 ]
+  [ "$(grep -ci highest "$SKILL")" -eq 0 ]
 }
 
 @test "CCW-191: template timeout is 180 and no line starts with TIMEOUT=90" {

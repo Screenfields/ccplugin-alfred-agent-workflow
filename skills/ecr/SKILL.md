@@ -10,7 +10,7 @@ allowed-tools: Bash, Read, Write, Agent
 
 # Expert Consulting Review (ECR)
 
-Query three external top-tier AI models via LiteLLM **plus** a Claude sub-agent running the highest available model — four independent voices in total. Synthesize consensus and unique insights into actionable recommendations.
+Query three external top-tier AI models via LiteLLM **plus** a Claude sub-agent running the default Claude model (Opus 5.5) — four independent voices in total. Synthesize consensus and unique insights into actionable recommendations.
 
 ## When to Use
 
@@ -31,11 +31,11 @@ Query three external top-tier AI models via LiteLLM **plus** a Claude sub-agent 
 
 ### Self-Review Sub-Agent (4th voice — via Agent tool)
 
-Spawn a Claude sub-agent using the **highest Claude model the Agent tool accepts** with the same anonymized prompt. This gives a same-provider but highest-tier perspective running independently of the currently active session model.
+Spawn a Claude sub-agent using the **default Claude model, Opus 5.5** with the same anonymized prompt. This gives a same-provider perspective running independently of the currently active session model.
 
-| Runtime | Highest Claude model | Agent tool `model` param |
+| Runtime | Default Claude model | Agent tool `model` param |
 |---------|-------------------------------|--------------------------|
-| Claude Code | Fable 5.1 (`claude-fable-5-1`) | `fable` |
+| Claude Code | Opus 5.5 (`claude-opus-5-5`) | `opus` |
 
 The sub-agent is given the ECR prompt and asked to return: verdict, top-3 insights, and specific conditions. It runs **in parallel** with the LiteLLM calls — this is intentional: parallel execution prevents the self-voice from being anchored by the external panel before forming its own opinion.
 
@@ -50,7 +50,7 @@ The sub-agent is given the ECR prompt and asked to return: verdict, top-3 insigh
 ### Rules
 - External panel: always use models from **different providers** for diverse perspectives
 - **Quota failures are provider-wide:** if gpt-6-astra returns RateLimitError, gpt-6.1-sol will too — substitute a Fireworks model instead, not gpt-6.1-sol
-- Sub-agent always uses the highest available Claude model — not the currently-running model
+- Sub-agent always uses the default Claude model (Opus 5.5) — not the currently-running model
 - Run all four queries **in parallel** for speed
 - For quick validations: 2 external models + sub-agent (3 voices total)
 
@@ -154,7 +154,7 @@ fi
 
 ```
 Agent(
-  model: "fable",
+  model: "opus",
   prompt: "You are acting as an independent peer reviewer in an Expert Consulting Review (ECR).
 Your task: review the following anonymized proposal and return exactly:
 1. Verdict: APPROVE | APPROVE WITH CONDITIONS | REQUEST CHANGES
@@ -169,7 +169,7 @@ Do not explain your role. Return the review directly.
 )
 ```
 
-The sub-agent runs at `fable` (Fable 5.1, `claude-fable-5-1`, the highest Claude model the Agent tool accepts) regardless of which Claude model the lead session is using, ensuring a highest-tier independent perspective. Its output feeds directly into the synthesis step.
+The sub-agent runs at `opus` (Opus 5.5, `claude-opus-5-5`, the default Claude model) regardless of which Claude model the lead session is using, ensuring an independent perspective. Its output feeds directly into the synthesis step.
 
 ### Step 4: Synthesize Results
 
@@ -190,7 +190,7 @@ Format:
 | GPT-6 Astra | OpenAI | ... | ... |
 | Gemini 4 Argon | Google | ... | ... |
 | GLM-5.3 | Fireworks | TIMEOUT (>400s) | — |
-| Claude Fable 5.1 | Anthropic (sub-agent) | ... | ... |
+| Claude Opus 5.5 | Anthropic (sub-agent) | ... | ... |
 
 ### Consensus
 [What responding voices agree on]
@@ -262,7 +262,7 @@ ECR virtual key: `op://sf-platform/litellm/virtual-key/ecr-reviews/password` —
 1. User provides design document or decision
 2. Agent writes prompt with real names
 3. Agent anonymizes prompt (Step 2 — MANDATORY, verify with grep)
-4. Agent queries 3 external models via LiteLLM **and** spawns Claude Fable 5.1 sub-agent — all 4 in parallel
+4. Agent queries 3 external models via LiteLLM **and** spawns Claude Opus 5.5 sub-agent — all 4 in parallel
 5. Agent synthesizes 4-voice results into consensus + conditions
 6. Agent presents actionable summary to user
 7. If approved: update document with ECR decisions log
