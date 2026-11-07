@@ -101,7 +101,7 @@ warn() {
 # the owner as a failure text.
 info() { echo "alfred-loop-check: $1" >&2; }
 
-# shellcheck disable=SC2317  # runs from the traps in main
+# shellcheck disable=SC2317,SC2329  # runs from the traps in main
 cleanup() {
   local p
   for p in "${CHILD_PIDS[@]}"; do kill "$p" 2>/dev/null; done

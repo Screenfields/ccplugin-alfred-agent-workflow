@@ -46,7 +46,7 @@ TMPD=$(mktemp -d 2>/dev/null) || TMPD=""
 G_OUT="$TMPD/out"; G_ERR="$TMPD/err"; G_IN=""
 G_RC=0; G_CODE=""; G_CLASS=""
 
-# shellcheck disable=SC2317  # runs from the EXIT trap
+# shellcheck disable=SC2317,SC2329  # runs from the EXIT trap
 cleanup() { [ -n "$TMPD" ] && rm -rf "$TMPD"; }
 trap cleanup EXIT
 trap 'exit 143' TERM
@@ -187,7 +187,7 @@ need_tools() {
 }
 
 # --- post ---------------------------------------------------------------------
-# shellcheck disable=SC2317  # reached through gh_fail, by name
+# shellcheck disable=SC2317,SC2329  # reached through gh_fail, by name
 widen_ask() {
   local lead
   lead=$(agent_id); [ "$lead" = unknown ] && lead="<reviewing-lead>"
@@ -195,11 +195,11 @@ widen_ask() {
   warn "Widen ask: message the hub with the subject \"[review-access] $lead -> $OWNER/$REPO\" and give the reviewing lead, the target repo, the PR URL or the reason, and whether the access is standing or for this PR only. The hub's worker adds the repo to the reviewing lead's review token generator (never build); the new token takes effect after the ESO refresh, so access is not immediate."
   finish 5
 }
-# shellcheck disable=SC2317  # reached through gh_fail, by name
+# shellcheck disable=SC2317,SC2329  # reached through gh_fail, by name
 post_access() { widen_ask "$(why "$1")"; }
 
 # verify_posted: after a transient POST failure, did the review land anyway?
-# shellcheck disable=SC2317  # runs as PRE_RETRY, by name
+# shellcheck disable=SC2317,SC2329  # runs as PRE_RETRY, by name
 verify_posted() {
   local keep_out="$TMPD/post-out" keep_err="$TMPD/post-err" keep_rc="$G_RC" keep_code="$G_CODE" keep_in="$G_IN" keep_class="$G_CLASS" since found
   cp "$G_OUT" "$keep_out"; cp "$G_ERR" "$keep_err"
