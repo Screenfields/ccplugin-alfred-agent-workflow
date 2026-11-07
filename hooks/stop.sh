@@ -53,7 +53,7 @@ REC=""
 # shellcheck disable=SC1091
 . "$ROOT/lib/reply-time.sh" 2>/dev/null || { reply_time_now() { return 1; }; reply_time_note_stop() { return 0; }; reply_time_audit_off() { return 0; }; }
 
-# shellcheck disable=SC2317  # runs from the traps below
+# shellcheck disable=SC2317,SC2329  # runs from the traps below
 cleanup() {
   [ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null
   [ -n "$TMP" ] && rm -rf "$TMP"
@@ -62,7 +62,7 @@ cleanup() {
 # on_signal: a TERM, INT or HUP (the entry timed out). Kill the running child,
 # print the bridge answer captured so far if it is a usable JSON object (a
 # bridge block must not be lost), and leave with 0.
-# shellcheck disable=SC2317  # runs from the trap below
+# shellcheck disable=SC2317,SC2329  # runs from the trap below
 on_signal() {
   [ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null
   # The record is never killed: it ignores these signals and takes about 45 ms,
@@ -78,7 +78,7 @@ on_signal() {
 
 # wait_rec_bounded: wait for the record child at most 10 x 0.1 s. `wait` has no
 # time limit, so the child marks its end with $TMP/rec.done and this polls for it.
-# shellcheck disable=SC2317  # called from on_signal
+# shellcheck disable=SC2317,SC2329  # called from on_signal
 wait_rec_bounded() {
   local i=0
   [ -n "$REC" ] && [ -n "$TMP" ] || return 0
