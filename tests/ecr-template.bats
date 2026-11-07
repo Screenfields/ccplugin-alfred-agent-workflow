@@ -95,6 +95,7 @@ run_block() { # json -> stdout of the template's output block
 @test "CCW-196: the only claude- id is claude-opus-5-5 and no Fable or fable remains" {
   [ "$(grep -o 'claude-[a-z0-9-]*' "$SKILL" | sort -u)" = claude-opus-5-5 ]
   [ "$(grep -ci fable "$SKILL")" -eq 0 ]
+  [ "$(grep -ci highest "$SKILL")" -eq 0 ]
 }
 
 @test "CCW-191: template timeout is 180 and no line starts with TIMEOUT=90" {

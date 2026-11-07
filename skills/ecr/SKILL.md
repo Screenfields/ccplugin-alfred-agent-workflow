@@ -10,7 +10,7 @@ allowed-tools: Bash, Read, Write, Agent
 
 # Expert Consulting Review (ECR)
 
-Query three external top-tier AI models via LiteLLM **plus** a Claude sub-agent running the highest available model — four independent voices in total. Synthesize consensus and unique insights into actionable recommendations.
+Query three external top-tier AI models via LiteLLM **plus** a Claude sub-agent running the default Claude model (Opus 5.5) — four independent voices in total. Synthesize consensus and unique insights into actionable recommendations.
 
 ## When to Use
 
@@ -50,7 +50,7 @@ The sub-agent is given the ECR prompt and asked to return: verdict, top-3 insigh
 ### Rules
 - External panel: always use models from **different providers** for diverse perspectives
 - **Quota failures are provider-wide:** if gpt-6-astra returns RateLimitError, gpt-6.1-sol will too — substitute a Fireworks model instead, not gpt-6.1-sol
-- Sub-agent always uses the highest available Claude model — not the currently-running model
+- Sub-agent always uses the default Claude model (Opus 5.5) — not the currently-running model
 - Run all four queries **in parallel** for speed
 - For quick validations: 2 external models + sub-agent (3 voices total)
 
