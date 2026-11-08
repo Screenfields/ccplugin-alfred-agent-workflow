@@ -129,6 +129,7 @@ fi
 
 MODEL_IDS=()
 if [ "$have_models" -eq 1 ]; then
+  [[ "$models_arg" != *$'\n'* && "$models_arg" != *, ]] || die 2 "invalid model id"
   IFS=',' read -r -a MODEL_IDS <<< "$models_arg"
   [ "${#MODEL_IDS[@]}" -ge 1 ] && [ "${#MODEL_IDS[@]}" -le 4 ] || die 2 "invalid model id"
   for ((i = 0; i < ${#MODEL_IDS[@]}; i++)); do
