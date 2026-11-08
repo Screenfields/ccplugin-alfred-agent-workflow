@@ -427,7 +427,7 @@ threshold that does not resolve.
 adds up the worst case of every external voice (the prompt, estimated as bytes divided by
 `ecr-bytes-per-token` and rounded up, as input, plus the full `max_tokens` as output, at the prices the
 gateway publishes) and exits 5 without a model call when the total is above the cap. The arithmetic uses
-integer micro-dollars; a total equal to the cap passes. The cap is per resolver run, so re-running one voice
+integer micro-dollars, and a total equal to the cap passes. The cap is per resolver run, so re-running one voice
 is a new run under its own cap. The script holds no default for either name: a missing or invalid value
 exits 2.
 
