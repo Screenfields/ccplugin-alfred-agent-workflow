@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Test double for curl (CCW-193), for bin/ecr-panel-resolve, bin/ecr-models-check
+# and the ecr skill's template. It answers by URL path from files in $STUB_DIR:
+#   GET  /v1/models            models.json
+#   GET  /v1/model/info        info.json
+#   POST /v1/chat/completions  chat.json  (default: a stop reply with content "ok")
+# Per path (models, info, chat): <path>.code is the HTTP code (default 200) and
+# <path>.exit is a curl exit status (then the code is 000 and there is no body).
+# chat.sleep delays the chat reply by that many seconds. With -D FILE the stub
+# writes chat.headers (CRLF endings, as curl dumps them) to FILE.
+# Per call it appends to $STUB_DIR/calls one line: METHOD URL, and for chat also
+# model=<request model> max_tokens=<request max_tokens>. It appends the argv to
+# argv.log, the content and mode of each -H @file header file to hdr.log, and
+# keeps the last chat request body in chat.body.
+out="" hdrfile="" dump="" body="" write="" url="" method=GET
+printf '%s\n' "$*" >> "$STUB_DIR/argv.log"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -D) dump="$2"; shift 2 ;;
+    -H) case "$2" in @*) hdrfile="${2#@}" ;; esac; shift 2 ;;
+    -w) write="$2"; shift 2 ;;
+    --max-time) shift 2 ;;
+    -d) body="$2"; method=POST; shift 2 ;;
+    -s) shift ;;
+    http*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$hdrfile" ]; then
+  printf 'MODE:%s %s\n' "$(stat -c %a "$hdrfile")" "$(cat "$hdrfile")" >> "$STUB_DIR/hdr.log"
+fi
+case "$url" in
+  */v1/models) path=models ;;
+  */v1/model/info) path=info ;;
+  */v1/chat/completions) path=chat ;;
+  *) path=other ;;
+esac
+if [ "$path" = chat ]; then
+  printf '%s' "$body" > "$STUB_DIR/chat.body"
+  printf '%s %s model=%s max_tokens=%s\n' "$method" "$url" \
+    "$(printf '%s' "$body" | jq -r '.model // "-"' 2>/dev/null)" \
+    "$(printf '%s' "$body" | jq -r '.max_tokens // "-"' 2>/dev/null)" >> "$STUB_DIR/calls"
+else
+  printf '%s %s\n' "$method" "$url" >> "$STUB_DIR/calls"
+fi
+[ -f "$STUB_DIR/$path.sleep" ] && sleep "$(cat "$STUB_DIR/$path.sleep")"
+rc=0
+[ -f "$STUB_DIR/$path.exit" ] && rc=$(cat "$STUB_DIR/$path.exit")
+code=200
+[ -f "$STUB_DIR/$path.code" ] && code=$(cat "$STUB_DIR/$path.code")
+if [ "$rc" != 0 ]; then
+  [ -n "$write" ] && printf 000
+  exit "$rc"
+fi
+if [ -n "$dump" ] && [ "$path" = chat ] && [ -f "$STUB_DIR/chat.headers" ]; then
+  sed 's/$/\r/' "$STUB_DIR/chat.headers" > "$dump"
+fi
+if [ "$path" = chat ] && [ ! -f "$STUB_DIR/chat.json" ]; then
+  printf '%s\n' '{"choices":[{"finish_reason":"stop","message":{"content":"ok"}}]}' > "$STUB_DIR/chat.json"
+fi
+src="$STUB_DIR/$path.json"
+if [ -n "$out" ]; then
+  if [ -f "$src" ]; then cp "$src" "$out"; else : > "$out"; fi
+else
+  [ -f "$src" ] && cat "$src"
+fi
+[ -n "$write" ] && printf '%s' "$code"
+exit 0

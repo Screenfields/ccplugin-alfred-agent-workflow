@@ -40,5 +40,7 @@
   "deviation-min-seconds": 60,
   "owner-note-max-age-minutes": 60,
   "reply-time-idle-minutes": 15,
-  "reply-time-tolerance-minutes": 2
+  "reply-time-tolerance-minutes": 2,
+  "ecr-run-cost-cap-usd": 1,
+  "ecr-bytes-per-token": 3
 }
