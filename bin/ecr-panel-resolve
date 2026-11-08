@@ -493,6 +493,19 @@ price_pico() {
   [ "$PICO" -ge 1 ] && [ "$PICO" -le 1000000000 ]
 }
 
+# price_text <pico>: sets PTEXT, the canonical USD-per-token text of a validated
+# price (shortest scientific form, such as 2e-06 or 1.4e-06), built from the
+# integer so that it is the same on every jq version.
+price_text() {
+  local d="$1" e=-12 n a
+  while [[ "$d" == *0 ]]; do d="${d%0}"; e=$((e + 1)); done
+  n=${#d}
+  e=$((e + n - 1))
+  a=$((e < 0 ? -e : e))
+  if [ "$n" -gt 1 ]; then PTEXT="${d:0:1}.${d:1}"; else PTEXT="$d"; fi
+  if [ "$e" -lt 0 ]; then PTEXT="${PTEXT}e-$(printf '%02d' "$a")"; else PTEXT="${PTEXT}e+$(printf '%02d' "$a")"; fi
+}
+
 V_INPICO=() V_OUTPICO=()
 refused=0
 for i in "${!V_NAME[@]}"; do
@@ -544,7 +557,8 @@ if [ "$worst" -gt "$cap_micro" ]; then
   fi
   w=0; for n in "${V_NAME[@]}"; do [ "${#n}" -gt "$w" ] && w=${#n}; done
   for i in "${!V_NAME[@]}"; do
-    in_price="${V_INV[i]}" out_price="${V_OUTV[i]}"
+    price_text "${V_INPICO[i]}"; in_price=$PTEXT
+    price_text "${V_OUTPICO[i]}"; out_price=$PTEXT
     printf 'voice=%-*s worst_usd=%s (prompt %s x %s + output %s x %s)\n' "$w" "${V_NAME[i]}" "$(usd6 "${VOICE_W[i]}")" \
       "$est_t" "$in_price" "${V_MT[i]}" "$out_price"
   done
