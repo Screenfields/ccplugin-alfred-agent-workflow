@@ -66,7 +66,7 @@ Should reach the messaging service and report your inbox state. If the MCP isn't
 | `/alfred-agent:init` | One-time project init (writes `.alfred/config.json` with your agent_id) |
 | `/alfred-agent:design` | Guided design-doc creation for new services / features |
 | `/alfred-agent:develop` | Feature-dev workflow: pick up issue → code with tests → PR → merge |
-| `/alfred-agent:ecr` | Expert Consulting Review — multi-model architectural feedback |
+| `/alfred-agent:ecr` | Expert Consulting Review — multi-model architectural feedback; the panel is resolved from the LiteLLM gateway at run time (`bin/ecr-panel-resolve`) |
 | `/alfred-agent:retro` | Session retrospective for capturing learnings |
 | `/alfred-agent:land` | Session close-out: health-check gate + retro + git push + reconcile work to issues + Metis capture. `--mode=team` skips the inline retro |
 | `/alfred-agent:refine` | The analyst and readiness reviewer pair, new to ready: loops the pair until the reviewer passes or the failed-review-max limit sends it to the hub. Hands the pass to the lead. Edits nothing. |
@@ -422,6 +422,14 @@ All thresholds live in one file and are read by name, so no rule or skill text c
 `alfred-config names` lists the keys. A bats test fails when a new text contains a digit or a
 percent sign (other than `AP-ADRnnnn`, `AP-nnnn`, `AP#nnnn` and `doctrine NN`) or names a
 threshold that does not resolve.
+
+`ecr-run-cost-cap-usd` and `ecr-bytes-per-token` belong to the ECR cost check. `bin/ecr-panel-resolve`
+adds up the worst case of every external voice (the prompt, estimated as bytes divided by
+`ecr-bytes-per-token` and rounded up, as input, plus the full `max_tokens` as output, at the prices the
+gateway publishes) and exits 5 without a model call when the total is above the cap. The arithmetic uses
+integer micro-dollars, and a total equal to the cap passes. The cap is per resolver run, so re-running one voice
+is a new run under its own cap. The script holds no default for either name: a missing or invalid value
+exits 2.
 
 `model-setting-per-role` holds one tier and effort per role. `reviewer-light` is the lighter reviewer
 setting for small items: the light path of `develop` starts the reviewer with it. No document defines

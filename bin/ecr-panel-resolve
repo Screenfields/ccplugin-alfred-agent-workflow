@@ -1,0 +1,621 @@
+#!/usr/bin/env bash
+# ecr-panel-resolve — resolve the ECR panel from the LiteLLM gateway at run
+# time (CCW-193). The skill holds no model id. It holds three slot aliases;
+# the gateway decides which model is behind each one and publishes the call
+# settings and the prices in GET /v1/model/info. This script reads them,
+# validates every value, checks the worst-case cost of the run against the
+# cap, and writes a per-run panel file that the skill's per-voice template
+# reads and re-validates.
+#
+#   ecr-panel-resolve [--quick] (--prompt FILE | --out FILE) [--prompt FILE] [--out FILE]
+#   ecr-panel-resolve --models ID[,ID...] [--verify] (--prompt FILE | --out FILE)
+#   ecr-panel-resolve --list-offered
+#   ecr-panel-resolve --clean PANEL_FILE
+#   ecr-panel-resolve --slots
+#
+#   (none)          resolve the three slots from the gateway
+#   --quick         keep the first two kept slots in slot order (3 voices)
+#   --models a,b    override: 1 to 4 ids used as listed (an id that is a slot
+#                   alias takes that slot's published settings). Priced from
+#                   GET /v1/model/info like a slot, so it needs the key
+#   --verify        with --models: check each id is in GET /v1/models first
+#   --prompt FILE   the anonymized prompt; its size prices the input side
+#   --out FILE      write the panel to FILE instead of a per-run directory.
+#                   With no --prompt only the output budgets are priced
+#   --list-offered  print "id<TAB>provider" for the models the key offers
+#   --clean FILE    remove a per-run panel directory made by this script
+#   --slots         print the three slot names in order
+#
+# Environment: LITELLM_URL (default https://litellm.screenfields.net),
+# LITELLM_API_KEY (else `op read` when op is installed). The key goes to curl
+# only through a mode-600 header file (curl -H @file), never argv or output.
+# The cost cap and the bytes-per-token estimate are read by name with
+# alfred-config (config/thresholds.json); this script holds no default.
+# Exit: 0 full panel; 1 partial but usable, or --verify found a missing id;
+# 2 usage or environment error; 3 lookup failed; 4 fewer than 2 external
+# voices; 5 the cost check refused the run.
+set -u
+export LC_ALL=C
+
+PROG=ecr-panel-resolve
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+SELFDIR=$(dirname "$SELF")
+SLOTS=(ecr-openai ecr-google ecr-fireworks)
+DEF_TIMEOUT=400
+DEF_MAXTOK=32000
+TOOL_CAP=590
+ID_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+MAX_PROMPT_BYTES=4194304
+
+tmp=""
+pdir=""
+NOTES=()
+
+# shellcheck disable=SC2329 # invoked by the EXIT trap
+cleanup() {
+  local rc=$?
+  [ -n "$tmp" ] && rm -rf "$tmp"
+  if [ -n "$pdir" ] && [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then rm -rf "$pdir"; fi
+}
+trap cleanup EXIT
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: ecr-panel-resolve [--quick] [--prompt FILE] [--out FILE]
+       ecr-panel-resolve --models ID[,ID...] [--verify] [--prompt FILE] [--out FILE]
+       ecr-panel-resolve --list-offered
+       ecr-panel-resolve --clean PANEL_FILE
+       ecr-panel-resolve --slots
+A resolve mode needs --prompt or --out.
+USAGE
+  exit 2
+}
+
+note() { NOTES+=("$1"); }
+flush_notes() { local l; for l in "${NOTES[@]+"${NOTES[@]}"}"; do printf '%s\n' "$l"; done; NOTES=(); }
+die() { local rc=$1; shift; printf '%s: %s\n' "$PROG" "$*" >&2; exit "$rc"; }
+
+usd6() { printf '%d.%06d' $(($1 / 1000000)) $(($1 % 1000000)); }
+
+# ---- arguments ----------------------------------------------------------
+
+quick=0 verify=0 do_list=0 do_slots=0
+have_models=0 have_prompt=0 have_out=0 have_clean=0
+models_arg="" prompt="" out="" clean_arg=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --quick) quick=1; shift ;;
+    --verify) verify=1; shift ;;
+    --list-offered) do_list=1; shift ;;
+    --slots) do_slots=1; shift ;;
+    --models) [ $# -ge 2 ] || usage; have_models=1; models_arg="$2"; shift 2 ;;
+    --prompt) [ $# -ge 2 ] || usage; have_prompt=1; prompt="$2"; shift 2 ;;
+    --out) [ $# -ge 2 ] || usage; have_out=1; out="$2"; shift 2 ;;
+    --clean) [ $# -ge 2 ] || usage; have_clean=1; clean_arg="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+alone=$((do_list + do_slots + have_clean))
+if [ "$alone" -gt 1 ]; then usage; fi
+if [ "$alone" -eq 1 ]; then
+  # exclusive with every other option, --prompt included (F31)
+  [ $((quick + verify + have_models + have_prompt + have_out)) -eq 0 ] || usage
+fi
+if [ "$alone" -eq 0 ]; then
+  [ "$quick$have_models" != 11 ] || usage
+  [ "$verify" -eq 0 ] || [ "$have_models" -eq 1 ] || usage
+  [ "$have_prompt" -eq 1 ] || [ "$have_out" -eq 1 ] || usage
+fi
+
+if [ "$do_slots" -eq 1 ]; then printf '%s\n' "${SLOTS[@]}"; exit 0; fi
+
+# ---- --clean ------------------------------------------------------------
+
+if [ "$have_clean" -eq 1 ]; then
+  refuse() { die 2 "refusing to remove <not a panel dir>"; }
+  [ "$(basename -- "$clean_arg")" = panel.tsv ] || refuse
+  d=$(dirname -- "$clean_arg")
+  [[ "$(basename -- "$d")" =~ ^ecr-panel\.[A-Za-z0-9]{6}$ ]] || refuse
+  [ ! -L "$d" ] && [ -d "$d" ] && [ -O "$d" ] || refuse
+  [ "$(cd -P -- "$(dirname -- "$d")" 2>/dev/null && pwd)" = "$(cd -P -- "${TMPDIR:-/tmp}" 2>/dev/null && pwd)" ] || refuse
+  [ ! -L "$d/panel.tsv" ] && [ -f "$d/panel.tsv" ] || refuse
+  IFS= read -r first < "$d/panel.tsv" || refuse
+  [[ "$first" == $'#ecr-panel\t1\t'* ]] || refuse
+  rm -rf -- "$d"
+  exit 0
+fi
+
+# ---- override ids -------------------------------------------------------
+
+MODEL_IDS=()
+if [ "$have_models" -eq 1 ]; then
+  [[ "$models_arg" != *$'\n'* && "$models_arg" != *, ]] || die 2 "invalid model id"
+  IFS=',' read -r -a MODEL_IDS <<< "$models_arg"
+  [ "${#MODEL_IDS[@]}" -ge 1 ] && [ "${#MODEL_IDS[@]}" -le 4 ] || die 2 "invalid model id"
+  for ((i = 0; i < ${#MODEL_IDS[@]}; i++)); do
+    [[ "${MODEL_IDS[i]}" =~ $ID_RE ]] || die 2 "invalid model id"
+    for ((j = 0; j < i; j++)); do
+      [ "${MODEL_IDS[i]}" != "${MODEL_IDS[j]}" ] || die 2 "invalid model id"
+    done
+  done
+fi
+
+# ---- tools --------------------------------------------------------------
+
+for t in jq mktemp wc; do
+  command -v "$t" >/dev/null 2>&1 || die 2 "$t not found"
+done
+
+# ---- prompt file, thresholds (resolve modes only) ------------------------
+
+prompt_bytes=""
+cap_micro=0 bpt=0
+if [ "$do_list" -eq 0 ]; then
+  if [ "$have_prompt" -eq 1 ]; then
+    [ -f "$prompt" ] && [ ! -L "$prompt" ] && [ -r "$prompt" ] || die 2 "prompt file invalid"
+    prompt_bytes=$(wc -c < "$prompt" | tr -d ' ')
+    [[ "$prompt_bytes" =~ ^[0-9]+$ ]] && [ "$prompt_bytes" -ge 1 ] && [ "$prompt_bytes" -le "$MAX_PROMPT_BYTES" ] \
+      || die 2 "prompt file invalid"
+  fi
+
+  cfg_file="${ALFRED_THRESHOLDS:-$SELFDIR/../config/thresholds.json}"
+  threshold() { # name -> value text on stdout, must be a JSON number in the file
+    local v
+    v=$("$SELFDIR/alfred-config" get "$1" 2>/dev/null) || return 1
+    jq -e --arg n "$1" '.[$n] | type == "number"' "$cfg_file" >/dev/null 2>&1 || return 1
+    printf '%s' "$v"
+  }
+  capv=$(threshold ecr-run-cost-cap-usd) || die 2 "cost threshold not configured: ecr-run-cost-cap-usd"
+  if [[ "$capv" =~ ^([0-9]{1,6})(\.([0-9]{1,6}))?$ ]]; then
+    frac="${BASH_REMATCH[3]:-}"
+    while [ "${#frac}" -lt 6 ]; do frac="${frac}0"; done
+    cap_micro=$((10#${BASH_REMATCH[1]} * 1000000 + 10#$frac))
+  fi
+  [ "$cap_micro" -gt 0 ] || die 2 "cost threshold not configured: ecr-run-cost-cap-usd"
+  bpt=$(threshold ecr-bytes-per-token) || die 2 "cost threshold not configured: ecr-bytes-per-token"
+  [[ "$bpt" =~ ^[1-4]$ ]] || die 2 "cost threshold not configured: ecr-bytes-per-token"
+  if [ -n "${ALFRED_THRESHOLDS:-}" ]; then
+    note "note: ALFRED_THRESHOLDS is set; cost thresholds are not read from the plugin's config"
+  fi
+fi
+
+# ---- gateway lookup -------------------------------------------------------
+
+LURL="${LITELLM_URL:-https://litellm.screenfields.net}"
+
+setup_lookup() {
+  command -v curl >/dev/null 2>&1 || die 2 "curl not found"
+  [[ "$LURL" =~ ^https?://[A-Za-z0-9._:/-]+$ ]] || die 2 "invalid LITELLM_URL"
+  tmp=$(umask 077; mktemp -d) || die 2 "mktemp failed"
+  local key=""
+  if [ -n "${LITELLM_API_KEY:-}" ]; then
+    key="$LITELLM_API_KEY"
+  elif command -v op >/dev/null 2>&1; then
+    key=$(op read "op://sf-platform/litellm/virtual-key/ecr-reviews/password" 2>/dev/null)
+  fi
+  if [ -z "$key" ]; then
+    {
+      echo "$PROG: no LiteLLM credential available."
+      echo "  Route 1: set LITELLM_API_KEY in the environment."
+      echo "  Route 2: install the 1Password 'op' CLI and ensure"
+      echo "  'op read op://sf-platform/litellm/virtual-key/ecr-reviews/password' works."
+    } >&2
+    exit 3
+  fi
+  ( umask 077; printf 'Authorization: Bearer %s\n' "$key" > "$tmp/hdr" )
+  chmod 600 "$tmp/hdr"
+}
+
+# fetch <path> <outfile> <shape-label>: HTTP 200, JSON, .data an array of
+# objects that carry the key named in $4 as a string; non-empty.
+fetch() {
+  local path="$1" file="$2" key="$3" code rc
+  code=$(curl -s --max-time 30 -o "$file" -w '%{http_code}' -H @"$tmp/hdr" "$LURL$path"); rc=$?
+  [ "$rc" -eq 0 ] || die 3 "GET $path: connection failed (curl exit $rc)"
+  [[ "$code" =~ ^[0-9]{3}$ ]] || code=000
+  [ "$code" != 000 ] || die 3 "GET $path: connection failed (curl exit 0, no HTTP code)"
+  [ "$code" = 200 ] || die 3 "GET $path failed (HTTP $code)"
+  jq -e 'type' "$file" >/dev/null 2>&1 || die 3 "GET $path: response is not JSON"
+  jq -e --arg k "$key" '(.data | type) == "array" and all(.data[]; type == "object" and (.[$k] | type) == "string")' "$file" >/dev/null 2>&1 \
+    || die 3 "unexpected $path shape"
+  [ "$(jq '.data | length' "$file")" -gt 0 ] || die 3 "GET $path: empty model list"
+}
+
+lookup_models() { setup_lookup_once; fetch /v1/models "$tmp/models.json" id; }
+lookup_info() { setup_lookup_once; fetch /v1/model/info "$tmp/info.json" model_name; }
+setup_lookup_once() { [ -n "$tmp" ] && [ -f "$tmp/hdr" ] || setup_lookup; }
+
+# ---- --list-offered -------------------------------------------------------
+
+if [ "$do_list" -eq 1 ]; then
+  lookup_models
+  lookup_info
+  rows=$(jq -r --slurpfile i "$tmp/info.json" '
+    def idok: type == "string" and test("\\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\z");
+    def prov($id): [$i[0].data[] | select(.model_name == $id)
+                    | .model_info | (if type == "object" then .litellm_provider else null end)
+                    | select(type == "string" and test("\\A[a-z0-9_]{1,32}\\z"))] | unique
+                   | if length == 1 then .[0] else "-" end;
+    [.data[].id | select(idok)] | unique | .[] | [., prov(.)] | @tsv' "$tmp/models.json") || die 3 "unexpected /v1/models shape"
+  [ -n "$rows" ] || die 3 "no usable ids"
+  printf '%s\n' "$rows"
+  bad=$(jq -r '[.data[].id | select(test("\\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\z") | not)] | length' "$tmp/models.json")
+  if [ "$bad" -gt 0 ]; then echo "note: $bad offered ids not shown (invalid characters)"; fi
+  exit 0
+fi
+
+# ---- per-model record from /v1/model/info ---------------------------------
+
+# shellcheck disable=SC2016 # a jq program: $ names are jq variables
+REC='
+def isint: type == "number" and . == floor and . >= 0 and . < 1e15;
+def mi: (.model_info // {}) | if type == "object" then . else {} end;
+def lp: (.litellm_params // {}) | if type == "object" then . else {} end;
+def setting($k; $lo; $hi): mi as $m
+  | if ($m | has($k) | not) then ["absent", 0]
+    elif ($m[$k] | isint and . >= $lo and . <= $hi) then ["ok", $m[$k]]
+    else ["invalid", 0] end;
+def price($k): mi as $m
+  | if ($m | has($k) | not) then ["absent", 0]
+    elif ($m[$k] | type) == "number" then ["ok", $m[$k]]
+    else ["invalid", 0] end;
+def norm: {
+  provider: (mi.litellm_provider | if type == "string" and test("\\A[a-z0-9_]{1,32}\\z") then . else "-" end),
+  served: (lp.model | if type == "string" and test("\\A[A-Za-z0-9._/:-]{1,128}\\z") then . else "-" end),
+  maxout: (mi.max_output_tokens | if isint and . >= 1 then . else 0 end),
+  schema: (mi | if has("ecr_schema") | not then "absent"
+                elif (.ecr_schema | type == "number" and . == 1) then "ok"
+                else "unsupported" end),
+  tmo: setting("ecr_timeout_s"; 10; 1e14),
+  mt: setting("ecr_max_tokens"; 1024; 65536),
+  inp: price("input_cost_per_token"),
+  outp: price("output_cost_per_token")
+};
+def agg($x): if any($x[]; .[0] == "invalid") then ["invalid", "-"]
+             elif any($x[]; .[0] == "absent") then ["absent", "-"]
+             else ["ok", ($x | map(.[1]) | max | tojson)] end;
+[.data[] | select(.model_name == $n) | norm] as $es
+| if ($es | length) == 0 then [0, "-", "-", 0, "absent", "absent", 0, "absent", 0, 0, "absent", "-", "absent", "-", 0]
+  else
+    ($es | map(.provider) | unique) as $p
+    | ($es | map(.served) | unique) as $s
+    | ($es | map({maxout, schema, tmo, mt}) | unique | length > 1) as $differ
+    | agg($es | map(.inp)) as $inp
+    | agg($es | map(.outp)) as $outp
+    | [ ($es | length),
+        (if ($p | length) == 1 then $p[0] else "!" end),
+        (if ($s | length) == 1 then $s[0] else "-" end),
+        (if $differ then 1 else 0 end),
+        $es[0].schema, $es[0].tmo[0], $es[0].tmo[1], $es[0].mt[0], $es[0].mt[1], $es[0].maxout,
+        $inp[0], $inp[1], $outp[0], $outp[1],
+        (if (($es | map(.inp[1]) | unique | length) > 1) or (($es | map(.outp[1]) | unique | length) > 1) then 1 else 0 end) ]
+  end | @tsv'
+
+# load_rec <model_name>: sets r_* from the validated record
+load_rec() {
+  local row
+  row=$(jq -r --arg n "$1" "$REC" "$tmp/info.json") || die 3 "unexpected /v1/model/info shape"
+  IFS=$'\t' read -r r_n r_provider r_served r_differ r_schema r_tmo_s r_tmo_v r_mt_s r_mt_v r_maxout \
+    r_inp_s r_inp_v r_outp_s r_outp_v r_pricediff <<< "$row"
+}
+
+# apply_settings <name>: from the loaded record, sets s_timeout s_maxtok
+# s_settings (published|default) and adds a note for every default or clamp.
+apply_settings() {
+  local name="$1"
+  s_timeout=$DEF_TIMEOUT s_maxtok=$DEF_MAXTOK s_settings=published
+  if [ "$r_differ" = 1 ]; then
+    note "note: $name entries disagree on ecr_* fields; defaults"
+    s_settings=default
+  elif [ "$r_schema" = absent ]; then
+    note "note: $name ecr_schema absent; settings default"
+    s_settings=default
+  elif [ "$r_schema" = unsupported ]; then
+    note "note: $name schema unsupported; defaults"
+    s_settings=default
+  else
+    case "$r_tmo_s" in
+      ok)
+        s_timeout=$r_tmo_v
+        if [ "$s_timeout" -gt "$TOOL_CAP" ]; then
+          s_timeout=$TOOL_CAP
+          note "note: $name ecr_timeout_s clamped to $TOOL_CAP (tool cap)"
+        fi ;;
+      absent) note "note: $name ecr_timeout_s absent; default $DEF_TIMEOUT"; s_settings=default ;;
+      *) note "note: $name ecr_timeout_s invalid; default $DEF_TIMEOUT"; s_settings=default ;;
+    esac
+    case "$r_mt_s" in
+      ok)
+        s_maxtok=$r_mt_v
+        if [ "$r_maxout" -eq 0 ]; then
+          note "note: $name max_output_tokens absent or invalid; ecr_max_tokens not clamped"
+        elif [ "$s_maxtok" -gt "$r_maxout" ]; then
+          if [ "$r_maxout" -ge 1024 ]; then
+            s_maxtok=$r_maxout
+            note "note: $name ecr_max_tokens clamped to max_output_tokens"
+          else
+            note "note: $name max_output_tokens below 1024; ecr_max_tokens not clamped"
+          fi
+        fi ;;
+      absent) note "note: $name ecr_max_tokens absent; default $DEF_MAXTOK"; s_settings=default ;;
+      *) note "note: $name ecr_max_tokens invalid; default $DEF_MAXTOK"; s_settings=default ;;
+    esac
+  fi
+  if [ "$r_pricediff" = 1 ]; then note "note: $name entries differ on price; the higher is used"; fi
+}
+
+# ---- voices ---------------------------------------------------------------
+
+V_NAME=() V_MODEL=() V_PROV=() V_SERVED=() V_TMO=() V_MT=() V_ORIGIN=() V_SET=()
+V_INS=() V_INV=() V_OUTS=() V_OUTV=()
+add_voice() { # uses r_* and s_*; args: voice model provider served origin
+  V_NAME+=("$1"); V_MODEL+=("$2"); V_PROV+=("$3"); V_SERVED+=("$4")
+  V_TMO+=("$s_timeout"); V_MT+=("$s_maxtok"); V_ORIGIN+=("$5"); V_SET+=("$s_settings")
+  V_INS+=("$r_inp_s"); V_INV+=("$r_inp_v"); V_OUTS+=("$r_outp_s"); V_OUTV+=("$r_outp_v")
+}
+
+expected=0 resolved_n=0 source=resolved
+exit_code=0
+
+if [ "$have_models" -eq 1 ]; then
+  source=override
+  expected=${#MODEL_IDS[@]}
+  if [ "$verify" -eq 1 ]; then
+    lookup_models
+    missing=0
+    for id in "${MODEL_IDS[@]}"; do
+      if jq -e --arg s "$id" 'any(.data[]; .id == $s)' "$tmp/models.json" >/dev/null 2>&1; then
+        note "ok: $id"
+      else
+        note "MISSING: $id"; missing=1
+      fi
+    done
+    if [ "$missing" -eq 1 ]; then flush_notes; exit 1; fi
+  fi
+  lookup_info
+  n=0
+  for id in "${MODEL_IDS[@]}"; do
+    n=$((n + 1))
+    load_rec "$id"
+    if [ "$r_n" -eq 0 ]; then
+      printf '%s: REFUSED: cost unknown: %s no model info entry\n' "$PROG" "$id"
+      exit 5
+    fi
+    is_slot=0
+    for s in "${SLOTS[@]}"; do [ "$s" = "$id" ] && is_slot=1; done
+    if [ "$is_slot" -eq 1 ]; then
+      apply_settings "$id"
+    else
+      s_timeout=$DEF_TIMEOUT s_maxtok=$DEF_MAXTOK s_settings=default
+      if [ "$r_pricediff" = 1 ]; then note "note: $id entries differ on price; the higher is used"; fi
+    fi
+    add_voice "override-$n" "$id" - - override
+  done
+else
+  expected=3
+  [ "$quick" -eq 0 ] || expected=2
+  lookup_models
+  lookup_info
+  declare -a kept_idx=() drop_msg=()
+  declare -A prov_of=()
+  for ((k = 0; k < ${#SLOTS[@]}; k++)); do
+    slot="${SLOTS[k]}"
+    drop_msg[k]=""
+    if ! jq -e --arg s "$slot" 'any(.data[]; .id == $s)' "$tmp/models.json" >/dev/null 2>&1; then
+      drop_msg[k]="DROPPED: $slot not offered to this key"; continue
+    fi
+    load_rec "$slot"
+    if [ "$r_n" -eq 0 ] || [ "$r_provider" = "-" ]; then
+      drop_msg[k]="DROPPED: $slot provider missing"; continue
+    fi
+    if [ "$r_provider" = "!" ]; then
+      drop_msg[k]="DROPPED: $slot inconsistent entries"; continue
+    fi
+    if [ -n "${prov_of[$r_provider]:-}" ]; then
+      drop_msg[k]="DROPPED: $slot same provider as ${prov_of[$r_provider]}"; continue
+    fi
+    prov_of[$r_provider]="$slot"
+    kept_idx+=("$k")
+    # settings are read now so that their notes follow slot order
+    apply_settings "$slot"
+    P_SLOT[k]="$slot"; P_PROV[k]="$r_provider"; P_SERVED[k]="$r_served"
+    P_TMO[k]=$s_timeout; P_MT[k]=$s_maxtok; P_SET[k]=$s_settings
+    P_INS[k]=$r_inp_s; P_INV[k]=$r_inp_v; P_OUTS[k]=$r_outp_s; P_OUTV[k]=$r_outp_v
+    if [ "$r_served" = "-" ]; then note "note: $slot served model unknown"; fi
+  done
+  # unknown ecr-* names on the key (never called)
+  unk=$(jq -r --argjson known "$(printf '%s\n' "${SLOTS[@]}" | jq -R . | jq -s -c .)" '
+    [.data[].id | select(startswith("ecr-") and (. as $x | $known | index($x) | not))]
+    | "\(length)\t\([.[] | select(test("\\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\z"))] | join(" "))"' "$tmp/models.json")
+  unk_n="${unk%%$'\t'*}"; unk_names="${unk#*$'\t'}"
+  if [ "$unk_n" -gt 0 ]; then
+    note "note: ignored unknown ecr-* slots (count $unk_n${unk_names:+: $unk_names}); this plugin version does not know them; update the plugin"
+  fi
+
+  chosen=("${kept_idx[@]+"${kept_idx[@]}"}")
+  if [ "$quick" -eq 1 ] && [ "${#chosen[@]}" -gt 2 ]; then chosen=("${chosen[@]:0:2}"); fi
+  if [ "${#chosen[@]}" -lt 2 ]; then
+    for ((k = 0; k < ${#SLOTS[@]}; k++)); do [ -z "${drop_msg[k]}" ] || note "${drop_msg[k]}"; done
+    flush_notes
+    die 4 "fewer than 2 external voices resolved (${#chosen[@]}/$expected)"
+  fi
+  last=${chosen[${#chosen[@]} - 1]}
+  for ((k = 0; k < ${#SLOTS[@]}; k++)); do
+    [ -n "${drop_msg[k]}" ] || continue
+    if [ "$k" -lt "$last" ] || [ "$quick" -eq 0 ]; then
+      note "${drop_msg[k]}"; exit_code=1
+    else
+      note "note: ${drop_msg[k]#DROPPED: } (not needed for the quick panel)"
+    fi
+  done
+  [ "${#chosen[@]}" -eq "$expected" ] || exit_code=1
+  for k in "${chosen[@]}"; do
+    r_inp_s=${P_INS[k]} r_inp_v=${P_INV[k]} r_outp_s=${P_OUTS[k]} r_outp_v=${P_OUTV[k]}
+    s_timeout=${P_TMO[k]} s_maxtok=${P_MT[k]} s_settings=${P_SET[k]}
+    add_voice "${P_SLOT[k]}" "${P_SLOT[k]}" "${P_PROV[k]}" "${P_SERVED[k]}" resolved
+  done
+fi
+resolved_n=${#V_NAME[@]}
+
+# ---- cost check -----------------------------------------------------------
+
+# price_pico <decimal text>: sets PICO (integer pico-dollars per token, rounded
+# up) or returns 1. Exact decimal arithmetic; 1 to 1000000000 pico-dollars per
+# token (1e-12 to 1e-3 USD); at most 15 significant digits.
+price_pico() {
+  local t="$1" ip fp ex sign digits e10 s sh p10 sig
+  [[ "$t" =~ ^([0-9]+)(\.([0-9]+))?([eE]([+-]?[0-9]+))?$ ]] || return 1
+  ip="${BASH_REMATCH[1]}"; fp="${BASH_REMATCH[3]:-}"; ex="${BASH_REMATCH[5]:-0}"
+  sign=+
+  case "$ex" in [+-]*) sign="${ex:0:1}"; ex="${ex:1}" ;; esac
+  [ "${#ex}" -le 4 ] || return 1
+  e10=$((10#$ex))
+  [ "$sign" = - ] && e10=$((-e10))
+  e10=$((e10 - ${#fp}))
+  digits="$ip$fp"
+  digits="${digits#"${digits%%[!0]*}"}"
+  [ -n "$digits" ] || return 1
+  while [[ "$digits" == *0 ]]; do digits="${digits%0}"; e10=$((e10 + 1)); done
+  sig=${#digits}
+  [ "$sig" -le 15 ] || return 1
+  s=$((e10 + 12))
+  if [ "$s" -ge 0 ]; then
+    [ $((sig + s)) -le 10 ] || return 1
+    PICO=$((10#$digits))
+    while [ "$s" -gt 0 ]; do PICO=$((PICO * 10)); s=$((s - 1)); done
+  else
+    sh=$((-s))
+    [ "$sh" -lt "$sig" ] || return 1
+    p10=1
+    while [ "$sh" -gt 0 ]; do p10=$((p10 * 10)); sh=$((sh - 1)); done
+    PICO=$(((10#$digits + p10 - 1) / p10))
+  fi
+  [ "$PICO" -ge 1 ] && [ "$PICO" -le 1000000000 ]
+}
+
+# price_text <pico>: sets PTEXT, the canonical USD-per-token text of a validated
+# price (shortest scientific form, such as 2e-06 or 1.4e-06), built from the
+# integer so that it is the same on every jq version.
+price_text() {
+  local d="$1" e=-12 n a
+  while [[ "$d" == *0 ]]; do d="${d%0}"; e=$((e + 1)); done
+  n=${#d}
+  e=$((e + n - 1))
+  a=$((e < 0 ? -e : e))
+  if [ "$n" -gt 1 ]; then PTEXT="${d:0:1}.${d:1}"; else PTEXT="$d"; fi
+  if [ "$e" -lt 0 ]; then PTEXT="${PTEXT}e-$(printf '%02d' "$a")"; else PTEXT="${PTEXT}e+$(printf '%02d' "$a")"; fi
+}
+
+V_INPICO=() V_OUTPICO=()
+refused=0
+for i in "${!V_NAME[@]}"; do
+  for f in in out; do
+    if [ "$f" = in ]; then fs="${V_INS[i]}" fv="${V_INV[i]}" fn=input_cost_per_token
+    else fs="${V_OUTS[i]}" fv="${V_OUTV[i]}" fn=output_cost_per_token; fi
+    if [ "$fs" = ok ] && price_pico "$fv"; then
+      if [ "$f" = in ]; then V_INPICO[i]=$PICO; else V_OUTPICO[i]=$PICO; fi
+    else
+      why=invalid; [ "$fs" = absent ] && why=absent
+      name="${V_NAME[i]}"; [ "$source" = override ] && name="${V_MODEL[i]}"
+      printf '%s: REFUSED: cost unknown: %s %s %s\n' "$PROG" "$name" "$fn" "$why"
+      refused=1
+    fi
+  done
+done
+[ "$refused" -eq 0 ] || exit 5
+
+# cost_total <tokens>: sets TOTAL (micro-dollars) and VOICE_W[i]
+VOICE_W=()
+cost_total() {
+  local t="$1" i a b s=0
+  for i in "${!V_NAME[@]}"; do
+    a=$(((t * V_INPICO[i] + 999999) / 1000000))
+    b=$(((V_MT[i] * V_OUTPICO[i] + 999999) / 1000000))
+    VOICE_W[i]=$((a + b))
+    s=$((s + a + b))
+  done
+  TOTAL=$s
+}
+
+if [ -n "$prompt_bytes" ]; then
+  est_t=$(((prompt_bytes + bpt - 1) / bpt))
+else
+  est_t=0
+fi
+cost_total "$est_t"
+worst=$TOTAL
+cost_total 0
+out_part=$TOTAL
+cost_total "$est_t"
+
+if [ "$worst" -gt "$cap_micro" ]; then
+  printf '%s: REFUSED: worst case cost $%s is above the cap $%s. No model was called.\n' "$PROG" "$(usd6 "$worst")" "$(usd6 "$cap_micro")"
+  if [ -n "$prompt_bytes" ]; then
+    printf 'prompt: %s bytes, est %s tokens (%s bytes per token)\n' "$prompt_bytes" "$est_t" "$bpt"
+  else
+    echo "prompt: not given (output budgets only)"
+  fi
+  w=0; for n in "${V_NAME[@]}"; do [ "${#n}" -gt "$w" ] && w=${#n}; done
+  for i in "${!V_NAME[@]}"; do
+    price_text "${V_INPICO[i]}"; in_price=$PTEXT
+    price_text "${V_OUTPICO[i]}"; out_price=$PTEXT
+    printf 'voice=%-*s worst_usd=%s (prompt %s x %s + output %s x %s)\n' "$w" "${V_NAME[i]}" "$(usd6 "${VOICE_W[i]}")" \
+      "$est_t" "$in_price" "${V_MT[i]}" "$out_price"
+  done
+  if [ "$out_part" -gt "$cap_micro" ]; then
+    printf 'next: no prompt size fits: the output budgets alone cost $%s; ask llm-gateway to lower ecr_max_tokens or the lead to review the cap\n' "$(usd6 "$out_part")"
+  else
+    # largest T whose worst case is at most the cap (the worst case never
+    # decreases as T grows): binary search below the real-number bound
+    sum_pico=0; for i in "${!V_NAME[@]}"; do sum_pico=$((sum_pico + V_INPICO[i])); done
+    lo=0 hi=$((((cap_micro - out_part) * 1000000) / sum_pico))
+    while [ "$lo" -lt "$hi" ]; do
+      mid=$(((lo + hi + 1) / 2))
+      cost_total "$mid"
+      if [ "$TOTAL" -le "$cap_micro" ]; then lo=$mid; else hi=$((mid - 1)); fi
+    done
+    printf 'next: shorten the prompt to at most %s bytes (est %s tokens) for this panel and run again. The cap is the threshold ecr-run-cost-cap-usd; do not change it for a run.\n' "$((lo * bpt))" "$lo"
+  fi
+  flush_notes
+  exit 5
+fi
+
+# ---- write the panel ------------------------------------------------------
+
+if [ -n "$prompt_bytes" ]; then hdr_bytes="$prompt_bytes"; else hdr_bytes="-"; fi
+panel_text=$(
+  printf '#ecr-panel\t1\tsource=%s\texternal_expected=%s\texternal_resolved=%s\tvoices=%s\tprompt_bytes=%s\tcost_usd=%s\n' \
+    "$source" "$expected" "$resolved_n" "$((resolved_n + 1))" "$hdr_bytes" "$(usd6 "$worst")"
+  for i in "${!V_NAME[@]}"; do
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${V_NAME[i]}" "${V_MODEL[i]}" "${V_PROV[i]}" "${V_SERVED[i]}" \
+      "${V_TMO[i]}" "${V_MT[i]}" "${V_ORIGIN[i]}" "${V_SET[i]}"
+  done
+)
+if [ "$have_out" -eq 1 ]; then
+  panel_path="$out"
+  tmpf=$(umask 077; mktemp "$out.XXXXXX" 2>/dev/null) || die 2 "cannot write the panel file"
+  if ! { printf '%s\n' "$panel_text" > "$tmpf" && mv -f "$tmpf" "$out"; }; then
+    rm -f "$tmpf"; die 2 "cannot write the panel file"
+  fi
+else
+  pdir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/ecr-panel.XXXXXX") || die 2 "mktemp failed"
+  panel_path="$pdir/panel.tsv"
+  printf '%s\n' "$panel_text" > "$panel_path" || die 2 "cannot write the panel file"
+fi
+
+# ---- report ---------------------------------------------------------------
+
+printf '%s: source=%s external=%s/%s voices=%s\n' "$PROG" "$source" "$resolved_n" "$expected" "$((resolved_n + 1))"
+printf 'panel-file=%s\n' "$panel_path"
+if [ -n "$prompt_bytes" ]; then
+  printf 'cost: worst_usd=%s cap_usd=%s est_prompt_tokens=%s bytes_per_token=%s voices=%s (Claude voice not counted)\n' \
+    "$(usd6 "$worst")" "$(usd6 "$cap_micro")" "$est_t" "$bpt" "$resolved_n"
+else
+  printf 'cost: prompt not given, output-only worst_usd=%s\n' "$(usd6 "$worst")"
+fi
+for i in "${!V_NAME[@]}"; do
+  printf 'voice=%s model=%s served=%s provider=%s timeout=%s max_tokens=%s origin=%s settings=%s\n' \
+    "${V_NAME[i]}" "${V_MODEL[i]}" "${V_SERVED[i]}" "${V_PROV[i]}" "${V_TMO[i]}" "${V_MT[i]}" "${V_ORIGIN[i]}" "${V_SET[i]}"
+done
+flush_notes
+exit "$exit_code"

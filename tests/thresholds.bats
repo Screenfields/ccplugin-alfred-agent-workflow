@@ -176,3 +176,11 @@ names_in() {
   [ "$output" = "2" ]
   [ "$(jq -r '.["reply-time-tolerance-minutes"] | type' "$ROOT/config/thresholds.json")" = number ]
 }
+
+@test "the ECR cost names resolve: ecr-run-cost-cap-usd to 1 and ecr-bytes-per-token to 3, both numbers, the second an integer (CCW-193)" {
+  [ "$("$CFG" get ecr-run-cost-cap-usd)" = "1" ]
+  [ "$("$CFG" get ecr-bytes-per-token)" = "3" ]
+  [ "$(jq -r '.["ecr-run-cost-cap-usd"] | type' "$ROOT/config/thresholds.json")" = number ]
+  [ "$(jq -r '.["ecr-bytes-per-token"] | type' "$ROOT/config/thresholds.json")" = number ]
+  jq -e '.["ecr-bytes-per-token"] | . == floor and . >= 1 and . <= 4' "$ROOT/config/thresholds.json" >/dev/null
+}
