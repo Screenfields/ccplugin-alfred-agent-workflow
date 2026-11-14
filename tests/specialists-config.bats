@@ -862,10 +862,17 @@ DESIGN_SKILL="$BATS_TEST_DIRNAME/../skills/platform-design-basis/SKILL.md"
   done
 }
 
-@test "platform-design-basis: frontmatter name and description, and eight bullets" {
+@test "platform-design-basis: frontmatter name and description, and nine bullets" {
   [ "$(sed -n 's/^name: //p' "$DESIGN_SKILL" | head -1)" = platform-design-basis ]
-  grep -qxF "description: \"Load when writing or checking a design for the Alfred platform: what counts as a precedent, the doctrines to read, the platform's patterns, the loop, the owner triggers and how to write.\"" "$DESIGN_SKILL"
-  [ "$(grep -c '^- \*\*' "$DESIGN_SKILL")" -eq 8 ]
+  grep -qxF "description: \"Load when writing or checking a design for the Alfred platform: what counts as a precedent, the doctrines to read, the platform's patterns, the loop, the owner triggers, configuration and how to write.\"" "$DESIGN_SKILL"
+  [ "$(grep -c '^- \*\*' "$DESIGN_SKILL")" -eq 9 ]
+}
+
+@test "platform-design-basis: the Configuration bullet names the environment URL rule (CCW-205 AC 8)" {
+  line=$(grep -F -- '- **Configuration.**' "$DESIGN_SKILL")
+  [ "$(printf '%s\n' "$line" | grep -c .)" -eq 1 ]
+  [[ "$line" == *'`no-hardcoded-environment-urls`'* ]]
+  [[ "$line" == *"no literal and no literal default"* ]]
 }
 
 @test "platform-design-basis: the doctrine sentence appears once across agents and skills" {

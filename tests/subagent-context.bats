@@ -21,7 +21,7 @@ sub() { # sub <agent_type> [cwd]
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq -r .hookSpecificOutput.hookEventName)" = "SubagentStart" ]
     ctx=$(printf '%s' "$output" | jq -r .hookSpecificOutput.additionalContext)
-    for r in deployment-is-not-evidence parallel-only-when-independent wait-for-the-decider report-failing-platform-services \
+    for r in deployment-is-not-evidence parallel-only-when-independent wait-for-the-decider report-failing-platform-services no-hardcoded-environment-urls \
              unclear-brief-goes-back workers-change-rules-only-when-briefed hand-back-fields workers-never-merge-or-delegate; do
       [[ "$ctx" == *"- $(body "$r")"* ]] || { echo "$t: missing $r"; return 1; }
     done

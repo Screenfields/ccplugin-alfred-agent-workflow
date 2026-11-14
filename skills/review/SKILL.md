@@ -133,6 +133,11 @@ Flag state creation without a declared teardown.
 - SQL or template injection via unsanitized user input?
 - Unvalidated external input at system boundaries (HTTP endpoints, CLI args, file paths from external sources)?
 
+**Configuration:**
+- A literal URL, host or origin of a platform or product environment in application code? A BLOCKER under the routed rule `no-hardcoded-environment-urls`.
+- A literal default behind an environment override? Also a BLOCKER: the application fails closed when the setting is missing.
+- Not findings: tests, fixtures, docs, gitops overlays and vendor-contract base URLs.
+
 **Correctness:**
 - Obvious logic errors (inverted conditions, wrong operator, incorrect variable)?
 - Off-by-one in loops or index operations?

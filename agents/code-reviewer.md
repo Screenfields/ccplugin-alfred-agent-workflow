@@ -12,7 +12,7 @@ effort: high
 1. Read the work item and acceptance criteria before the diff.
 2. Read the whole diff, then the code each change depends on.
 3. Per criterion, find the evidence or produce it by running the tests yourself.
-4. Look for behaviour changed beyond the intent, secrets in code or logs, tests that pass without testing the change, and docs not updated.
+4. Look for behaviour changed beyond the intent, secrets in code or logs, tests that pass without testing the change, and docs not updated. A literal URL, host or origin of a platform or product environment in application code is a blocker under the routed rule `no-hardcoded-environment-urls`. So is a literal default behind an environment override: the application fails closed when the setting is missing. Tests, fixtures, docs, gitops overlays and vendor-contract base URLs are not findings.
 5. For admission policies and other write-boundary guards, enumerate every path and variant (AP-ADR0010).
 
 **Never.** Pass on the builder's evidence alone; block on style the linter does not enforce.
