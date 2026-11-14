@@ -28,7 +28,7 @@ body() { awk 'c >= 2 {print} /^---$/ {c++}' "$ROOT/rules/routed/$1.md" | tr '\n'
 # tag <rule-name> <key> — a frontmatter value.
 tag() { sed -n "s/^$2: *//p" "$ROOT/rules/routed/$1.md" | head -1; }
 
-ALL_RULES="deployment-is-not-evidence parallel-only-when-independent wait-for-the-decider report-failing-platform-services"
+ALL_RULES="deployment-is-not-evidence parallel-only-when-independent wait-for-the-decider report-failing-platform-services no-hardcoded-environment-urls"
 LEAD_RULES="memory-holds-only-lessons message-hub-for-cross-project-results feedback-and-bugs-become-work-items work-and-review-in-pairs author-gitops-pr-never-self-approve"
 WORKER_RULES="unclear-brief-goes-back workers-change-rules-only-when-briefed hand-back-fields workers-never-merge-or-delegate"
 
@@ -122,8 +122,9 @@ workers-change-rules-only-when-briefed|worker|work item|major
 hand-back-fields|worker|work item|minor
 workers-never-merge-or-delegate|worker|code, work item|major
 work-and-review-in-pairs|lead|code, design, work item|major
-author-gitops-pr-never-self-approve|lead|operations|critical'
-  [ "$(ls "$ROOT"/rules/routed/*.md | wc -l)" -eq 13 ]
+author-gitops-pr-never-self-approve|lead|operations|critical
+no-hardcoded-environment-urls|all|code, design|major'
+  [ "$(ls "$ROOT"/rules/routed/*.md | wc -l)" -eq 14 ]
   while IFS='|' read -r name roles work sev; do
     f="$ROOT/rules/routed/$name.md"
     [ -f "$f" ] || { echo "no file for $name"; return 1; }
@@ -169,4 +170,26 @@ author-gitops-pr-never-self-approve|lead|operations|critical'
   [ "${#output}" -lt 9500 ]
   run "$ROOT/hooks/doctrines-context.sh"
   [ "${#output}" -lt 9500 ]
+}
+
+@test "the environment URL rule: one statement naming URL, host, origin, configuration and its reason (CCW-205 AC 1)" {
+  b=$(body no-hardcoded-environment-urls)
+  for w in URL host origin configuration "literal default" because; do
+    [[ "$b" == *"$w"* ]] || { echo "missing: $w"; return 1; }
+  done
+  [[ "$b" == *. ]]
+  [[ "$b" != *". "* && "$b" != *";"* ]]
+  if grep -q '[0-9%]' <<<"$b"; then echo "digit or percent sign"; return 1; fi
+}
+
+@test "the environment URL rule: once per session, never through doctrines-context (CCW-205 AC 4)" {
+  b=$(body no-hardcoded-environment-urls)
+  [ "$(ls "$ROOT"/rules/*.md | wc -l)" -eq 12 ]
+  [ ! -e "$ROOT/rules/no-hardcoded-environment-urls.md" ]
+  for id in some-lead hub alfred; do
+    run session "$id"
+    [ "$(ctx_of "$output" | grep -cF -- "$b")" -eq 1 ] || { echo "$id: not exactly once"; return 1; }
+  done
+  run "$ROOT/hooks/doctrines-context.sh"
+  [[ "$(ctx_of "$output")" != *"$b"* ]]
 }

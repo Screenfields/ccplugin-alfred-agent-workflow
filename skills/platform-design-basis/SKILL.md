@@ -1,6 +1,6 @@
 ---
 name: platform-design-basis
-description: "Load when writing or checking a design for the Alfred platform: what counts as a precedent, the doctrines to read, the platform's patterns, the loop, the owner triggers and how to write."
+description: "Load when writing or checking a design for the Alfred platform: what counts as a precedent, the doctrines to read, the platform's patterns, the loop, the owner triggers, configuration and how to write."
 ---
 
 - **Precedent.** An accepted ADR or a baseline doc. Code counts only when a baseline doc describes it. Doctrines inform a design but are not a precedent (AP-ADR0035 item 7). An owner decision recorded only on an issue is not a precedent (hub answer 2). **[Alfred]** Neither is a memory note.
@@ -10,4 +10,5 @@ description: "Load when writing or checking a design for the Alfred platform: wh
 - **Owner triggers** (AP-ADR0035 items 2 and 3): no precedent with real alternatives; a change to an accepted ADR or the target architecture; additional spending above zero, except ECR spending within its standing budget; objective 2's escalation triggers; a reservation in an objective or an ADR.
 - **Large and very large items** get an ECR after the design review, with or without precedent (AP-ADR0035 item 4c).
 - **Need before solution.** State the functional need before naming a product. **[Alfred: from the platform's working style]**
+- **Configuration.** A design takes environment URLs, hosts and origins from configuration and adds no literal and no literal default (routed rule `no-hardcoded-environment-urls`).
 - **Writing.** Follow the house-style skill.

@@ -1033,6 +1033,31 @@ line_of() { grep -n -m1 -- "$1" "$2" | cut -d: -f1; }
   if grep -q 'alfred-review post' "$f"; then false; fi
 }
 
+@test "review skill Angle 9 flags environment URLs and literal defaults as blockers (CCW-205 AC 6)" {
+  f="$ROOT/skills/review/SKILL.md"
+  [ "$(grep -c '^### Angle ' "$f")" -eq 9 ]
+  sec=$(sed -n '/^### Angle 9/,/^## Step 3/p' "$f")
+  grep -qxF '**Configuration:**' <<<"$sec"
+  grep -qF 'A literal URL, host or origin of a platform or product environment in application code? A BLOCKER under the routed rule `no-hardcoded-environment-urls`.' <<<"$sec"
+  grep -qF 'A literal default behind an environment override? Also a BLOCKER: the application fails closed when the setting is missing.' <<<"$sec"
+  grep -qF 'Not findings: tests, fixtures, docs, gitops overlays and vendor-contract base URLs.' <<<"$sec"
+}
+
+@test "code-reviewer step 4 names environment URLs and literal defaults as blockers (CCW-205 AC 7)" {
+  step=$(grep '^4\. ' "$ROOT/agents/code-reviewer.md")
+  [[ "$step" == *'A literal URL, host or origin of a platform or product environment in application code is a blocker under the routed rule `no-hardcoded-environment-urls`.'* ]]
+  [[ "$step" == *'So is a literal default behind an environment override: the application fails closed when the setting is missing.'* ]]
+  [[ "$step" == *'Tests, fixtures, docs, gitops overlays and vendor-contract base URLs are not findings.'* ]]
+}
+
+@test "the environment URL texts carry no screenfields host string (CCW-205 AC 9)" {
+  for f in rules/routed/no-hardcoded-environment-urls.md skills/review/SKILL.md \
+           skills/platform-design-basis/SKILL.md agents/code-reviewer.md; do
+    [ -f "$ROOT/$f" ] || { echo "missing $f"; return 1; }
+    if grep -qiF 'screenfields.' "$ROOT/$f"; then echo "host string in $f"; return 1; fi
+  done
+}
+
 @test "review-panel has the another-lead section" {
   f="$ROOT/skills/review-panel/SKILL.md"
   grep -q '^## Review by another lead' "$f"

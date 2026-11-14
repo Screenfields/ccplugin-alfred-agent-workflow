@@ -143,12 +143,12 @@ setup() {
   no_leftovers
 }
 
-@test "plugin version is 2.44.0" {
-  [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = 2.44.0 ]
+@test "plugin version is 2.45.0" {
+  [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = 2.45.0 ]
 }
 
 @test "no file under tests or .claude-plugin still carries the previous version" {
-  run grep -rn '2\.43\.[01]' "$BATS_TEST_DIRNAME" "$BATS_TEST_DIRNAME/../.claude-plugin"
+  run grep -rn '2\.44\.0' "$BATS_TEST_DIRNAME" "$BATS_TEST_DIRNAME/../.claude-plugin"
   [ "$status" -eq 1 ]
   [ -z "$output" ]
 }
