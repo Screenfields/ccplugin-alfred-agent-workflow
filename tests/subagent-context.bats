@@ -16,13 +16,14 @@ sub() { # sub <agent_type> [cwd]
 }
 
 @test "a fresh subagent gets the all and worker rules and no lead rule or agreement (AC 2)" {
-  for t in builder code-reviewer general-purpose; do
+  for t in builder code-reviewer acceptance-reviewer general-purpose; do
     run sub "$t"
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq -r .hookSpecificOutput.hookEventName)" = "SubagentStart" ]
     ctx=$(printf '%s' "$output" | jq -r .hookSpecificOutput.additionalContext)
     for r in deployment-is-not-evidence parallel-only-when-independent wait-for-the-decider report-failing-platform-services no-hardcoded-environment-urls \
-             unclear-brief-goes-back workers-change-rules-only-when-briefed hand-back-fields workers-never-merge-or-delegate; do
+             unclear-brief-goes-back workers-change-rules-only-when-briefed hand-back-fields workers-never-merge-or-delegate \
+             long-commands-wait-by-notification-only a-wake-during-a-run-starts-nothing ci-wait-is-one-bounded-call; do
       [[ "$ctx" == *"- $(body "$r")"* ]] || { echo "$t: missing $r"; return 1; }
     done
     for r in memory-holds-only-lessons message-hub-for-cross-project-results feedback-and-bugs-become-work-items \

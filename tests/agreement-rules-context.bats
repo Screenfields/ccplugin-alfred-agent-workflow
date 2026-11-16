@@ -28,9 +28,9 @@ body() { awk 'c >= 2 {print} /^---$/ {c++}' "$ROOT/rules/routed/$1.md" | tr '\n'
 # tag <rule-name> <key> — a frontmatter value.
 tag() { sed -n "s/^$2: *//p" "$ROOT/rules/routed/$1.md" | head -1; }
 
-ALL_RULES="deployment-is-not-evidence parallel-only-when-independent wait-for-the-decider report-failing-platform-services no-hardcoded-environment-urls"
+ALL_RULES="deployment-is-not-evidence parallel-only-when-independent wait-for-the-decider report-failing-platform-services no-hardcoded-environment-urls ci-wait-is-one-bounded-call"
 LEAD_RULES="memory-holds-only-lessons message-hub-for-cross-project-results feedback-and-bugs-become-work-items work-and-review-in-pairs author-gitops-pr-never-self-approve"
-WORKER_RULES="unclear-brief-goes-back workers-change-rules-only-when-briefed hand-back-fields workers-never-merge-or-delegate"
+WORKER_RULES="unclear-brief-goes-back workers-change-rules-only-when-briefed hand-back-fields workers-never-merge-or-delegate long-commands-wait-by-notification-only a-wake-during-a-run-starts-nothing"
 
 @test "lead: the agreement in full, then the all and lead rules in full (AC 1)" {
   run session some-lead
@@ -123,8 +123,11 @@ hand-back-fields|worker|work item|minor
 workers-never-merge-or-delegate|worker|code, work item|major
 work-and-review-in-pairs|lead|code, design, work item|major
 author-gitops-pr-never-self-approve|lead|operations|critical
-no-hardcoded-environment-urls|all|code, design|major'
-  [ "$(ls "$ROOT"/rules/routed/*.md | wc -l)" -eq 14 ]
+no-hardcoded-environment-urls|all|code, design|major
+long-commands-wait-by-notification-only|worker|code|major
+a-wake-during-a-run-starts-nothing|worker|code|major
+ci-wait-is-one-bounded-call|all|code|major'
+  [ "$(ls "$ROOT"/rules/routed/*.md | wc -l)" -eq 17 ]
   while IFS='|' read -r name roles work sev; do
     f="$ROOT/rules/routed/$name.md"
     [ -f "$f" ] || { echo "no file for $name"; return 1; }
@@ -192,4 +195,40 @@ no-hardcoded-environment-urls|all|code, design|major'
   done
   run "$ROOT/hooks/doctrines-context.sh"
   [[ "$(ctx_of "$output")" != *"$b"* ]]
+}
+
+@test "the waiting rules: one statement each, with the words the criteria name (CCW-210 AC 1)" {
+  for r in long-commands-wait-by-notification-only a-wake-during-a-run-starts-nothing ci-wait-is-one-bounded-call; do
+    b=$(body "$r")
+    [[ "$b" == *because* ]] || { echo "$r: no because"; return 1; }
+    [[ "$b" == *. ]] || { echo "$r: no final stop"; return 1; }
+    [[ "$b" != *". "* && "$b" != *";"* ]] || { echo "$r: not one statement"; return 1; }
+    if grep -q '[0-9%]' <<<"$b"; then echo "$r: digit or percent sign"; return 1; fi
+  done
+  b=$(body long-commands-wait-by-notification-only)
+  for w in timeout pgrep "exit notification"; do [[ "$b" == *"$w"* ]] || { echo "A missing: $w"; return 1; }; done
+  b=$(body a-wake-during-a-run-starts-nothing)
+  for w in notification re-run; do [[ "$b" == *"$w"* ]] || { echo "B missing: $w"; return 1; }; done
+  b=$(body ci-wait-is-one-bounded-call)
+  for w in timeout "--watch"; do [[ "$b" == *"$w"* ]] || { echo "C missing: $w"; return 1; }; done
+}
+
+@test "the waiting rules: once per session where delivered, never through doctrines-context (CCW-210 AC 3, AC 4)" {
+  [ "$(ls "$ROOT"/rules/*.md | wc -l)" -eq 12 ]
+  a=$(body long-commands-wait-by-notification-only)
+  b=$(body a-wake-during-a-run-starts-nothing)
+  c=$(body ci-wait-is-one-bounded-call)
+  for id in some-lead hub alfred; do
+    run session "$id"
+    ctx=$(ctx_of "$output")
+    [ "$(grep -cF -- "$c" <<<"$ctx")" -eq 1 ] || { echo "$id: C not exactly once"; return 1; }
+    [[ "$ctx" != *"$a"* && "$ctx" != *"$b"* ]] || { echo "$id: worker rule leaked"; return 1; }
+  done
+  export ALFRED_ROLE=worker
+  run session some-lead
+  for x in "$a" "$b" "$c"; do
+    [ "$(ctx_of "$output" | grep -cF -- "$x")" -eq 1 ] || { echo "worker: not exactly once: $x"; return 1; }
+  done
+  run "$ROOT/hooks/doctrines-context.sh"
+  for x in "$a" "$b" "$c"; do [[ "$(ctx_of "$output")" != *"$x"* ]]; done
 }

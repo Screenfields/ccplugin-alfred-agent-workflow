@@ -197,6 +197,18 @@ gate2_range() { sect "$README" "$GATE2"; }
   [ "$b" -lt "$c" ]
 }
 
+@test "develop: Step 4 names the long-command rule and Step 6 gives the CI wait pointer (CCW-210 AC 6)" {
+  s4=$(sect "$DEVELOP" '## Step 4: Implement')
+  has "$s4" 'long-commands-wait-by-notification-only'
+  lacks "$s4" 'pgrep'
+  # The PR body example inside Step 6 has its own ## lines, so cut at the Step 6.5 heading instead of using sect.
+  s6=$(awk '/^## Step 6: /{on=1} /^## Step 6.5/{on=0} on' "$DEVELOP")
+  [ -n "$s6" ]
+  has "$s6" 'Wait for CI as `ci-wait-is-one-bounded-call` says. Exit 124 means CI was still running at the bound: report it as pending. Exit 1 means a failed check or no checks reported yet: read the output, do not loop.'
+  has "$s6" 'gh pr checks {PR}'
+  lacks "$s6" 'pgrep'
+}
+
 # --- criterion 4: develop --------------------------------------------------------
 
 @test "develop gives the builder and code reviewer pair and the same-builder fix loop" {
