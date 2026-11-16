@@ -84,6 +84,8 @@ npm run build   # TypeScript compiles clean
 
 If the feature needs multiple parts, iterate: test → implement → test → implement.
 
+Run the long commands above and wait for them as `long-commands-wait-by-notification-only` says.
+
 ## Step 5: Commit
 
 Use the `/commit` skill or follow commit conventions:
@@ -120,6 +122,8 @@ gh pr create --head feature/issue-{N}-{short-description} --title "{short title}
 ## Testing
 - {what was tested}"
 ```
+
+Wait for CI as `ci-wait-is-one-bounded-call` says. Exit 124 means CI was still running at the bound: report it as pending. Exit 1 means a failed check or no checks reported yet: read the output, do not loop.
 
 **Verify CI status before proceeding.** After the PR is created, wait for CI to complete and query the result directly:
 
