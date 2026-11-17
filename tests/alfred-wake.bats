@@ -500,13 +500,13 @@ EOF
   ln -s "$(readlink -f "$WAKE")" "$ALFRED_WAKE_BIN_DIR/alfred-wake"
   run "$ALFRED_WAKE_BIN_DIR/alfred-wake" wait 5
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.9.0"* ]]
+  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.10.0"* ]]
   [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-wake")" = "$BATS_TEST_TMPDIR/cache/9.9.0/bin/alfred-wake" ]
-  grep -q "upgrade: 1.9.0 -> 9.9.0" "$STATE/alfred-wake.log"
+  grep -q "upgrade: 1.10.0 -> 9.9.0" "$STATE/alfred-wake.log"
 }
 
 @test "an older or equal installed alfred-wake is not used" {
-  for v in 1.0.0 1.9.0; do
+  for v in 1.0.0 1.10.0; do
     fake_install "$v"
     run timeout 3 "$WAKE" wait
     [[ "$output" != *"ran $v"* ]]
@@ -533,7 +533,7 @@ EOF
 @test "--version prints the version" {
   run "$WAKE" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "alfred-wake 1.9.0" ]
+  [ "$output" = "alfred-wake 1.10.0" ]
 }
 
 # --- Stop hook: never end a turn with the bridge down -----------------------
@@ -844,4 +844,218 @@ line 2" ]
   if printf '%s\n' "$ctx" | grep -qE '^- D[0-9]{2} :'; then return 1; fi
   # Hook strings are capped at 10,000 characters; keep headroom.
   [ "${#ctx}" -lt 9500 ]
+}
+
+# --- CCW-214: Windows Git Bash without flock or pgrep ------------------------
+
+# build_path <dir> <excluded-name...> — fill <dir> with symlinks to every
+# executable in /usr/bin (and the dirs of jq and bash when elsewhere) except
+# the excluded names. Echoes nothing; the caller composes PATH from <dir>.
+build_path() {
+  local dir="$1" d f n skip x
+  shift
+  mkdir -p "$dir"
+  for d in /usr/bin "$(dirname "$(command -v jq)")" "$(dirname "$(command -v bash)")"; do
+    for f in "$d"/*; do
+      [ -x "$f" ] && [ ! -d "$f" ] || continue
+      n="${f##*/}"
+      skip=false
+      for x in "$@"; do if [ "$n" = "$x" ]; then skip=true; fi; done
+      if [ "$skip" = true ] || [ -e "$dir/$n" ]; then continue; fi
+      ln -s "$f" "$dir/$n"
+    done
+  done
+}
+
+# without_flock — set NOLOCK_PATH: the stubs, then every tool except flock,
+# pgrep and pkill. Only the script under test gets it.
+without_flock() {
+  build_path "$BATS_TEST_TMPDIR/nolock-bin" flock pgrep pkill
+  NOLOCK_PATH="$BATS_TEST_DIRNAME/stub:$BATS_TEST_TMPDIR/nolock-bin"
+}
+
+# as_windows — without_flock plus a uname that says MINGW64_NT for -s.
+as_windows() {
+  without_flock
+  mkdir -p "$BATS_TEST_TMPDIR/uname-shim"
+  printf '#!/bin/bash\nif [ "${1:-}" = "-s" ]; then echo MINGW64_NT-10.0-22631; else exec /usr/bin/uname "$@"; fi\n' \
+    > "$BATS_TEST_TMPDIR/uname-shim/uname"
+  chmod +x "$BATS_TEST_TMPDIR/uname-shim/uname"
+  WIN_PATH="$BATS_TEST_TMPDIR/uname-shim:$NOLOCK_PATH"
+}
+
+# start_with <path> <name> <args...> — like start, with PATH set for the script only.
+start_with() {
+  local p="$1" name="$2"
+  shift 2
+  PATH="$p" "$WAKE" "$@" > "$BATS_TEST_TMPDIR/$name.out" 2>&1 3>&- &
+  eval "${name}_pid=$!"
+}
+
+# fake_wait — a live process that looks like `alfred-wake wait`; sets fake_pid.
+fake_wait() {
+  mkdir -p "$BATS_TEST_TMPDIR/fakew"
+  printf '#!/bin/bash\nwhile :; do sleep 0.2; done\n' > "$BATS_TEST_TMPDIR/fakew/alfred-wake"
+  chmod +x "$BATS_TEST_TMPDIR/fakew/alfred-wake"
+  "$BATS_TEST_TMPDIR/fakew/alfred-wake" wait 3>&- &
+  fake_pid=$!
+  FAKE_PIDS+=("$fake_pid")
+}
+
+@test "CCW-214 AC1: on a Windows PATH, wait runs, wakes on mail, and a second wait replaces it" {
+  as_windows
+  start_with "$WIN_PATH" a wait
+  until_true 30 pidfile_is "$a_pid"
+  sleep 1.5
+  alive "$a_pid"
+  [[ "$(out_of a)" != *WAKE-ERROR* ]]
+  start_with "$WIN_PATH" b wait
+  reap "$a_pid"
+  [ "$rc" -eq 0 ]
+  [ "$(out_of a)" = "WAKE-STOPPED replaced by=$b_pid" ]
+  until_true 30 pidfile_is "$b_pid"
+  [ ! -e "$STATE/alfred-wake.lock.d" ]
+  [ ! -e "$STATE/run.$a_pid" ]
+  inbox m1:bob
+  reap "$b_pid"
+  [ "$rc" -eq 0 ]
+  [ "$(out_of b)" = "WAKE am unread=1 from=bob" ]
+  [ ! -e "$STATE/alfred-wake.lock.d" ]
+  no_leftovers
+}
+
+@test "CCW-214 AC2: on a Windows PATH no owner file is written and status says armed" {
+  as_windows
+  mkdir -p "$STATE"
+  echo "1 1" > "$STATE/alfred-wake.owner"
+  export CLAUDE_CODE_SESSION_ID=win-session
+  start_with "$WIN_PATH" a wait
+  until_true 30 pidfile_is "$a_pid"
+  [ ! -e "$STATE/alfred-wake.owner" ]
+  PATH="$WIN_PATH" run "$WAKE" status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"armed:      yes (pid $a_pid"* ]]
+  PATH="$WIN_PATH" run "$WAKE" status --json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r .state)" = "waiting" ]
+}
+
+@test "CCW-214 AC3: a wait yields to a live wait named in the pidfile, and only to that" {
+  as_windows
+  start_with "$WIN_PATH" a wait
+  until_true 30 pidfile_is "$a_pid"
+  fake_wait
+  echo "$fake_pid" > "$STATE/alfred-wake.pid"
+  reap "$a_pid" || { out_of a; false; }
+  [ "$rc" -eq 0 ]
+  [ "$(out_of a)" = "WAKE-STOPPED replaced by=$fake_pid" ]
+  pidfile_is "$fake_pid"
+  [ ! -e "$STATE/run.$a_pid" ]
+  grep -q "yielded to $fake_pid" "$STATE/alfred-wake.log"
+}
+
+@test "CCW-214 AC3: an empty pidfile, a dead pid or its own pid does not stop a Windows wait" {
+  as_windows
+  start_with "$WIN_PATH" a wait
+  until_true 30 pidfile_is "$a_pid"
+  : > "$STATE/alfred-wake.pid"
+  sleep 3.5
+  alive "$a_pid"
+  echo 999999 > "$STATE/alfred-wake.pid"
+  sleep 3.5
+  alive "$a_pid"
+  echo "$a_pid" > "$STATE/alfred-wake.pid"
+  sleep 3.5
+  alive "$a_pid"
+  [ -z "$(out_of a)" ]
+}
+
+@test "CCW-214 AC3: with flock on PATH a wait never yields to a live pid in the pidfile" {
+  start a wait
+  until_true 30 pidfile_is "$a_pid"
+  fake_wait
+  echo "$fake_pid" > "$STATE/alfred-wake.pid"
+  sleep 3.5
+  alive "$a_pid"
+  [ -z "$(out_of a)" ]
+  ! grep -q yielded "$STATE/alfred-wake.log"
+}
+
+@test "CCW-214 AC4: TERM, INT and HUP stop a Windows-PATH wait mid-request through the pgrep stand-in" {
+  as_windows
+  local sig
+  echo 31.4159 > "$STUB_DIR/slow"
+  for sig in TERM INT HUP; do
+    start_with "$WIN_PATH" a wait
+    until_true 50 pgrep -f "sleep 31.4159"
+    kill "-$sig" "$a_pid"
+    reap "$a_pid"
+    [ "$rc" -eq 0 ]
+    [ "$(out_of a)" = "WAKE-STOPPED signal=$sig" ]
+    run pgrep -f "sleep 31.4159"
+    [ "$status" -ne 0 ]
+    no_leftovers
+  done
+}
+
+@test "CCW-214 AC4: the pgrep stand-in lists children, prints nothing for a leaf, and kill_tree on a leaf is quiet" {
+  eval "$(sed -n '/^windows_pgrep() {/,/^}/p;/^kill_tree() {/,/^}/p' "$WAKE")"
+  bash -c 'sleep 30 & wait' &
+  local parent=$! kid
+  FAKE_PIDS+=("$parent")
+  until_true 30 pgrep -P "$parent"
+  kid=$(pgrep -P "$parent")
+  [ "$(windows_pgrep -P "$parent")" = "$kid" ]
+  run windows_pgrep -P "$kid"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+  pgrep() { windows_pgrep "$@"; }
+  run kill_tree "$kid" TERM
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  until_true 30 gone "$kid"
+}
+
+@test "CCW-214 AC4: the pgrep stand-in skips a stat entry that vanishes, first or later, and never reuses the last line" {
+  # Same function text, pointed at a fake proc root (no seam in the script).
+  local root="$BATS_TEST_TMPDIR/fakeproc" n
+  eval "$(sed -n '/^windows_pgrep() {/,/^}/p' "$WAKE" | sed "s#/proc/#$root/#g")"
+  for n in 100 200 300; do mkdir -p "$root/$n"; done
+  ln -s "$root/gone" "$root/100/stat"            # vanished before the first read
+  echo "200 (we ird) ) S 7 1 1 0 -1" > "$root/200/stat"
+  ln -s "$root/gone" "$root/300/stat"            # vanished after a good read
+  run windows_pgrep -P 7
+  [ "$status" -eq 0 ]
+  [ "$output" = "200" ]
+}
+
+@test "CCW-214 AC5: with flock and pgrep on PATH a takeover and a kill call them, and nothing yields" {
+  local d="$BATS_TEST_TMPDIR/logstub"
+  mkdir -p "$d"
+  for t in flock pgrep; do
+    printf '#!/bin/bash\necho "%s $*" >> "%s/calls"\nexec /usr/bin/%s "$@"\n' "$t" "$d" "$t" > "$d/$t"
+    chmod +x "$d/$t"
+  done
+  echo 31.4159 > "$STUB_DIR/slow"
+  PATH="$d:$PATH" start a wait
+  until_true 30 pidfile_is "$a_pid"
+  PATH="$d:$PATH" start b wait
+  reap "$a_pid"
+  grep -q '^flock -w' "$d/calls"
+  grep -q '^flock -u' "$d/calls"
+  until_true 50 pgrep -f "sleep 31.4159"
+  kill -TERM "$b_pid"
+  reap "$b_pid"
+  grep -q '^pgrep -P' "$d/calls"
+  ! grep -q yielded "$STATE/alfred-wake.log"
+}
+
+@test "CCW-214 AC5: without flock or without pgrep on a Linux shell wait keeps the old error and exit 2" {
+  local x
+  for x in flock pgrep; do
+    build_path "$BATS_TEST_TMPDIR/no-$x" "$x"
+    PATH="$BATS_TEST_DIRNAME/stub:$BATS_TEST_TMPDIR/no-$x" run "$WAKE" wait
+    [ "$status" -eq 2 ]
+    [ "$output" = "WAKE-ERROR alfred-wake: requires flock and pgrep (util-linux, procps)" ]
+  done
 }
