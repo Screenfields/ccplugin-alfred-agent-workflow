@@ -214,3 +214,211 @@ one_line_json() {
   run jq -e '.hooks.SessionStart[] | select(any(.hooks[]; .command | test("wake-link-check.sh"))) | (.matcher == "startup|resume") and (.hooks | length == 1) and (.hooks[0].timeout | type == "number" and . <= 5)' "$REPO/hooks/hooks.json"
   [ "$status" -eq 0 ]
 }
+
+# AC 13: the hook never runs the PATH bridge.
+path_marker() {
+  MARK="$BATS_TEST_TMPDIR/path-bridge-ran"
+  mkdir -p "$BATS_TEST_TMPDIR/pathbin"
+  printf '#!/bin/bash\ntouch "%s"\n' "$MARK" >"$BATS_TEST_TMPDIR/pathbin/alfred-wake"
+  chmod +x "$BATS_TEST_TMPDIR/pathbin/alfred-wake"
+  PATH="$BATS_TEST_TMPDIR/pathbin:$PATH"
+}
+
+marker_bridge() {
+  printf '#!/bin/bash\nVERSION="%s"\ntouch "%s"\n' "$OLD_VER" "$BATS_TEST_TMPDIR/path-bridge-ran" >"$1"
+  chmod +x "$1"
+}
+
+@test "CCW-220 AC13: a stale symlink never runs the PATH bridge" {
+  path_marker
+  marker_bridge "$OLD/bin/alfred-wake"
+  mkdir -p "$BIN"
+  ln -s "$OLD/bin/alfred-wake" "$BIN/alfred-wake"
+  run hook
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/path-bridge-ran" ]
+}
+
+@test "CCW-220 AC13: a stale copy never runs the PATH bridge" {
+  path_marker
+  mkdir -p "$BIN"
+  marker_bridge "$BIN/alfred-wake"
+  echo '# alfred-wake' >>"$BIN/alfred-wake"
+  shim_copy
+  run hook
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/path-bridge-ran" ]
+}
+
+@test "CCW-220 AC13: a current link never runs the PATH bridge" {
+  path_marker
+  mkdir -p "$BIN"
+  cp "$PLUGIN/bin/alfred-wake" "$BIN/alfred-wake"
+  run hook
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/path-bridge-ran" ]
+}
+
+@test "CCW-220 AC13: a failed refresh never runs the PATH bridge" {
+  path_marker
+  marker_bridge "$OLD/bin/alfred-wake"
+  mkdir -p "$BIN"
+  ln -s "$OLD/bin/alfred-wake" "$BIN/alfred-wake"
+  shim_fail
+  run hook
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/path-bridge-ran" ]
+}
+
+@test "CCW-220 AC14: a hanging install is bounded and reports one line" {
+  stale_link
+  shim_sleep
+  start=$SECONDS
+  run hook
+  end=$SECONDS
+  [ "$status" -eq 0 ]
+  [ $((end - start)) -lt 5 ]
+  one_line_json "$OLD_VER"
+}
+
+@test "CCW-220 AC15: empty stdin changes nothing" {
+  stale_link
+  cd "$PROJ"
+  run bash -c "\"$NEW/hooks/wake-link-check.sh\" </dev/null 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(readlink "$BIN/alfred-wake")" = "$OLD/bin/alfred-wake" ]
+}
+
+@test "CCW-220 AC15: stdin that is not JSON changes nothing" {
+  stale_link
+  cd "$PROJ"
+  run bash -c "echo 'not json' | \"$NEW/hooks/wake-link-check.sh\" 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(readlink "$BIN/alfred-wake")" = "$OLD/bin/alfred-wake" ]
+}
+
+@test "CCW-220 AC16a: a missing plugin script changes nothing" {
+  stale_link
+  rm -f "$NEW/bin/alfred-wake"
+  run hook
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(readlink "$BIN/alfred-wake")" = "$OLD/bin/alfred-wake" ]
+}
+
+@test "CCW-220 AC16b: an unreadable plugin script changes nothing" {
+  [ "$(id -u)" -ne 0 ] || skip "uid 0 reads anything"
+  stale_link
+  chmod 000 "$NEW/bin/alfred-wake"
+  run hook
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(readlink "$BIN/alfred-wake")" = "$OLD/bin/alfred-wake" ]
+}
+
+@test "CCW-220 AC16c: a non-executable plugin script changes nothing" {
+  stale_link
+  chmod 644 "$NEW/bin/alfred-wake"
+  run hook
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(readlink "$BIN/alfred-wake")" = "$OLD/bin/alfred-wake" ]
+}
+
+@test "CCW-220 AC16d: a plugin script without a VERSION line changes nothing" {
+  stale_link
+  grep -v '^VERSION=' "$REPO/bin/alfred-wake" >"$NEW/bin/alfred-wake"
+  chmod +x "$NEW/bin/alfred-wake"
+  run hook
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(readlink "$BIN/alfred-wake")" = "$OLD/bin/alfred-wake" ]
+}
+
+@test "CCW-220 AC17: a regular file without VERSION is not clobbered" {
+  mkdir -p "$BIN"
+  echo hi >"$BIN/alfred-wake"
+  touch -d '2020-01-01 00:00:00' "$BIN/alfred-wake"
+  before=$(st "$BIN/alfred-wake")
+  run hook
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BIN/alfred-wake")" = hi ]
+  [ "$(st "$BIN/alfred-wake")" = "$before" ]
+  one_line_json unknown
+}
+
+@test "CCW-220 AC17: a regular file with VERSION but not alfred-wake is not clobbered" {
+  mkdir -p "$BIN"
+  printf '#!/bin/sh\nVERSION="1.0.0"\n' >"$BIN/alfred-wake"
+  touch -d '2020-01-01 00:00:00' "$BIN/alfred-wake"
+  before=$(st "$BIN/alfred-wake")
+  run hook
+  [ "$status" -eq 0 ]
+  [ "$(st "$BIN/alfred-wake")" = "$before" ]
+  one_line_json 1.0.0
+}
+
+@test "CCW-220 AC18: compact, clear and a missing source change nothing" {
+  stale_link
+  for s in compact clear none; do
+    run hook "$s"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(readlink "$BIN/alfred-wake")" = "$OLD/bin/alfred-wake" ]
+  done
+}
+
+@test "CCW-220 AC18: resume refreshes like startup" {
+  stale_link
+  run hook resume
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(readlink -f "$BIN/alfred-wake")" = "$(readlink -f "$PLUGIN/bin/alfred-wake")" ]
+}
+
+@test "CCW-220 AC19a: a symlink to a newer script is unchanged" {
+  mkver "$OLD/bin/alfred-wake" 99.0.0
+  mkdir -p "$BIN"
+  ln -s "$OLD/bin/alfred-wake" "$BIN/alfred-wake"
+  touch -h -d '2020-01-01 00:00:00' "$BIN/alfred-wake"
+  before=$(st "$BIN/alfred-wake")
+  run hook
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(st "$BIN/alfred-wake")" = "$before" ]
+  [ "$(readlink "$BIN/alfred-wake")" = "$OLD/bin/alfred-wake" ]
+}
+
+@test "CCW-220 AC19a: a regular copy with a newer VERSION is unchanged" {
+  mkdir -p "$BIN"
+  mkver "$BIN/alfred-wake" 99.0.0
+  touch -d '2020-01-01 00:00:00' "$BIN/alfred-wake"
+  before=$(st "$BIN/alfred-wake")
+  run hook
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(st "$BIN/alfred-wake")" = "$before" ]
+}
+
+@test "CCW-220 AC19b: a copy with the same VERSION but different bytes is refreshed" {
+  mkdir -p "$BIN"
+  cp "$PLUGIN/bin/alfred-wake" "$BIN/alfred-wake"
+  echo '# alfred-wake local edit' >>"$BIN/alfred-wake"
+  shim_copy
+  run hook
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  cmp -s "$BIN/alfred-wake" "$PLUGIN/bin/alfred-wake"
+}
+
+@test "CCW-220 AC19c: a symlink to a file with no VERSION is repointed" {
+  printf '#!/bin/sh\necho hi\n' >"$OLD/bin/alfred-wake"
+  mkdir -p "$BIN"
+  ln -s "$OLD/bin/alfred-wake" "$BIN/alfred-wake"
+  run hook
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(readlink -f "$BIN/alfred-wake")" = "$(readlink -f "$PLUGIN/bin/alfred-wake")" ]
+}
