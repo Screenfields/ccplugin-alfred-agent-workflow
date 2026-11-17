@@ -791,6 +791,75 @@ lead's devbox, and this plugin version installed. Turning the repo's ruleset off
 `Screenfields/ccplugin-alfred-content` already has `lead-review` (ruleset 25678306) live, with manual
 `review` approvals until this version ships.
 
+## Test run (`bin/alfred-test-run`)
+
+A lead starts a Buildkite build for a pushed commit and gets the result in the same terminal. The
+build's worker clones a private repo, so the devbox's read-only GitHub token travels to it as an
+age-encrypted envelope in the build env `ALFRED_GIT_ENVELOPE`. Only the worker's private key opens it.
+The tool prints the per-job states and the last 50 log lines of each failed job.
+
+```bash
+alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>]
+```
+
+Defaults: the pipeline slug is the origin's repo name, lowercased with `_` replaced by `-`, plus
+`-tests`; the commit is `git rev-parse HEAD` (it must be pushed); the branch is the current branch (a
+detached HEAD needs `--branch`); the wait is 1800 s (at least 30).
+
+**Inputs.** `BUILDKITE_API_TOKEN` and `BUILDKITE_ORGANIZATION_SLUG` (env on the devbox); the token file
+`/var/run/alfred/github-readonly-token` (refused when missing, empty or older than 20 min, so the token
+has at least 40 min left); the recipients file `/etc/alfred/buildkite-recipients.txt` (one `age1...`
+recipient per line, `#` comments allowed). A missing input is one stderr line naming it, and nothing is
+sent. `age` must be installed; without it the tool exits 2 with
+`age not found; install it with /workspace/.devbox/init.sh (pinned version and checksum)`.
+
+**Buildkite token scopes:** `write_builds`, `read_builds`, `read_build_logs` and `read_pipelines`.
+
+**API base.** The constant `https://api.buildkite.com` (the vendor's single public endpoint), with the
+override `BUILDKITE_API_URL`. The base must be `https://` and carry no credentials.
+
+**The envelope (schema v1).** Plaintext
+`{"v":1,"token","repo","commit","pipeline","not_after"}`, encrypted with `age -a -R <recipients>` and sent
+as the one env value of a single create request. The worker (alfred-platform PR 1500) checks `repo`
+against `BUILDKITE_REPO`, `commit` against `BUILDKITE_COMMIT`, `pipeline` against
+`BUILDKITE_PIPELINE_SLUG` and `not_after`, clones once and discards the token. The envelope `repo` is the
+pipeline's `.repository`, read from the Buildkite API. It must be the HTTPS `.git` form
+(`https://github.com/<owner>/<repo>.git`) and must name the local origin's owner and repo, otherwise the
+tool exits 2 and sends nothing, so a token cannot go to another repo's pipeline.
+
+**Exit codes**
+
+| Code | Meaning |
+|---|---|
+| 0 | the build passed |
+| 2 | argument, missing input, missing tool, unusable input, or a refused pipeline repository |
+| 3 | token stale, missing or empty |
+| 4 | API failure, unusable temp dir, `age` or `jq` failure, unusable answer, unknown state |
+| 10 | the build finished and did not pass (failed, canceled, skipped, not_run, blocked) |
+| 11 | the wait bound was reached with the build still running |
+| 129, 130, 143 | a signal (HUP, INT, TERM) |
+
+Output: `build: <url>` as the first line, one `job <state> <name>` line per script job, the log tail of
+each `failed`, `timed_out` or `broken` job (at most 5 jobs, 120 s in total), `state: <state>`, and
+`build: <url>` again as the last line. Output is scrubbed of the tokens and of terminal escape
+sequences. The tool never cancels a build: on a bound, an error or a signal the build keeps running.
+
+**How a lead runs it** (CCW-210 rules): once, as a background command under
+`timeout $((wait + 300))` (the default wait is 1800 s, so `timeout 2100`), with the exit notification
+as the only wait. No polling loop, no second waiter, and a wake during a run starts nothing.
+After exit 11 or 4, open the build URL; do not hand-poll.
+
+**Retries.** GET calls (pipeline, build, log) retry up to 3 times on HTTP 429, on 5xx and on curl exits
+6, 7 and 28, waiting the `Retry-After` or `RateLimit-Reset` seconds (at most 30) or 1, 2, 4 s. The create
+request is not retried on a timeout or a 5xx, because it has no idempotency key and the build may
+exist; it is retried only on 429 and curl exits 6 and 7, which are definite refusals. Exit 4 with "the
+build may exist" means: check the pipeline for this commit.
+
+**Rebuilds.** Start a new run; do not use rebuild. The worker refuses a rebuild, because a rebuild
+copies the old env and the worker admits each envelope for one build only.
+
+Test seams (`ALFRED_TEST_RUN_*`, for the bats suite only) print one warning line when set.
+
 ## Specialists (`agents/`)
 
 Eleven specialist definitions (ccplugin#128, AP-ADR0030, AP-ADR0031). A lead starts a specialist by

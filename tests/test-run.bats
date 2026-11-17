@@ -788,3 +788,25 @@ sig_run() {
   [ "$status" -eq 0 ]
   [ "$(envelope | jq -r .repo)" = "https://github.com/Screenfields/a.b_c-d.git" ]
 }
+
+# AC 14: docs
+@test "AC14: README has the test run section with each required item" {
+  local s
+  for s in 'Test run (`bin/alfred-test-run`)' \
+    'alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>]' \
+    '| Code | Meaning |' 'timeout $((wait + 300))' 'timeout 2100' 'exit notification' \
+    'After exit 11 or 4, open the build URL; do not hand-poll.' 'PR 1500' '`age`' \
+    '/workspace/.devbox/init.sh' 'https://api.buildkite.com' 'BUILDKITE_API_URL' \
+    'The create request is not retried on a timeout or a 5xx' \
+    'Start a new run; do not use rebuild. The worker refuses a rebuild.' \
+    'write_builds' 'read_builds' 'read_build_logs' 'read_pipelines' '.repository'; do
+    grep -qF -- "$s" "$ROOT/README.md" || { echo "README lacks: $s" >&3; return 1; }
+  done
+}
+
+# AC 15: version
+@test "AC15: plugin.json is 2.49.0 and nothing under tests or .claude-plugin carries the previous version" {
+  [ "$(jq -r .version "$ROOT/.claude-plugin/plugin.json")" = 2.49.0 ]
+  run grep -rn "2\.4""7\.0" "$ROOT/tests" "$ROOT/.claude-plugin"
+  [ "$status" -eq 1 ]
+}
