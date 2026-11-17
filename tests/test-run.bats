@@ -268,3 +268,194 @@ last_is_build() { [ "$(printf '%s\n' "$output" | tail -1)" = "build: https://bui
   [ "$(jq -r .repo "$T/plain.json")" = "https://github.com/Screenfields/motion.git" ]
   rm -f "$T/plain.json" "$T/key.txt"
 }
+
+# AC 6: create call
+@test "AC6: one POST with commit, branch and exactly the envelope env" {
+  go
+  [ "$status" -eq 0 ]
+  [ "$(posts)" -eq 1 ]
+  grep -q '^POST https://api.buildkite.com/v2/organizations/acme/pipelines/motion-tests/builds$' "$STUB_DIR/calls.log"
+  local body="$STUB_DIR/body.2"
+  [ "$(jq -r .commit "$body")" = "$HEAD_SHA" ]
+  [ "$(jq -r .branch "$body")" = main ]
+  [ "$(jq -c '.env | keys' "$body")" = '["ALFRED_GIT_ENVELOPE"]' ]
+  [[ "$(jq -r .env.ALFRED_GIT_ENVELOPE "$body")" == "-----BEGIN AGE ENCRYPTED FILE-----"* ]]
+  ! grep -q 'PLANTEDTOKEN' "$body"
+}
+@test "AC6: the -K config holds the headers, mode 600, in a 700 directory with only 600 files" {
+  go
+  [ "$status" -eq 0 ]
+  grep -q 'Authorization: Bearer' "$STUB_DIR/cfg.1"
+  grep -q 'Content-Type: application/json' "$STUB_DIR/cfg.1"
+  [ "$(sort -u "$STUB_DIR/cfgmode.log")" = 600 ]
+  [ "$(sort -u "$STUB_DIR/cfgdirmode.log")" = 700 ]
+  [ "$(sort -u "$STUB_DIR/dirfiles.log")" = 600 ]
+  [ "$(sort -u "$STUB_DIR/bodymode.log")" = 600 ]
+}
+@test "AC6: --branch overrides and a detached HEAD without it is refused" {
+  go --branch feature/x
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .branch "$STUB_DIR/body.2")" = feature/x ]
+  reset_calls
+  git checkout -q --detach
+  fails 2
+  [[ "$stderr" == *"detached"* ]]
+}
+
+# AC 7: secrets, mechanical (the argv, environment, output and disk checks run in every teardown)
+@test "AC7: every external command the tool runs goes through the argv shim" {
+  setbuild 1 running; setbuild 2 job-failed; logfx
+  go
+  [ "$status" -eq 10 ]
+  local c
+  for c in jq git sed tr stat date mktemp rm sleep timeout tail grep; do
+    grep -q "^$c " "$STUB_DIR/shim.log" || { echo "no shim record for $c" >&3; return 1; }
+  done
+}
+@test "AC7: the temp dir is empty after success and after failure" {
+  go; [ "$status" -eq 0 ]
+  [ -z "$(ls -A "$TMPDIR")" ]
+  echo '{"message":"no"}' > "$STUB_DIR/body-create"; echo 422 > "$STUB_DIR/fail-create"
+  go; [ "$status" -eq 4 ]
+  [ -z "$(ls -A "$TMPDIR")" ]
+}
+@test "AC7: static greps over the script" {
+  ! grep -nE 'set +-[a-z]*x' "$TR"
+  ! grep -n '<<' "$TR"
+  # an assignment to a variable named TOKEN, KEY or SECRET followed by a command on the same line
+  ! grep -nE '(^|[;&|(]|then|do)[[:space:]]*[A-Za-z_]*(TOKEN|KEY|SECRET)[A-Za-z_]*=[^[:space:]]*[[:space:]]+[A-Za-z_./$"]' "$TR"
+}
+
+# AC 8: wait and report, pass
+@test "AC8: creating, running, passed prints build, jobs, state, build" {
+  setbuild 1 creating; setbuild 2 running; setbuild 3 passed
+  go
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | head -1)" = "build: https://buildkite.com/acme/motion-tests/builds/42" ]
+  last_is_build
+  printf '%s\n' "$output" | grep -qx 'job passed unit'
+  printf '%s\n' "$output" | grep -qx 'job passed lint'
+  [ "$(printf '%s\n' "$output" | grep -c '^job ')" -eq 2 ]
+  printf '%s\n' "$output" | grep -qx 'state: passed'
+  [ "$(sed -n 1p "$STUB_DIR/calls.log")" = "GET https://api.buildkite.com/v2/organizations/acme/pipelines/motion-tests" ]
+  [ "$(sed -n 2p "$STUB_DIR/calls.log")" = "POST https://api.buildkite.com/v2/organizations/acme/pipelines/motion-tests/builds" ]
+  [ "$(ncalls '/builds/42$')" -eq 3 ]
+  [ "$(ncalls '/log$')" -eq 0 ]
+}
+
+# AC 9: failed job, states, untrusted text
+@test "AC9: failed, timed_out and broken jobs print exactly 50 clean log lines" {
+  local s
+  logfx
+  for s in failed timed_out broken; do
+    setbuild 1 "job-$s"; reset_calls
+    go
+    [ "$status" -eq 10 ]
+    [ "$(printf '%s\n' "$output" | grep -c 'LOGLINE-')" -eq 50 ]
+    printf '%s\n' "$output" | grep -q 'LOGLINE-120'
+    ! printf '%s\n' "$output" | grep -q 'LOGLINE-070'
+    printf '%s\n' "$output" | grep -qx "job $s unit"
+    printf '%s\n' "$output" | grep -qx 'job passed lint'
+    printf '%s\n' "$output" | grep -qx 'state: failed'
+    ! printf '%s' "$output" | grep -q $'\033'
+    ! printf '%s' "$output" | grep -q $'\r'
+    ! printf '%s' "$output" | grep -q 'bk;t='
+    ! printf '%s' "$output" | grep -q 'progress 10%'
+    printf '%s\n' "$output" | grep -q 'leaks \[redacted\] and \[redacted\]'
+    [ "$(ncalls '/log$')" -eq 1 ]
+  done
+}
+@test "AC9: blocked, skipped, not_run, canceled and passed-with-blocked end with exit 10 and their state" {
+  local s want
+  for s in blocked skipped not_run canceled passed-blocked; do
+    cp "$FX/build-$s.json" "$STUB_DIR/build.1.json"
+    want=$s; [ "$s" = passed-blocked ] && want=blocked
+    go
+    [ "$status" -eq 10 ]
+    printf '%s\n' "$output" | grep -qx "state: $want"
+  done
+}
+@test "AC9: failing, canceling, scheduled and waiting keep polling until passed" {
+  local s
+  for s in failing canceling scheduled waiting; do
+    setbuild 1 "$s"; setbuild 2 passed; reset_calls
+    go
+    [ "$status" -eq 0 ]
+    [ "$(ncalls '/builds/42$')" -ge 2 ]
+  done
+}
+@test "AC9: an unknown state is exit 4" {
+  setbuild 1 weird
+  go
+  [ "$status" -eq 4 ]
+  [[ "$stderr" == *unknown* ]]
+}
+@test "AC9: a job name with escapes and a newline is cleaned" {
+  cp "$FX/build-odd-name.json" "$STUB_DIR/build.1.json"
+  logfx
+  go
+  [ "$status" -eq 10 ]
+  ! printf '%s' "$output" | grep -q $'\033'
+  [ "$(printf '%s\n' "$output" | grep -c '^job failed red')" -eq 1 ]
+}
+@test "AC9: a 500 character API message with control characters is cut to 300 and cleaned" {
+  printf '{"message":"%s\\u0007\\u001b[31m%s"}' "$(printf 'x%.0s' $(seq 1 250))" "$(printf 'y%.0s' $(seq 1 250))" > "$STUB_DIR/body-create"
+  echo 422 > "$STUB_DIR/fail-create"
+  go
+  [ "$status" -eq 4 ]
+  ! printf '%s' "$stderr" | grep -q $'[\001-\010\013-\037]'
+  [ "$(printf '%s' "$stderr" | tr -cd 'xy' | wc -c)" -le 300 ]
+  [[ "$stderr" == *"HTTP 422"* ]]
+}
+@test "AC9: a secret in the pipeline env never appears (success and failure)" {
+  go; [ "$status" -eq 0 ]
+  echo 403 > "$STUB_DIR/fail-pipeline"; reset_calls
+  go; [ "$status" -eq 4 ]
+}
+
+# AC 10: bound and signals
+@test "AC10: a build that stays running ends with exit 11 within 4 s and is not cancelled" {
+  setbuild 1 running
+  unset SHIM_FAKE_SLEEP
+  export ALFRED_TEST_RUN_MIN_WAIT=1
+  local t0=$SECONDS
+  go --wait-timeout 2
+  [ "$status" -eq 11 ]
+  [ $((SECONDS - t0)) -le 4 ]
+  [[ "$stderr" == *"still running"* ]]
+  last_is_build
+  ! grep -qi cancel "$STUB_DIR/calls.log"
+}
+@test "AC10: --wait-timeout below 30 is refused unless the seam lowers it" {
+  fails 2 --wait-timeout 29
+  [[ "$stderr" == *"at least 30"* ]]
+}
+# sig_run <signal> <exit code> [build marker]: start in the background, signal, check
+sig_run() {
+  setbuild 1 running
+  unset SHIM_FAKE_SLEEP
+  export ALFRED_TEST_RUN_POLL=30
+  [ -z "${3:-}" ] || echo "$3" > "$STUB_DIR/fail-build"
+  set -m
+  env PATH="$PBIN" "$BASH" "$TR" > "$T/sig.out" 2> "$T/sig.err" &
+  local pid=$! i
+  for i in $(seq 1 100); do
+    [ "$(grep -c '/builds/42$' "$STUB_DIR/calls.log")" -ge 1 ] && break
+    sleep 0.1
+  done
+  local t0=$SECONDS
+  kill "-$1" "$pid"
+  local rc=0; wait "$pid" || rc=$?
+  set +m
+  printf '%s\n%s\n' "$(cat "$T/sig.out")" "$(cat "$T/sig.err")" >> "$T/all.out"
+  [ "$rc" -eq "$2" ]
+  [ $((SECONDS - t0)) -le 2 ]
+  [ -z "$(ls -A "$TMPDIR")" ]
+}
+@test "AC10: TERM while sleeping gives 143, the URL already printed, TMPDIR empty" {
+  sig_run TERM 143
+  grep -q '^build: https://buildkite.com' "$T/sig.out"
+}
+@test "AC10: INT gives 130" { sig_run INT 130; grep -q '^build:' "$T/sig.out"; }
+@test "AC10: HUP gives 129" { sig_run HUP 129; grep -q '^build:' "$T/sig.out"; }
+@test "AC10: TERM while a build GET hangs gives 143" { sig_run TERM 143 hang; }

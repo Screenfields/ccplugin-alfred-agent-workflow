@@ -446,7 +446,8 @@ for i in "${!FAIL_IDS[@]}"; do
      || ! jq -e '.content | type == "string"' "$RESP" >/dev/null 2>&1; then
     say "log unavailable"; continue
   fi
-  content=$(jq -r '.content' "$RESP" 2>/dev/null | clean_log)
+  content=$(jq -r '.content' "$RESP" 2>/dev/null) || content=""
+  content=$(printf '%s\n' "$content" | clean_log)
   say "$content"
 done
 
