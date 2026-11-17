@@ -7,7 +7,9 @@
 # with $SHIM_FAIL_ARG set it fails only when an argument equals it.
 # $SHIM_FAKE_SLEEP=1 makes the sleep shim return at once.
 name=${0##*/}
-{ printf '%s' "$name"; printf ' %s' "$@"; printf '\n'; } >> "${ARGV_LOG:-/dev/null}"
+# one write per line: pipeline stages run concurrently and must not interleave
+line=$name; for a in "$@"; do line="$line $a"; done
+printf '%s\n' "$line" >> "${ARGV_LOG:-/dev/null}"
 export -p >> "${ARGV_LOG:-/dev/null}.env"
 for f in ${SHIM_FAIL:-}; do
   if [ "$f" = "$name" ]; then

@@ -309,7 +309,7 @@ last_is_build() { [ "$(printf '%s\n' "$output" | tail -1)" = "build: https://bui
   [ "$status" -eq 10 ]
   local c
   for c in jq git sed tr stat date mktemp rm sleep timeout tail grep; do
-    grep -q "^$c " "$STUB_DIR/shim.log" || { echo "no shim record for $c" >&3; return 1; }
+    grep -q "^$c " "$STUB_DIR/shim.log" || { echo "no shim record for $c: $output / $stderr" >&3; return 1; }
   done
 }
 @test "AC7: the temp dir is empty after success and after failure" {
@@ -459,3 +459,332 @@ sig_run() {
 @test "AC10: INT gives 130" { sig_run INT 130; grep -q '^build:' "$T/sig.out"; }
 @test "AC10: HUP gives 129" { sig_run HUP 129; grep -q '^build:' "$T/sig.out"; }
 @test "AC10: TERM while a build GET hangs gives 143" { sig_run TERM 143 hang; }
+
+# AC 11: API errors and retries
+@test "AC11: create answers 401, 403, 404 or 422: exit 4, code and message, one call" {
+  local c
+  for c in 401 403 404 422; do
+    reset_calls; echo "$c" > "$STUB_DIR/fail-create"
+    go
+    [ "$status" -eq 4 ]
+    [[ "$stderr" == *"HTTP $c: stubbed $c"* ]]
+    [ "$(posts)" -eq 1 ]
+    [[ "$stderr" != *"may exist"* ]]
+  done
+}
+@test "AC11: create answers 429 once then 201" {
+  echo '429 1' > "$STUB_DIR/fail-create"
+  go
+  [ "$status" -eq 0 ]
+  [ "$(posts)" -eq 2 ]
+}
+@test "AC11: create answers 429 every time: 4 POSTs, exit 4, no may exist" {
+  echo '429' > "$STUB_DIR/fail-create"
+  go
+  [ "$status" -eq 4 ]
+  [ "$(posts)" -eq 4 ]
+  [[ "$stderr" != *"may exist"* ]]
+}
+@test "AC11: create ends in curl exit 7 once, then 201" {
+  echo 'curl-exit 7 1' > "$STUB_DIR/fail-create"
+  go
+  [ "$status" -eq 0 ]
+  [ "$(posts)" -eq 2 ]
+}
+@test "AC11: an unknown create outcome is exit 4 with one POST and the may-exist message" {
+  local m
+  for m in 'curl-exit 28' 'curl-exit 56' 'curl-exit 52' '500' '302'; do
+    reset_calls; echo "$m" > "$STUB_DIR/fail-create"
+    go
+    [ "$status" -eq 4 ]
+    [ "$(posts)" -eq 1 ]
+    [[ "$stderr" == *"the build may exist: check the pipeline for this commit"* ]]
+  done
+  rm -f "$STUB_DIR/fail-create"
+  echo 'not json' > "$STUB_DIR/body-create"; reset_calls
+  go; [ "$status" -eq 4 ]; [ "$(posts)" -eq 1 ]; [[ "$stderr" == *"may exist"* ]]
+  rm -f "$STUB_DIR/body-create"; cp "$FX/create-no-number.json" "$STUB_DIR/create.json"; reset_calls
+  go; [ "$status" -eq 4 ]; [ "$(posts)" -eq 1 ]; [[ "$stderr" == *"may exist"* ]]
+  last_is_build
+}
+@test "AC11: the may-exist message never prints an http or control-character web_url" {
+  echo '{"web_url":"http://evil.test/x"}' > "$STUB_DIR/body-create"
+  go
+  [ "$status" -eq 4 ]
+  ! printf '%s\n%s' "$output" "$stderr" | grep -q 'evil.test'
+  printf '{"web_url":"https://buildkite.com/x\\u0007y"}' > "$STUB_DIR/body-create"
+  go
+  [ "$status" -eq 4 ]
+  [[ "$output" != *build:* ]]
+}
+@test "AC11: the pipeline GET answers 403 or 404: exit 4 with the code, no create" {
+  local c
+  for c in 403 404; do
+    reset_calls; echo "$c" > "$STUB_DIR/fail-pipeline"
+    go
+    [ "$status" -eq 4 ]
+    [[ "$stderr" == *"HTTP $c"* ]]
+    [ "$(posts)" -eq 0 ]
+  done
+}
+@test "AC11: the pipeline GET answers 500 every time: 4 GETs, no create" {
+  echo 500 > "$STUB_DIR/fail-pipeline"
+  go
+  [ "$status" -eq 4 ]
+  [ "$(ncalls '^GET ')" -eq 4 ]
+  [ "$(posts)" -eq 0 ]
+}
+@test "AC11: build GETs answering 500 or 429 every time: 4 GETs, exit 4, ends with the build line" {
+  local c
+  for c in 500 429; do
+    reset_calls; echo "$c" > "$STUB_DIR/fail-build"
+    go
+    [ "$status" -eq 4 ]
+    [ "$(ncalls '/builds/42$')" -eq 4 ]
+    last_is_build
+  done
+}
+@test "AC11: curl exits 6, 7 and 28 on a build GET fail twice then succeed" {
+  local c
+  for c in 6 7 28; do
+    reset_calls; echo "curl-exit $c 2" > "$STUB_DIR/fail-build"
+    go
+    [ "$status" -eq 0 ]
+    [ "$(ncalls '/builds/42$')" -eq 3 ]
+  done
+}
+@test "AC11: Retry-After and RateLimit-Reset set the wait, capped at 30" {
+  echo '429 1' > "$STUB_DIR/fail-build"
+  printf 'Retry-After: 2\n' > "$STUB_DIR/headers-build"
+  go; [ "$status" -eq 0 ]; grep -qx 'sleep 2' "$STUB_DIR/shim.log"
+  printf 'RateLimit-Reset: 2\n' > "$STUB_DIR/headers-build"; : > "$STUB_DIR/shim.log"; reset_calls
+  go; [ "$status" -eq 0 ]; grep -qx 'sleep 2' "$STUB_DIR/shim.log"
+  printf 'Retry-After: 99\n' > "$STUB_DIR/headers-build"; : > "$STUB_DIR/shim.log"; reset_calls
+  go; [ "$status" -eq 0 ]; grep -qx 'sleep 30' "$STUB_DIR/shim.log"
+}
+
+# AC 12: calls
+@test "AC12: every curl call has the timeouts and --proto =https, none follows redirects" {
+  setbuild 1 job-failed; logfx
+  go
+  [ "$status" -eq 10 ]
+  [ "$(sed -n 1p "$STUB_DIR/calls.log")" = "GET https://api.buildkite.com/v2/organizations/acme/pipelines/motion-tests" ]
+  [ "$(wc -l < "$STUB_DIR/argv.log")" -eq 4 ]
+  while IFS= read -r line; do
+    [[ "$line" == *"--connect-timeout 10"* ]]
+    [[ "$line" == *"--proto =https"* ]]
+    [[ "$line" != *" -L "* && "$line" != *"--location"* ]]
+    [[ "$line" =~ --max-time\ ([0-9]+) ]]
+    [ "${BASH_REMATCH[1]}" -le 30 ]
+  done < "$STUB_DIR/argv.log"
+  [ "$(posts)" -eq 1 ]
+  ! grep -qi cancel "$STUB_DIR/calls.log"
+}
+
+# AC 13: static (shellcheck itself runs in CI and in the brief's command)
+@test "AC13: the script parses and is executable" {
+  bash -n "$TR"
+  [ -x "$TR" ]
+}
+
+# AC 16: envelope pipe failures
+@test "AC16: a jq failure in the envelope pipe is exit 4, no create" {
+  export SHIM_FAIL=jq SHIM_FAIL_ARG=--rawfile
+  go
+  [ "$status" -eq 4 ]
+  [ "$(posts)" -eq 0 ]
+}
+@test "AC16: age failing, bad header, no END line: exit 4, no create" {
+  local m
+  for m in fail bad-header no-end; do
+    echo "$m" > "$STUB_DIR/age-mode"; reset_calls
+    go
+    [ "$status" -eq 4 ]
+    [ "$(posts)" -eq 0 ]
+  done
+}
+@test "AC16: age echoing the plaintext is exit 4, with and without a trailing newline in the token file" {
+  echo echo-plain > "$STUB_DIR/age-mode"
+  go; [ "$status" -eq 4 ]; [ "$(posts)" -eq 0 ]
+  printf 'ghs_PLANTEDTOKEN' > "$STUB_DIR/token.real"; age_ago 60; reset_calls
+  go; [ "$status" -eq 4 ]; [ "$(posts)" -eq 0 ]
+}
+
+# AC 17: values from responses and the API base
+@test "AC17: a create number of 12;x or ../x is exit 4 and no GET of a build" {
+  local f
+  for f in create-bad-number create-dot-number; do
+    cp "$FX/$f.json" "$STUB_DIR/create.json"; reset_calls
+    go
+    [ "$status" -eq 4 ]
+    [[ "$stderr" == *"may exist"* ]]
+    [ "$(ncalls '^GET .*/builds')" -eq 0 ]
+  done
+}
+@test "AC17: a failed job id of ../../x gets no log request" {
+  cp "$FX/build-bad-job-id.json" "$STUB_DIR/build.1.json"
+  go
+  [ "$status" -eq 10 ]
+  printf '%s\n' "$output" | grep -qx 'log unavailable'
+  [ "$(ncalls '/log$')" -eq 0 ]
+}
+@test "AC17: an http API base is refused unless the loopback seam allows it" {
+  BUILDKITE_API_URL=http://x fails 2
+  export ALFRED_TEST_RUN_ALLOW_HTTP=1
+  BUILDKITE_API_URL=http://evil.test fails 2
+  export BUILDKITE_API_URL=http://127.0.0.1:1
+  go
+  [ "$status" -eq 0 ]
+  grep -q '^GET http://127.0.0.1:1/v2/' "$STUB_DIR/calls.log"
+  export BUILDKITE_API_URL=http://localhost:1
+  reset_calls
+  go
+  [ "$status" -eq 0 ]
+  grep -q '^GET http://localhost:1/v2/' "$STUB_DIR/calls.log"
+}
+
+# AC 18: log unavailable
+@test "AC18: a log GET answering 500 every time: 4 GETs, log unavailable, exit 10" {
+  setbuild 1 job-failed
+  echo 500 > "$STUB_DIR/fail-log"
+  go
+  [ "$status" -eq 10 ]
+  [ "$(ncalls '/log$')" -eq 4 ]
+  printf '%s\n' "$output" | grep -qx 'log unavailable'
+  printf '%s\n' "$output" | grep -qx 'job passed lint'
+}
+
+# AC 20: URL and config injection
+@test "AC20: a bad organization slug is exit 2 with nothing sent" {
+  local s
+  for s in 'A b' 'x/../y' '-x' $'ab\ncd'; do
+    BUILDKITE_ORGANIZATION_SLUG="$s" fails 2
+  done
+}
+@test "AC20: a Buildkite token with a space, a quote or a newline is exit 2" {
+  local s
+  for s in 'bk PLANTEDBK' 'bk"PLANTEDBK' $'bk\nPLANTEDBK'; do
+    BUILDKITE_API_TOKEN="$s" fails 2
+  done
+}
+@test "AC20: a trailing slash on the base gives no // and userinfo is refused" {
+  BUILDKITE_API_URL=https://api.example/ go
+  [ "$status" -eq 0 ]
+  grep -q '^GET https://api.example/v2/' "$STUB_DIR/calls.log"
+  ! grep -q 'example//v2' "$STUB_DIR/calls.log"
+  reset_calls
+  BUILDKITE_API_URL=https://user:pw@api.example fails 2
+  [[ "$stderr" != *pw* && "$stderr" != *user* ]]
+}
+@test "AC20: a 302 on the pipeline GET, create, build GET or log GET is not followed" {
+  local k
+  printf 'Location: http://evil.test/x\n' > "$STUB_DIR/headers-pipeline"
+  for k in create build log; do cp "$STUB_DIR/headers-pipeline" "$STUB_DIR/headers-$k"; done
+  for k in pipeline create build; do
+    reset_calls; rm -f "$STUB_DIR"/fail-*; echo 302 > "$STUB_DIR/fail-$k"
+    go
+    [ "$status" -eq 4 ]
+    case $k in
+      pipeline) [ "$(ncalls '^GET ')" -eq 1 ] ;;
+      create) [ "$(posts)" -eq 1 ] ;;
+      build) [ "$(ncalls '/builds/42$')" -eq 1 ] ;;
+    esac
+    ! grep -q evil.test "$STUB_DIR/calls.log"
+  done
+  # a log GET: "log unavailable" and exit 10 (AC 18 and the Change section), one call
+  rm -f "$STUB_DIR"/fail-*; echo 302 > "$STUB_DIR/fail-log"; setbuild 1 job-failed; reset_calls
+  go
+  [ "$status" -eq 10 ]
+  [ "$(ncalls '/log$')" -eq 1 ]
+  ! grep -q evil.test "$STUB_DIR/calls.log"
+}
+@test "AC20: web_url, url and jobs[].url that point elsewhere are never fetched or printed" {
+  cp "$FX/pipeline-evil.json" "$STUB_DIR/pipeline.json"
+  cp "$FX/create-evil.json" "$STUB_DIR/create.json"
+  setbuild 1 running; setbuild 2 job-failed
+  go
+  [ "$status" -eq 10 ]
+  ! grep -q evil.test "$STUB_DIR/calls.log"
+  [[ "$output" != *evil.test* ]]
+  [ "$(printf '%s\n' "$output" | head -1)" = 'build: acme/motion-tests #42' ]
+}
+
+# AC 21: temp dir and residue (the residue greps run in every teardown)
+@test "AC21: a failing mktemp is exit 4 with no curl call" {
+  export SHIM_FAIL=mktemp
+  go
+  [ "$status" -eq 4 ]
+  [ ! -s "$STUB_DIR/calls.log" ]
+}
+@test "AC21: an unwritable TMPDIR is exit 4 with no curl call" {
+  [ "$(id -u)" -ne 0 ] || skip "root can write anywhere"
+  chmod 500 "$TMPDIR"
+  go
+  [ "$status" -eq 4 ]
+  [ ! -s "$STUB_DIR/calls.log" ]
+  chmod 700 "$TMPDIR"
+}
+
+# AC 22: bound
+@test "AC22: every build GET hangs: the run ends within 3 + 3 + 5 s with each max-time within the time left" {
+  echo hang > "$STUB_DIR/fail-build"
+  unset SHIM_FAKE_SLEEP
+  export ALFRED_TEST_RUN_MIN_WAIT=1 ALFRED_TEST_RUN_REPORT_CAP=3
+  local t0=$SECONDS m
+  go --wait-timeout 3
+  [ "$status" -eq 11 ]
+  [ $((SECONDS - t0)) -le 11 ]
+  last_is_build
+  for m in $(grep '^build ' "$STUB_DIR/maxtime.log" | cut -d' ' -f2); do [ "$m" -le 3 ] && [ "$m" -ge 1 ]; done
+}
+@test "AC22: six failed jobs give at most five log GETs and one 'more failed jobs not shown'" {
+  setbuild 1 six-failed
+  go
+  [ "$status" -eq 10 ]
+  [ "$(ncalls '/log$')" -le 5 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^more failed jobs not shown$')" -eq 1 ]
+}
+@test "AC22: with the report cap used up the remaining jobs get log unavailable" {
+  setbuild 1 six-failed
+  echo hang > "$STUB_DIR/fail-log"
+  unset SHIM_FAKE_SLEEP
+  export ALFRED_TEST_RUN_REPORT_CAP=2
+  go
+  [ "$status" -eq 10 ]
+  [ "$(ncalls '/log$')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^log unavailable$')" -eq 5 ]
+}
+
+# AC 23: seams
+@test "AC23: one warning line naming the single seam that is set" {
+  local v
+  for v in TOKEN_FILE RECIPIENTS NOW BACKOFF REPORT_CAP MIN_WAIT ALLOW_HTTP; do unset "ALFRED_TEST_RUN_$v"; done
+  go
+  [ "$(printf '%s\n' "$stderr" | grep -c '^alfred-test-run: warning: test seam active:')" -eq 1 ]
+  printf '%s\n' "$stderr" | grep -q '^alfred-test-run: warning: test seam active: ALFRED_TEST_RUN_POLL$'
+  unset ALFRED_TEST_RUN_POLL
+  go
+  [[ "$stderr" != *"test seam active"* ]]
+}
+
+# AC 24: pipeline repository
+@test "AC24: a pipeline repository that is not the origin's https .git URL is refused" {
+  local v val
+  for v in ssh http userinfo nogit otherhost missing other case; do
+    cp "$FX/pipeline-$v.json" "$STUB_DIR/pipeline.json"; reset_calls
+    go
+    [ "$status" -eq 2 ]
+    one_err
+    [ "$(posts)" -eq 0 ]
+    [ ! -e "$STUB_DIR/age.argv" ]
+    val=$(jq -r '.repository // empty' "$STUB_DIR/pipeline.json")
+    [ -z "$val" ] || [[ "$stderr" != *"$val"* ]]
+  done
+}
+@test "AC24: a repo name with dot, underscore and dash is accepted" {
+  set_origin 'https://github.com/Screenfields/a.b_c-d.git'
+  cp "$FX/pipeline-abcd.json" "$STUB_DIR/pipeline.json"
+  go --pipeline abcd-tests
+  [ "$status" -eq 0 ]
+  [ "$(envelope | jq -r .repo)" = "https://github.com/Screenfields/a.b_c-d.git" ]
+}
