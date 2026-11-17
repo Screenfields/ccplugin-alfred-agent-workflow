@@ -1,0 +1,4 @@
+# Buildkite worker recipients (test fixture)
+# one age1 recipient per line
+
+age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyq9qc3yd5

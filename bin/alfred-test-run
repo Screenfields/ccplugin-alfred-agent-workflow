@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+# alfred-test-run — start a Buildkite test run for a pushed commit (CCW-218, AP-1499).
+#
+#   alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>]
+#
+# The devbox's read-only GitHub token travels to the build as an age-encrypted
+# envelope in the build env ALFRED_GIT_ENVELOPE. Only the worker's private key
+# opens it. The tool waits for the build within a bound, then prints the per-job
+# states and the last 50 log lines of each failed job.
+#
+# Secret rules (acceptance criteria, not style): no token in argv, in the
+# environment of a child, in an env prefix, in a heredoc or here-string, or in
+# output. Every temp file is mode 0600 inside a 0700 directory that a trap
+# removes on every exit path. The plaintext envelope is piped straight into age
+# and never touches disk.
+#
+# Exit codes:
+#    0 the build passed
+#    2 argument, missing input, missing tool, unusable input, refused pipeline repository
+#    3 token stale, missing or empty
+#    4 API failure, unusable temp dir, age or jq failure, unusable answer, unknown state
+#   10 the build finished and did not pass (failed, canceled, skipped, not_run, blocked)
+#   11 the wait bound was reached with the build still running
+#  129 130 143 a signal (HUP, INT, TERM)
+#
+# Environment (inputs): BUILDKITE_API_TOKEN, BUILDKITE_ORGANIZATION_SLUG, BUILDKITE_API_URL
+# (override of the API base). Test seams, each announced by one warning line:
+#   ALFRED_TEST_RUN_TOKEN_FILE  ALFRED_TEST_RUN_RECIPIENTS  ALFRED_TEST_RUN_NOW
+#   ALFRED_TEST_RUN_POLL  ALFRED_TEST_RUN_BACKOFF  ALFRED_TEST_RUN_REPORT_CAP
+#   ALFRED_TEST_RUN_MIN_WAIT  ALFRED_TEST_RUN_ALLOW_HTTP
+set -u
+
+# A caller-exported variable of an internal name must not carry a value (or an export
+# attribute) into the children's environments: drop every internal global first.
+unset AGE API_DEFAULT BACKOFF BASE BK_TOKEN BLOCKED BODY BRANCH BUILD_LINE BUILD_URL CFG CHILD \
+  CODEF COMMIT CREATE_URL DEADLINE ENVF ENV_RC ERRF FAIL_IDS FAIL_NAMES FORCE GH_RC GH_SHA HDR JOBS \
+  LIMIT_AT MAYEXIST MIN_WAIT MTIME NOT_AFTER NOT_AFTER_EPOCH NUM OHOST OPATH ORG ORIGIN OWNER PBASE \
+  PIPELINE PIPE_REPO POLL PROTO RECIPIENTS REPORT_CAP REPORT_END REPO RESP R_CODE R_FAIL R_RC STATE \
+  TMPD TOKEN_FILE TOKVAL WAIT WEB content first last
+# The Buildkite token leaves the environment before any child process starts.
+BK_TOKEN=${BUILDKITE_API_TOKEN-}
+unset BUILDKITE_API_TOKEN
+umask 077
+
+API_DEFAULT='https://api.buildkite.com'   # the vendor's single public endpoint (CCW-218 decision 2)
+TMPD=""; CHILD=""; BUILD_LINE=""; TOKVAL=""
+CFG=""; HDR=""; RESP=""; CODEF=""; ERRF=""
+LIMIT_AT=0; FORCE=0
+R_FAIL=""; R_CODE=""; R_RC=0
+
+# --- output, with anything token-shaped removed ---------------------------------
+scrub() {
+  local s=$1
+  [ -n "$TOKVAL" ] && s=${s//"$TOKVAL"/[redacted]}
+  [ -n "$BK_TOKEN" ] && s=${s//"$BK_TOKEN"/[redacted]}
+  printf '%s\n' "$s" | sed -E 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/[redacted]/g'
+}
+say() { scrub "$1"; }
+die() { local c=$1; shift; scrub "alfred-test-run: $*" >&2; exit "$c"; }
+# safe <text>: no control characters, at most 300 characters
+safe() { local s; s=$(printf '%s' "$1" | tr -d '\000-\037\177'); printf '%s' "${s:0:300}"; }
+
+# --- traps first: every exit path, signals included, ends here --------------------
+# shellcheck disable=SC2317,SC2329  # runs from the EXIT trap
+on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [ -n "$CHILD" ]; then kill "$CHILD" 2>/dev/null; fi
+  if [ -n "$BUILD_LINE" ]; then say "$BUILD_LINE"; fi
+  if [ -n "$TMPD" ] && [ -d "$TMPD" ]; then rm -rf "$TMPD"; fi
+  exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+
+seams=""
+for v in ALFRED_TEST_RUN_TOKEN_FILE ALFRED_TEST_RUN_RECIPIENTS ALFRED_TEST_RUN_NOW \
+         ALFRED_TEST_RUN_POLL ALFRED_TEST_RUN_BACKOFF ALFRED_TEST_RUN_REPORT_CAP \
+         ALFRED_TEST_RUN_MIN_WAIT ALFRED_TEST_RUN_ALLOW_HTTP; do
+  if [ -n "${!v+x}" ]; then seams="$seams $v"; fi
+done
+if [ -n "$seams" ]; then
+  printf 'alfred-test-run: warning: test seam active:%s\n' "$seams" >&2
+fi
+
+TMPD=$(mktemp -d 2>/dev/null) || TMPD=""
+if [ -z "$TMPD" ] || [ ! -d "$TMPD" ]; then TMPD=""; die 4 "cannot create a temp directory"; fi
+if [ "$(stat -c %a "$TMPD" 2>/dev/null)" != 700 ]; then rmdir "$TMPD" 2>/dev/null; TMPD=""; die 4 "temp directory is not mode 700"; fi
+CFG="$TMPD/curl.cfg"; HDR="$TMPD/headers"; RESP="$TMPD/resp"; CODEF="$TMPD/code"; ERRF="$TMPD/stderr"
+
+# --- arguments ------------------------------------------------------------------
+PIPELINE=""; COMMIT=""; BRANCH=""; WAIT=1800
+while [ $# -gt 0 ]; do
+  case $1 in
+    --pipeline|--commit|--branch|--wait-timeout)
+      [ $# -ge 2 ] || die 2 "$1 needs a value"
+      case $1 in
+        --pipeline) PIPELINE=$2 ;;
+        --commit) COMMIT=$2 ;;
+        --branch) BRANCH=$2 ;;
+        --wait-timeout) WAIT=$2 ;;
+      esac
+      shift 2 ;;
+    -h|--help)
+      echo "usage: alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>]"
+      exit 0 ;;
+    *) die 2 "unknown argument (usage: alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>])" ;;
+  esac
+done
+
+POLL=${ALFRED_TEST_RUN_POLL:-15}
+BACKOFF=${ALFRED_TEST_RUN_BACKOFF:-1}
+REPORT_CAP=${ALFRED_TEST_RUN_REPORT_CAP:-120}
+MIN_WAIT=${ALFRED_TEST_RUN_MIN_WAIT:-30}
+[[ $POLL =~ ^[1-9][0-9]*$ ]] || die 2 "ALFRED_TEST_RUN_POLL must be a positive whole number"
+[[ $BACKOFF =~ ^[0-9]+$ ]] || die 2 "ALFRED_TEST_RUN_BACKOFF must be a whole number"
+[[ $REPORT_CAP =~ ^[0-9]+$ ]] || die 2 "ALFRED_TEST_RUN_REPORT_CAP must be a whole number"
+[[ $MIN_WAIT =~ ^[0-9]+$ ]] || die 2 "ALFRED_TEST_RUN_MIN_WAIT must be a whole number"
+if [ -n "${ALFRED_TEST_RUN_NOW:-}" ]; then
+  [[ $ALFRED_TEST_RUN_NOW =~ ^[0-9]+$ ]] || die 2 "ALFRED_TEST_RUN_NOW must be epoch seconds"
+fi
+[[ $WAIT =~ ^[0-9]+$ ]] || die 2 "--wait-timeout must be a whole number of seconds"
+WAIT=$((10#$WAIT))
+[ "$WAIT" -ge "$MIN_WAIT" ] || die 2 "--wait-timeout must be at least $MIN_WAIT seconds"
+DEADLINE=$((SECONDS + WAIT))
+
+# --- tools ----------------------------------------------------------------------
+for t in curl jq git gh age timeout sed tr head tail grep stat date sleep rm; do
+  if ! command -v "$t" >/dev/null 2>&1; then
+    if [ "$t" = age ]; then
+      die 2 "age not found; install it with /workspace/.devbox/init.sh (pinned version and checksum)"
+    fi
+    die 2 "required tool not found: $t"
+  fi
+done
+
+# --- origin: owner and repo, never the URL itself -----------------------------------
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die 2 "not inside a git repository"
+ORIGIN=$(git remote get-url origin 2>/dev/null) || ORIGIN=""
+[ -n "$ORIGIN" ] || die 2 "this repository has no origin remote"
+OHOST=""; OPATH=""
+re_url='^(https|ssh)://([^/@]*@)?([A-Za-z0-9.-]+)(:[0-9]+)?/(.+)$'
+re_scp='^[A-Za-z0-9._-]+@([A-Za-z0-9.-]+):(.+)$'
+if [[ $ORIGIN =~ $re_url ]]; then
+  OHOST=${BASH_REMATCH[3]}; OPATH=${BASH_REMATCH[5]}
+elif [[ $ORIGIN =~ $re_scp ]]; then
+  OHOST=${BASH_REMATCH[1]}; OPATH=${BASH_REMATCH[2]}
+fi
+ORIGIN=""
+OPATH=${OPATH%/}
+re_path='^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)$'
+if [ -z "$OHOST" ] || ! [[ $OPATH =~ $re_path ]]; then
+  die 2 "origin cannot be parsed into host, owner and repository"
+fi
+OWNER=${BASH_REMATCH[1]}; REPO=${BASH_REMATCH[2]}; REPO=${REPO%.git}
+[ -n "$REPO" ] || die 2 "origin cannot be parsed into host, owner and repository"
+[ "${OHOST,,}" = github.com ] || die 2 "origin host is not github.com"
+
+# --- slug, commit, branch ---------------------------------------------------------
+if [ -z "$PIPELINE" ]; then
+  PIPELINE=${REPO,,}; PIPELINE="${PIPELINE//_/-}-tests"
+fi
+[[ $PIPELINE =~ ^[a-z0-9][a-z0-9-]*$ ]] || die 2 "pipeline slug is invalid (lowercase letters, digits and dashes)"
+
+if [ -z "$COMMIT" ]; then
+  COMMIT=$(git rev-parse HEAD 2>/dev/null) || COMMIT=""
+fi
+[[ $COMMIT =~ ^[0-9a-f]{40}$ ]] || die 2 "commit must be 40 lowercase hex characters"
+
+if [ -z "$BRANCH" ]; then
+  BRANCH=$(git symbolic-ref --short -q HEAD 2>/dev/null) || BRANCH=""
+  [ -n "$BRANCH" ] || die 2 "detached HEAD: pass --branch"
+fi
+if [[ $BRANCH =~ [[:cntrl:][:space:]] ]] || [ "${#BRANCH}" -gt 255 ]; then
+  die 2 "branch name is invalid"
+fi
+
+# --- inputs -------------------------------------------------------------------------
+[ -n "$BK_TOKEN" ] || die 2 "BUILDKITE_API_TOKEN is not set"
+[[ $BK_TOKEN =~ ^[A-Za-z0-9._~+/=-]+$ ]] || die 2 "BUILDKITE_API_TOKEN has characters outside the token alphabet"
+ORG=${BUILDKITE_ORGANIZATION_SLUG-}
+[ -n "$ORG" ] || die 2 "BUILDKITE_ORGANIZATION_SLUG is not set"
+[[ $ORG =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die 2 "BUILDKITE_ORGANIZATION_SLUG is invalid"
+
+TOKEN_FILE=${ALFRED_TEST_RUN_TOKEN_FILE:-/var/run/alfred/github-readonly-token}
+if [ ! -r "$TOKEN_FILE" ] || [ ! -s "$TOKEN_FILE" ]; then
+  die 3 "token file is missing, unreadable or empty"
+fi
+TOKVAL=$(<"$TOKEN_FILE"); TOKVAL=${TOKVAL%$'\r'}
+if [ -n "${ALFRED_TEST_RUN_NOW:-}" ]; then NOW=$ALFRED_TEST_RUN_NOW; else NOW=$(date +%s); fi
+MTIME=$(stat -L -c %Y "$TOKEN_FILE" 2>/dev/null) || MTIME=""
+[[ $MTIME =~ ^[0-9]+$ ]] || die 3 "token file mtime cannot be read"
+AGE=$((NOW - MTIME))
+[ "$AGE" -ge 0 ] || die 3 "token file mtime is in the future"
+if [ "$AGE" -gt 1200 ]; then
+  die 3 "token stale: age $AGE s, $(((3600 - AGE) / 60)) min remaining; wait for the next refresh"
+fi
+NOT_AFTER_EPOCH=$((NOW + 3600))
+[ $((MTIME + 3600)) -lt "$NOT_AFTER_EPOCH" ] && NOT_AFTER_EPOCH=$((MTIME + 3600))
+NOT_AFTER=$(date -u -d "@$NOT_AFTER_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || NOT_AFTER=""
+[ -n "$NOT_AFTER" ] || die 4 "cannot format the token expiry"
+
+RECIPIENTS=${ALFRED_TEST_RUN_RECIPIENTS:-/etc/alfred/buildkite-recipients.txt}
+[ -r "$RECIPIENTS" ] || die 2 "recipients file is missing or unreadable"
+nrec=0
+while IFS= read -r line || [ -n "$line" ]; do
+  case $line in ''|'#'*) continue ;; esac
+  [[ $line =~ ^age1[0-9a-z]+$ ]] || die 2 "recipients file has a line that is not an age1 recipient"
+  nrec=$((nrec + 1))
+done < "$RECIPIENTS"
+[ "$nrec" -ge 1 ] || die 2 "recipients file has no age1 recipient"
+
+BASE=${BUILDKITE_API_URL:-$API_DEFAULT}
+while [ "${BASE%/}" != "$BASE" ]; do BASE=${BASE%/}; done
+PROTO=(--proto '=https')
+re_base='^(https?)://([^/]+)(/[A-Za-z0-9._~/-]*)?$'
+re_auth='^([A-Za-z0-9._-]+|\[::1\])(:[0-9]+)?$'
+if ! [[ $BASE =~ $re_base ]]; then die 2 "API base URL is invalid"; fi
+b_scheme=${BASH_REMATCH[1]}; b_auth=${BASH_REMATCH[2]}
+case $b_auth in *@*) die 2 "API base URL must not contain credentials" ;; esac
+[[ $b_auth =~ $re_auth ]] || die 2 "API base URL has an invalid host"
+b_host=${BASH_REMATCH[1]}
+if [ "$b_scheme" = http ]; then
+  if [ "${ALFRED_TEST_RUN_ALLOW_HTTP:-}" = 1 ]; then
+    case $b_host in
+      127.0.0.1|localhost|'[::1]') PROTO=() ;;
+      *) die 2 "API base URL must use https" ;;
+    esac
+  else
+    die 2 "API base URL must use https"
+  fi
+fi
+
+# --- API calls --------------------------------------------------------------------
+printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$BK_TOKEN" > "$CFG"
+
+# call <GET|POST> <url> [body-file]
+# Sets R_FAIL ("" ok, http, curl, deadline), R_CODE, R_RC. The answer body is in $RESP.
+call() {
+  local method=$1 url=$2 body=${3:-} tries=0 left mt rc code retry w ra line cut
+  while :; do
+    left=$((LIMIT_AT - SECONDS))
+    if [ "$left" -le 0 ] && [ "$FORCE" != 1 ]; then R_FAIL=deadline; return 1; fi
+    FORCE=0
+    mt=$left; cut=0
+    if [ "$mt" -le 30 ]; then cut=1; else mt=30; fi
+    [ "$mt" -ge 1 ] || mt=1
+    : > "$HDR"; : > "$ERRF"; rm -f "$RESP"
+    local args=(-sS)
+    args+=("${PROTO[@]}" --connect-timeout 10 --max-time "$mt" -K "$CFG" -D "$HDR" -o "$RESP" -w '%{http_code}')
+    if [ "$method" = POST ]; then args+=(-X POST --data-binary "@$body"); fi
+    curl "${args[@]}" "$url" >"$CODEF" 2>"$ERRF" &
+    CHILD=$!
+    wait "$CHILD"; rc=$?
+    CHILD=""
+    code=""; [ -r "$CODEF" ] && code=$(<"$CODEF")
+    [[ $code =~ ^[0-9]{3}$ ]] || code=000
+    R_CODE=$code; R_RC=$rc
+    if [ "$rc" -eq 0 ] && [[ $code =~ ^2 ]]; then R_FAIL=""; return 0; fi
+    retry=0
+    if [ "$rc" -ne 0 ]; then
+      case $rc in
+        6|7) retry=1 ;;
+        28)
+          if [ "$method" = GET ]; then
+            if [ "$cut" = 1 ]; then R_FAIL=deadline; return 1; fi
+            retry=1
+          fi ;;
+      esac
+    elif [ "$code" = 429 ]; then
+      retry=1
+    elif [ "$method" = GET ] && [[ $code =~ ^5 ]]; then
+      retry=1
+    fi
+    if [ "$retry" = 1 ] && [ "$tries" -lt 3 ]; then
+      w=$((BACKOFF * (1 << tries)))
+      while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%$'\r'}; line=${line,,}
+        if [[ $line =~ ^(retry-after|ratelimit-reset):[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+          ra=${BASH_REMATCH[2]}; w=$((10#$ra)); break
+        fi
+      done < "$HDR"
+      [ "$w" -le 30 ] || w=30
+      left=$((LIMIT_AT - SECONDS))
+      [ "$w" -le "$left" ] || w=$left
+      [ "$w" -ge 0 ] || w=0
+      tries=$((tries + 1))
+      if [ "$w" -gt 0 ]; then
+        sleep "$w" >/dev/null 2>&1 &
+        CHILD=$!; wait "$CHILD"; CHILD=""
+      fi
+      continue
+    fi
+    if [ "$rc" -ne 0 ]; then R_FAIL=curl; else R_FAIL=http; fi
+    return 1
+  done
+}
+
+# reason <what>: one line, no control characters, for the last failed call
+reason() {
+  local msg r
+  case $R_FAIL in
+    deadline) printf 'the wait bound was reached during %s' "$1" ;;
+    curl)
+      r=$(head -n 1 "$ERRF" 2>/dev/null) || r=""
+      r=$(safe "$r")
+      printf '%s failed: curl exit %s%s' "$1" "$R_RC" "${r:+: $r}" ;;
+    *)
+      msg=$(jq -r '(.message // empty) | strings' "$RESP" 2>/dev/null) || msg=""
+      msg=$(safe "$msg")
+      printf '%s failed: HTTP %s%s' "$1" "$R_CODE" "${msg:+: $msg}" ;;
+  esac
+}
+
+# --- the pushed check -------------------------------------------------------------
+[ "$SECONDS" -lt "$DEADLINE" ] || die 4 "the wait bound was reached before anything was started"
+timeout 30 gh api "repos/$OWNER/$REPO/commits/$COMMIT" --jq .sha >"$TMPD/gh.out" 2>"$TMPD/gh.err" &
+CHILD=$!; wait "$CHILD"; GH_RC=$?; CHILD=""
+GH_SHA=""; [ -r "$TMPD/gh.out" ] && GH_SHA=$(<"$TMPD/gh.out")
+if [ "$GH_RC" -ne 0 ] || [ "$GH_SHA" != "$COMMIT" ]; then
+  die 2 "commit ${COMMIT:0:12} is not pushed or no access"
+fi
+
+# --- the pipeline lookup (Hub answers 9) ------------------------------------------
+LIMIT_AT=$DEADLINE
+PBASE="$BASE/v2/organizations/$ORG/pipelines/$PIPELINE"
+if ! call GET "$PBASE"; then die 4 "$(reason "pipeline lookup")"; fi
+jq -e 'type == "object"' "$RESP" >/dev/null 2>&1 || die 4 "the pipeline answer is not usable"
+PIPE_REPO=$(jq -r '.repository | strings' "$RESP" 2>/dev/null) || PIPE_REPO=""
+re_repo='^https://github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)\.git$'
+if ! [[ $PIPE_REPO =~ $re_repo ]]; then
+  die 2 "pipeline $PIPELINE repository is not an https github.com .git URL"
+fi
+if [ "${BASH_REMATCH[1]}" != "$OWNER" ] || [ "${BASH_REMATCH[2]}" != "$REPO" ]; then
+  die 2 "pipeline $PIPELINE repository does not match the local origin"
+fi
+
+# --- the envelope -----------------------------------------------------------------
+ENVF="$TMPD/envelope"
+{
+  set -o pipefail
+  jq -n --rawfile token "$TOKEN_FILE" --arg repo "$PIPE_REPO" --arg commit "$COMMIT" \
+    --arg pipeline "$PIPELINE" --arg not_after "$NOT_AFTER" \
+    '{v: 1, token: ($token | rtrimstr("\n")), repo: $repo, commit: $commit, pipeline: $pipeline, not_after: $not_after}' \
+    2>"$TMPD/jq.err" | age -a -R "$RECIPIENTS" >"$ENVF" 2>"$TMPD/age.err"
+} &
+CHILD=$!; wait "$CHILD"; ENV_RC=$?; CHILD=""
+[ "$ENV_RC" -eq 0 ] || die 4 "envelope encryption failed"
+first=""; last=""
+IFS= read -r first < "$ENVF" || true
+while IFS= read -r line || [ -n "$line" ]; do
+  [ -n "$line" ] && last=$line
+done < "$ENVF"
+if [ "$first" != "-----BEGIN AGE ENCRYPTED FILE-----" ] || [ "$last" != "-----END AGE ENCRYPTED FILE-----" ]; then
+  die 4 "age output is not an armored envelope"
+fi
+grep -qF -f "$TOKEN_FILE" "$ENVF" 2>/dev/null; GREP_RC=$?
+if [ "$GREP_RC" -ne 1 ]; then
+  die 4 "age output carries the plaintext token or cannot be checked"
+fi
+
+BODY="$TMPD/create.json"
+jq -n --rawfile envelope "$ENVF" --arg commit "$COMMIT" --arg branch "$BRANCH" \
+  '{commit: $commit, branch: $branch, env: {ALFRED_GIT_ENVELOPE: $envelope}}' >"$BODY" 2>"$TMPD/jq.err" \
+  || die 4 "cannot build the create request"
+
+# --- the create call --------------------------------------------------------------
+[ "$SECONDS" -lt "$DEADLINE" ] || die 4 "the wait bound was reached before the build was created; nothing was started"
+re_url_ok='^https://[[:graph:]]+$'
+MAYEXIST="the build may exist: check the pipeline for this commit"
+CREATE_URL="$PBASE/builds"
+if ! call POST "$CREATE_URL" "$BODY"; then
+  if [ "$R_FAIL" = deadline ]; then die 4 "create not sent: the wait bound was reached"; fi
+  if [ "$R_FAIL" = http ] && [[ $R_CODE =~ ^4 ]]; then die 4 "$(reason "create")"; fi
+  if [ "$R_FAIL" = curl ] && { [ "$R_RC" -eq 6 ] || [ "$R_RC" -eq 7 ]; }; then die 4 "$(reason "create")"; fi
+  die 4 "$MAYEXIST"
+fi
+NUM=""; WEB=""
+if [[ $R_CODE =~ ^2 ]] && jq -e 'type == "object"' "$RESP" >/dev/null 2>&1; then
+  NUM=$(jq -r '.number | tostring' "$RESP" 2>/dev/null) || NUM=""
+  WEB=$(jq -r '.web_url | strings' "$RESP" 2>/dev/null) || WEB=""
+fi
+[[ $NUM =~ ^[0-9]+$ ]] || NUM=""
+[[ $WEB =~ $re_url_ok ]] || WEB=""
+if [ "$R_CODE" != 201 ] || [ -z "$NUM" ]; then
+  if [ -n "$WEB" ]; then BUILD_LINE="build: $WEB"; fi
+  die 4 "$MAYEXIST"
+fi
+if [ -n "$WEB" ]; then BUILD_LINE="build: $WEB"; else BUILD_LINE="build: $ORG/$PIPELINE #$NUM"; fi
+say "$BUILD_LINE"
+
+# --- the wait ---------------------------------------------------------------------
+BUILD_URL="$PBASE/builds/$NUM"
+FORCE=1
+STATE=creating
+while :; do
+  if ! call GET "$BUILD_URL"; then
+    if [ "$R_FAIL" = deadline ]; then
+      say "state: $STATE"
+      die 11 "still running after $WAIT s; open the build URL, do not hand-poll"
+    fi
+    die 4 "$(reason "build poll"); open the build URL"
+  fi
+  jq -e 'type == "object"' "$RESP" >/dev/null 2>&1 || die 4 "the build answer is not usable; open the build URL"
+  parsed=$(jq -r '[(.state | if type == "string" then . else "" end), (.blocked == true | tostring)] | join(" ")' "$RESP" 2>/dev/null) || parsed=""
+  STATE=${parsed%% *}; BLOCKED=${parsed##* }
+  if [ "$BLOCKED" = true ] || [ "$STATE" = blocked ]; then STATE=blocked; break; fi
+  case $STATE in
+    passed|failed|canceled|skipped|not_run) break ;;
+    creating|scheduled|running|failing|canceling|waiting|waiting_failed) ;;
+    *) die 4 "the build has an unknown state; open the build URL" ;;
+  esac
+  if [ "$SECONDS" -ge "$DEADLINE" ]; then
+    say "state: $STATE"
+    die 11 "still running after $WAIT s; open the build URL, do not hand-poll"
+  fi
+  left=$((DEADLINE - SECONDS)); nap=$POLL
+  [ "$nap" -le "$left" ] || nap=$left
+  sleep "$nap" >/dev/null 2>&1 &
+  CHILD=$!; wait "$CHILD"; CHILD=""
+done
+
+# --- the report ---------------------------------------------------------------------
+JOBS="$TMPD/jobs.tsv"
+jq -r '(.jobs | arrays | .[]) | select(.type == "script")
+       | [((.id | strings) // "-"), ((.state | strings) // "-"), ((.name | strings) // "-")] | @tsv' \
+  "$RESP" >"$JOBS" 2>/dev/null || : >"$JOBS"
+FAIL_IDS=(); FAIL_NAMES=()
+while IFS=$'\t' read -r jid jstate jname; do
+  jstate=$(safe "$jstate"); jname=$(safe "$jname")
+  say "job $jstate $jname"
+  case $jstate in failed|timed_out|broken) FAIL_IDS+=("$jid"); FAIL_NAMES+=("$jname") ;; esac
+done < "$JOBS"
+
+clean_log() {
+  sed -E -e 's/\r+$//' -e 's/^.*\r//' \
+    -e 's/\x1b_[^\x07\x1b]*(\x07|\x1b\\)//g' \
+    -e 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' \
+  | tr -d '\000-\011\013-\037\177' | tail -n 50
+}
+
+REPORT_END=$((SECONDS + REPORT_CAP))
+LIMIT_AT=$REPORT_END
+re_uuid='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+shown=0
+for i in "${!FAIL_IDS[@]}"; do
+  if [ "$shown" -ge 5 ]; then say "more failed jobs not shown"; break; fi
+  shown=$((shown + 1))
+  say "log of job ${FAIL_NAMES[$i]}:"
+  jid=${FAIL_IDS[$i]}
+  if ! [[ $jid =~ $re_uuid ]] || [ "$SECONDS" -ge "$REPORT_END" ]; then say "log unavailable"; continue; fi
+  if ! call GET "$BUILD_URL/jobs/$jid/log" \
+     || ! jq -e '.content | type == "string"' "$RESP" >/dev/null 2>&1; then
+    say "log unavailable"; continue
+  fi
+  content=$(jq -r '.content' "$RESP" 2>/dev/null) || content=""
+  content=$(printf '%s\n' "$content" | clean_log)
+  say "$content"
+done
+
+say "state: $STATE"
+[ "$STATE" = passed ] && exit 0
+exit 10

@@ -1,0 +1,95 @@
+#!/bin/bash
+# Test double for curl, used by tests/test-run.bats (installed as `curl`). Records under $STUB_DIR:
+#   calls.log      "<METHOD> <url>" per call       argv.log   the full argv per call
+#   env.log        the environment per call        maxtime.log "<kind> <--max-time>"
+#   cfg.<n>        copy of the -K config           cfgmode.log, cfgdirmode.log, dirfiles.log
+#   body.<n>       copy of the --data-binary file  bodymode.log
+# Serves pipeline.json, create.json, build.<n>.json (n-th build GET, last one repeated) and
+# log-<jobid>.json. Markers fail-<kind> (kind: pipeline create build log): "<code> [count]",
+# "curl-exit <n> [count]" or "hang" (sleeps to --max-time, exit 28); headers-<kind> goes to
+# the -D file of a failing answer; body-<kind> replaces the body of any answer of that kind.
+PATH=${SHIM_REAL_PATH:-$PATH}
+ARGS=("$@")
+method=GET url="" cfg="" hdr="" out="" fmt="" maxtime="" data=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -K) cfg="$2"; shift 2 ;;
+    -D) hdr="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -w) fmt="$2"; shift 2 ;;
+    --max-time) maxtime="$2"; shift 2 ;;
+    --data-binary) data="${2#@}"; shift 2 ;;
+    --connect-timeout|--proto) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+D="$STUB_DIR"
+echo "$method $url" >> "$D/calls.log"
+printf "%s " "${ARGS[@]}" >> "$D/argv.log"; echo >> "$D/argv.log"
+n=$(( $(cat "$D/calls.n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$D/calls.n"
+export -p >> "$D/env.log"
+if [ -n "$cfg" ]; then
+  cp "$cfg" "$D/cfg.$n"
+  stat -c %a "$cfg" >> "$D/cfgmode.log"
+  stat -c %a "$(dirname "$cfg")" >> "$D/cfgdirmode.log"
+  stat -c %a "$(dirname "$cfg")"/* >> "$D/dirfiles.log" 2>/dev/null
+fi
+if [ -n "$data" ]; then cp "$data" "$D/body.$n"; stat -c %a "$data" >> "$D/bodymode.log"; fi
+
+kind=other
+case "$method $url" in
+  POST*) kind=create ;;
+  *"/jobs/"*"/log") kind=log ;;
+  *"/builds/"*) kind=build ;;
+  *"/pipelines/"*) kind=pipeline ;;
+esac
+echo "$kind ${maxtime:-none}" >> "$D/maxtime.log"
+k=$(( $(cat "$D/count.$kind" 2>/dev/null || echo 0) + 1 )); echo "$k" > "$D/count.$kind"
+
+fail=""
+[ -f "$D/fail-$kind" ] && fail=$(<"$D/fail-$kind")
+read -r a b c <<< "$fail"
+code=200; [ "$kind" = create ] && code=201
+failing=0
+if [ -n "$a" ]; then
+  limit=""
+  case "$a" in curl-exit) limit="$c" ;; hang) limit="" ;; *) limit="$b" ;; esac
+  if [ -z "$limit" ] || [ "$k" -le "$limit" ]; then failing=1; fi
+fi
+if [ "$failing" = 1 ]; then
+  case "$a" in
+    hang)
+      t="${maxtime:-60}"
+      trap 'kill "$sp" 2>/dev/null; exit 143' TERM
+      sleep "$t" & sp=$!; wait "$sp"
+      echo "curl: (28) Operation timed out" >&2; printf '000'; exit 28 ;;
+    curl-exit)
+      echo "curl: ($b) stubbed failure" >&2; printf '000'; exit "$b" ;;
+    *) code="$a" ;;
+  esac
+  [ -f "$D/headers-$kind" ] && [ -n "$hdr" ] && cp "$D/headers-$kind" "$hdr"
+fi
+
+if [ -f "$D/body-$kind" ]; then
+  cp "$D/body-$kind" "$out"
+elif [ "$failing" = 1 ]; then
+  printf '{"message":"stubbed %s"}' "$code" > "$out"
+else
+  case "$kind" in
+    pipeline) src="$D/pipeline.json" ;;
+    create) src="$D/create.json" ;;
+    build)
+      src=""
+      i=$k
+      while [ "$i" -ge 1 ]; do
+        [ -f "$D/build.$i.json" ] && { src="$D/build.$i.json"; break; }
+        i=$((i - 1))
+      done ;;
+    log) j="${url%/log}"; src="$D/log-${j##*/}.json" ;;
+  esac
+  if [ -n "${src:-}" ] && [ -f "$src" ]; then cp "$src" "$out"; else code=404; echo '{"message":"not found"}' > "$out"; fi
+fi
+case "$fmt" in *http_code*) printf '%s' "$code" ;; esac
+exit 0
