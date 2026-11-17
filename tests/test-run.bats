@@ -64,7 +64,7 @@ teardown() {
 build_path() {
   local c
   rm -f "$PBIN"/*
-  for c in jq git sed tr head tail grep stat date mktemp rm sleep timeout; do
+  for c in jq git sed tr head tail grep stat date mktemp rm rmdir sleep timeout; do
     [ "$c" = "$1" ] || ln -s "$STUBS/argv-shim" "$PBIN/$c"
   done
   [ "$1" = curl ] || ln -s "$STUBS/curl-buildkite" "$PBIN/curl"
@@ -589,14 +589,15 @@ sig_run() {
 
 # AC 16: envelope pipe failures
 @test "AC16: a jq failure in the envelope pipe is exit 4, no create" {
-  export SHIM_FAIL=jq SHIM_FAIL_ARG=--rawfile
+  export SHIM_FAIL=jq SHIM_FAIL_ARG=not_after
   go
   [ "$status" -eq 4 ]
+  [[ "$stderr" == *"envelope encryption failed"* ]]
   [ "$(posts)" -eq 0 ]
 }
 @test "AC16: age failing, bad header, no END line: exit 4, no create" {
   local m
-  for m in fail bad-header no-end; do
+  for m in fail bad-header no-end no-begin; do
     echo "$m" > "$STUB_DIR/age-mode"; reset_calls
     go
     [ "$status" -eq 4 ]
@@ -809,4 +810,17 @@ sig_run() {
   [ "$(jq -r .version "$ROOT/.claude-plugin/plugin.json")" = 2.49.0 ]
   run grep -rn "2\.4""8\.0" "$ROOT/tests" "$ROOT/.claude-plugin"
   [ "$status" -eq 1 ]
+}
+
+# review round 1
+@test "AC7: an exported internal name does not reach a child environment" {
+  export BK_TOKEN=callerx TOKVAL=callery
+  go
+  [ "$status" -eq 0 ]
+  ! grep -E 'declare -x (BK_TOKEN|TOKVAL)=' "$STUB_DIR/shim.log.env" "$STUB_DIR/env.log" "$STUB_DIR/age.env" "$STUB_DIR/gh.env"
+}
+@test "AC1: --wait-timeout 08 is read as decimal" {
+  export ALFRED_TEST_RUN_MIN_WAIT=1
+  go --wait-timeout 08
+  [ "$status" -eq 0 ]
 }

@@ -30,6 +30,13 @@
 #   ALFRED_TEST_RUN_MIN_WAIT  ALFRED_TEST_RUN_ALLOW_HTTP
 set -u
 
+# A caller-exported variable of an internal name must not carry a value (or an export
+# attribute) into the children's environments: drop every internal global first.
+unset AGE API_DEFAULT BACKOFF BASE BK_TOKEN BLOCKED BODY BRANCH BUILD_LINE BUILD_URL CFG CHILD \
+  CODEF COMMIT CREATE_URL DEADLINE ENVF ENV_RC ERRF FAIL_IDS FAIL_NAMES FORCE GH_RC GH_SHA HDR JOBS \
+  LIMIT_AT MAYEXIST MIN_WAIT MTIME NOT_AFTER NOT_AFTER_EPOCH NUM OHOST OPATH ORG ORIGIN OWNER PBASE \
+  PIPELINE PIPE_REPO POLL PROTO RECIPIENTS REPORT_CAP REPORT_END REPO RESP R_CODE R_FAIL R_RC STATE \
+  TMPD TOKEN_FILE TOKVAL WAIT WEB content first last
 # The Buildkite token leaves the environment before any child process starts.
 BK_TOKEN=${BUILDKITE_API_TOKEN-}
 unset BUILDKITE_API_TOKEN
@@ -80,7 +87,7 @@ fi
 
 TMPD=$(mktemp -d 2>/dev/null) || TMPD=""
 if [ -z "$TMPD" ] || [ ! -d "$TMPD" ]; then TMPD=""; die 4 "cannot create a temp directory"; fi
-if [ "$(stat -c %a "$TMPD" 2>/dev/null)" != 700 ]; then TMPD=""; die 4 "temp directory is not mode 700"; fi
+if [ "$(stat -c %a "$TMPD" 2>/dev/null)" != 700 ]; then rmdir "$TMPD" 2>/dev/null; TMPD=""; die 4 "temp directory is not mode 700"; fi
 CFG="$TMPD/curl.cfg"; HDR="$TMPD/headers"; RESP="$TMPD/resp"; CODEF="$TMPD/code"; ERRF="$TMPD/stderr"
 
 # --- arguments ------------------------------------------------------------------
@@ -115,6 +122,7 @@ if [ -n "${ALFRED_TEST_RUN_NOW:-}" ]; then
   [[ $ALFRED_TEST_RUN_NOW =~ ^[0-9]+$ ]] || die 2 "ALFRED_TEST_RUN_NOW must be epoch seconds"
 fi
 [[ $WAIT =~ ^[0-9]+$ ]] || die 2 "--wait-timeout must be a whole number of seconds"
+WAIT=$((10#$WAIT))
 [ "$WAIT" -ge "$MIN_WAIT" ] || die 2 "--wait-timeout must be at least $MIN_WAIT seconds"
 DEADLINE=$((SECONDS + WAIT))
 
@@ -348,8 +356,9 @@ done < "$ENVF"
 if [ "$first" != "-----BEGIN AGE ENCRYPTED FILE-----" ] || [ "$last" != "-----END AGE ENCRYPTED FILE-----" ]; then
   die 4 "age output is not an armored envelope"
 fi
-if grep -qF -f "$TOKEN_FILE" "$ENVF" 2>/dev/null; then
-  die 4 "age output carries the plaintext token"
+grep -qF -f "$TOKEN_FILE" "$ENVF" 2>/dev/null; GREP_RC=$?
+if [ "$GREP_RC" -ne 1 ]; then
+  die 4 "age output carries the plaintext token or cannot be checked"
 fi
 
 BODY="$TMPD/create.json"
