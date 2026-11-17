@@ -1016,6 +1016,19 @@ fake_wait() {
   until_true 30 gone "$kid"
 }
 
+@test "CCW-214 AC4: the pgrep stand-in skips a stat entry that vanishes, first or later, and never reuses the last line" {
+  # Same function text, pointed at a fake proc root (no seam in the script).
+  local root="$BATS_TEST_TMPDIR/fakeproc" n
+  eval "$(sed -n '/^windows_pgrep() {/,/^}/p' "$WAKE" | sed "s#/proc/#$root/#g")"
+  for n in 100 200 300; do mkdir -p "$root/$n"; done
+  ln -s "$root/gone" "$root/100/stat"            # vanished before the first read
+  echo "200 (we ird) ) S 7 1 1 0 -1" > "$root/200/stat"
+  ln -s "$root/gone" "$root/300/stat"            # vanished after a good read
+  run windows_pgrep -P 7
+  [ "$status" -eq 0 ]
+  [ "$output" = "200" ]
+}
+
 @test "CCW-214 AC5: with flock and pgrep on PATH a takeover and a kill call them, and nothing yields" {
   local d="$BATS_TEST_TMPDIR/logstub"
   mkdir -p "$d"

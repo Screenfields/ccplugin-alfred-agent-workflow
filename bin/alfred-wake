@@ -959,6 +959,7 @@ windows_pgrep() {
   local want="${2:-}" f stat rest found=1
   [ "${1:-}" = "-P" ] || return 2
   for f in /proc/[0-9]*/stat; do
+    stat=""
     { read -r stat < "$f"; } 2>/dev/null
     [ -n "$stat" ] || continue
     rest=${stat##*) }
