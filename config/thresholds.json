@@ -34,6 +34,7 @@
   "designer-enabled": false,
   "loop-check-timeout-seconds": 5,
   "loop-check-deadline-seconds": 10,
+  "loop-check-evidence-timeout-seconds": 2,
   "chase-interval-minutes": 10,
   "chase-max-tries": 3,
   "loop-check-max-blocks-per-hour": 6,

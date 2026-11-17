@@ -1588,3 +1588,432 @@ slow_mv() {
   silent
   [ "$(jq -c 'del(.pending_note, .last_stop_ts, .last_turn, .last_turn_ts)' "$STATEDIR/s1.json")" = "$before" ]
 }
+
+# --- evidence resets the count (CCW-213) -------------------------------------------------
+
+# evidence <owner/name> <number>:<comment-ts|-> [pr|<updatedAt>|<mergedAt\|null>|<createdAt>|issue:<createdAt>] ...
+# Writes a whole answer to <owner>__<name>.evidence.json. "<n>:-" is no
+# comment; a second word after the comment adds one timeline event.
+evidence() {
+  local repo="$1" repr="{}" e num rest ev comment extra upd mrg cr
+  shift
+  for e in "$@"; do
+    num="${e%%:*}"; rest="${e#*:}"
+    comment="${rest%% *}"; extra=""
+    [ "$rest" != "$comment" ] && extra="${rest#* }"
+    ev='{"comments":{"nodes":[]},"timelineItems":{"nodes":[]}}'
+    [ "$comment" != "-" ] && ev=$(jq -c --arg c "$comment" '.comments.nodes = [{createdAt: $c}]' <<< "$ev")
+    case "$extra" in
+      pr\|*) IFS="|" read -r _ upd mrg cr <<< "$extra"
+            ev=$(jq -c --arg u "$upd" --arg m "$mrg" --arg c "$cr" \
+              '.timelineItems.nodes = [{createdAt: $c, source: {updatedAt: $u, mergedAt: (if $m == "null" then null else $m end)}}]' <<< "$ev") ;;
+      issue:*) ev=$(jq -c --arg c "${extra#issue:}" '.timelineItems.nodes = [{createdAt: $c, source: {}}]' <<< "$ev") ;;
+    esac
+    repr=$(jq -c --arg k "i$num" --argjson v "$ev" '. + {($k): $v}' <<< "$repr")
+  done
+  jq -cn --argjson r "$repr" '{data: {repository: $r}}' > "$GH_STUB_DIR/${repo//\//__}.evidence.json"
+}
+gql_calls() { grep -c graphql "$GH_STUB_DIR/calls.log" 2>/dev/null || true; }
+reason_of() { jq -r .reason <<< "$output"; }
+no_sysmsg() { [ -z "$(jq -r '.systemMessage // empty' <<< "$output")" ]; }
+OLD="2026-01-01T00:00:00Z"
+NEW="2026-02-01T00:00:00Z"
+NEWER="2026-03-01T00:00:00Z"
+
+# base_block — first block with old evidence stored.
+base_block() {
+  issues o/a "7:Fix:status:ready"
+  evidence o/a "7:$OLD"
+  lc; blocked
+  [ "$(state_of '.items["o/a#7"].ev')" = "$OLD" ]
+}
+
+@test "evidence: PR opened resets the count" {
+  base_block
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "2" ]
+  evidence o/a "7:$OLD pr|$NEW|null|$NEW"
+  at 1202; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "1" ]
+  [[ "$(reason_of)" != *"escalate"* ]]
+  [ "$(grep -c '^alfred-loop-check: o/a#7 count reset by newer activity$' <<< "$stderr")" = "1" ]
+}
+
+@test "evidence: PR merged resets" {
+  base_block
+  evidence o/a "7:$OLD pr|$OLD|$NEW|$OLD"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "1" ]
+  [ "$(state_of '.items["o/a#7"].ev')" = "$NEW" ]
+  [ "$(grep -c 'o/a#7 count reset by newer activity' <<< "$stderr")" = "1" ]
+}
+
+@test "evidence: PR reviewed resets, closed-unmerged PR included" {
+  base_block
+  evidence o/a "7:$OLD pr|$NEWER|null|$OLD"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "1" ]
+  [ "$(state_of '.items["o/a#7"].ev')" = "$NEWER" ]
+  [ "$(grep -c 'o/a#7 count reset by newer activity' <<< "$stderr")" = "1" ]
+  [ "$(grep graphql "$GH_STUB_DIR/calls.log" | grep -c -w state)" = "0" ]
+}
+
+@test "evidence: comment resets" {
+  base_block
+  evidence o/a "7:$NEW"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "1" ]
+  [ "$(grep -c 'o/a#7 count reset by newer activity' <<< "$stderr")" = "1" ]
+}
+
+@test "evidence: no newer evidence counts 1, 2, 3 and the third reason escalates" {
+  base_block
+  [ "$(state_of '.items["o/a#7"].tries')" = "1" ]
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "2" ]
+  [[ "$(reason_of)" != *"escalate"* ]]
+  at 1202; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "3" ]
+  [[ "$(reason_of)" == *"escalate to the hub and record the escalation on the item"* ]]
+  [ "$(grep -c 'count reset' <<< "$stderr")" = "0" ]
+}
+
+@test "evidence: a label change resets and stores the new evidence, no reset line" {
+  base_block
+  issues o/a "7:Fix:status:in-progress"
+  evidence o/a "7:$NEW"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "1" ]
+  [ "$(state_of '.items["o/a#7"].ev')" = "$NEW" ]
+  [ "$(grep -c 'count reset' <<< "$stderr")" = "0" ]
+}
+
+@test "evidence: issue cross-reference is not progress" {
+  base_block
+  evidence o/a "7:$OLD issue:$NEWER"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "2" ]
+  [ "$(state_of '.items["o/a#7"].ev')" = "$OLD" ]
+}
+
+@test "evidence: no graphql call inside the chase interval" {
+  issues o/a "7:Fix:status:ready"
+  lc; blocked
+  [ "$(gql_calls)" = "1" ]
+  at 300; lc; silent
+  [ "$(gql_calls)" = "1" ]
+}
+
+@test "evidence: no graphql call for no progress inside a chain" {
+  issues o/a "7:Fix:status:ready"
+  lc; blocked
+  at 601; lc true; silent
+  [ "$(gql_calls)" = "1" ]
+}
+
+@test "evidence: no graphql call at the block cap" {
+  for n in 1 2 3 4 5 6; do
+    issues o/a "$n:Item $n:status:ready"
+    at "$n"; lc; blocked
+  done
+  [ "$(gql_calls)" = "6" ]
+  issues o/a "7:Item 7:status:ready"
+  at 7; lc; silent
+  [ "$(gql_calls)" = "6" ]
+}
+
+@test "evidence: no graphql call on an owner turn" {
+  issues o/a "7:Fix:status:ready"
+  mkdir -p "$STATEDIR"
+  echo "{\"signature\":\"x\",\"last_turn\":\"owner\",\"last_turn_ts\":$((T0 + 5)),\"last_stop_ts\":$((T0 - 10))}" > "$STATEDIR/s1.json"
+  at 10; lc; silent
+  [ "$(gql_calls)" = "0" ]
+}
+
+@test "evidence: no graphql call when all sources failed" {
+  touch "$GH_STUB_DIR/fail-o__a" "$STUB_DIR/fail"
+  lc
+  [ "$(gql_calls)" = "0" ]
+}
+
+@test "evidence: no graphql call when some sources failed" {
+  issues o/a "7:Fix:status:ready"
+  lc; blocked
+  touch "$STUB_DIR/fail"
+  at 5; lc
+  allowed_with_msg
+  [ "$(gql_calls)" = "1" ]
+}
+
+@test "evidence: no graphql call for an empty set" {
+  issues o/a
+  lc; silent
+  [ "$(gql_calls)" = "0" ]
+}
+
+@test "evidence: no graphql call inside a chain with no state" {
+  issues o/a "7:Fix:status:ready"
+  lc true
+  [ "$(gql_calls)" = "0" ]
+}
+
+@test "evidence: one call per repo however many items" {
+  echo '{"agent_id":"lead-x","repos":["o/a","o/b"]}' > "$PROJ/.alfred/config.json"
+  issues o/a "7:Fix:status:ready" "8:More:status:ready"
+  issues o/b "3:Other:status:ready"
+  lc; blocked
+  [ "$(gql_calls)" = "2" ]
+  [ "$(grep graphql "$GH_STUB_DIR/calls.log" | grep -c 'n=a')" = "1" ]
+  [ "$(grep graphql "$GH_STUB_DIR/calls.log" | grep -c 'n=b')" = "1" ]
+}
+
+@test "evidence: a failing call counts as before, with a stderr line and no systemMessage" {
+  base_block
+  touch "$GH_STUB_DIR/fail-gql-o__a"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "2" ]
+  [ "$(state_of '.items["o/a#7"].ev')" = "$OLD" ]
+  [[ "$stderr" == *"alfred-loop-check: evidence lookup failed for o/a ("*"), counts unchanged"* ]]
+  no_sysmsg
+}
+
+@test "evidence: garbage output counts as before" {
+  base_block
+  touch "$GH_STUB_DIR/garbage-gql-o__a"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "2" ]
+  [[ "$stderr" == *"evidence lookup failed for o/a ("*"), counts unchanged"* ]]
+  no_sysmsg
+}
+
+@test "evidence: an answer with valid empty aliases is not a failure" {
+  issues o/a "7:Fix:status:ready"
+  lc; blocked
+  [ -z "$stderr" ]
+  [ "$(state_of '.items["o/a#7"].ev')" = "" ]
+}
+
+@test "evidence: a failed list source plus a failed lookup: the reason has the list warning and no evidence text (AC 26)" {
+  echo '{"agent_id":"lead-x","repos":["o/a","o/b"]}' > "$PROJ/.alfred/config.json"
+  issues o/a "7:Fix:status:ready"
+  touch "$GH_STUB_DIR/fail-o__b" "$GH_STUB_DIR/fail-gql-o__a"
+  lc; blocked
+  reason=$(reason_of)
+  [[ "$reason" == *"a source failed"* && "$reason" == *"o/b: gh failed"* ]]
+  [[ "$reason" != *"evidence"* ]]
+  [[ "$stderr" == *"evidence lookup failed for o/a"* ]]
+  no_sysmsg
+}
+
+@test "evidence: a hanging call is cut at the evidence timeout" {
+  base_block
+  echo 20 > "$GH_STUB_DIR/slow-gql-o__a"
+  jq '.["loop-check-evidence-timeout-seconds"] = 1' "$THR" > "$THR.n" && mv "$THR.n" "$THR"
+  start=$SECONDS
+  at 601; lc
+  [ $((SECONDS - start)) -lt 8 ]
+  blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "2" ]
+  [[ "$stderr" == *"evidence lookup failed for o/a (timed out)"* ]]
+}
+
+@test "evidence: the timeout is clamped to deadline minus list timeout minus 3" {
+  base_block
+  echo 20 > "$GH_STUB_DIR/slow-gql-o__a"
+  jq '.["loop-check-evidence-timeout-seconds"] = 30' "$THR" > "$THR.n" && mv "$THR.n" "$THR"
+  start=$SECONDS
+  at 601; lc
+  [ $((SECONDS - start)) -lt 10 ]
+  blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "2" ]
+  [[ "$stderr" == *"(timed out)"* ]]
+}
+
+@test "evidence: the lookup is off for key 0, abc, -1 and an over-tight clamp" {
+  issues o/a "7:Fix:status:ready"
+  for v in 0 '"abc"' -1; do
+    rm -rf "$STATEDIR"; : > "$GH_STUB_DIR/calls.log"
+    jq --argjson v "$v" '.["loop-check-evidence-timeout-seconds"] = $v' "$THR" > "$THR.n" && mv "$THR.n" "$THR"
+    lc; blocked || { echo "$v: no block"; return 1; }
+    [ "$(gql_calls)" = "0" ] || { echo "$v: graphql called"; return 1; }
+  done
+  jq '.["loop-check-evidence-timeout-seconds"] = 2' "$THR" > "$THR.n" && mv "$THR.n" "$THR"
+  rm -rf "$STATEDIR"; : > "$GH_STUB_DIR/calls.log"
+  ALFRED_STOP_LOOP_SECONDS=8 lc; blocked
+  [ "$(gql_calls)" = "0" ]
+  rm -rf "$STATEDIR"
+  lc; blocked
+  [ "$(gql_calls)" = "1" ]
+}
+
+@test "evidence: a non-numeric deadline reads as 10, a non-digit env override is ignored" {
+  issues o/a "7:Fix:status:ready"
+  jq '.["loop-check-deadline-seconds"] = "abc"' "$THR" > "$THR.n" && mv "$THR.n" "$THR"
+  lc; blocked
+  [ "$(gql_calls)" = "1" ]
+  rm -rf "$STATEDIR"
+  ALFRED_STOP_LOOP_SECONDS=x lc; blocked
+  [ "$(gql_calls)" = "2" ]
+}
+
+@test "evidence: 2.5 floors to 2 (call cut at 2 s)" {
+  base_block
+  echo 20 > "$GH_STUB_DIR/slow-gql-o__a"
+  jq '.["loop-check-evidence-timeout-seconds"] = 2.5' "$THR" > "$THR.n" && mv "$THR.n" "$THR"
+  start=$SECONDS
+  at 601; lc; blocked
+  elapsed=$((SECONDS - start))
+  [ "$elapsed" -ge 2 ] && [ "$elapsed" -lt 5 ]
+  [ "$(gql_calls)" = "2" ]
+}
+
+@test "evidence: stored ev baselines: absent and corrupt read as null (tries + 1, new ev stored)" {
+  issues o/a "7:Fix:status:ready"
+  evidence o/a "7:$NEW"
+  mkdir -p "$STATEDIR"
+  for bad in '' ',"ev":5' ',"ev":["x"]' ',"ev":{"a":1}'; do
+    echo "{\"signature\":\"x\",\"items\":{\"o/a#7\":{\"labels\":\"status:ready\",\"tries\":1$bad}}}" > "$STATEDIR/s1.json"
+    lc
+    [ "$status" -eq 0 ] || { echo "$bad: exit"; return 1; }
+    blocked || { echo "$bad: no block"; return 1; }
+    [ "$(state_of '.items["o/a#7"].tries')" = "2" ] || { echo "$bad: tries"; return 1; }
+    [ "$(state_of '.items["o/a#7"].ev')" = "$NEW" ] || { echo "$bad: ev"; return 1; }
+    [ "$(grep -c 'count reset' <<< "$stderr")" = "0" ] || { echo "$bad: reset line"; return 1; }
+  done
+}
+
+# seed_state <ev-json> — o/a#7 stored with labels status:ready, tries 2.
+seed_state() {
+  mkdir -p "$STATEDIR"
+  echo "{\"signature\":\"x\",\"items\":{\"o/a#7\":{\"labels\":\"status:ready\",\"tries\":2,\"ev\":$1}}}" > "$STATEDIR/s1.json"
+}
+
+@test "evidence: stored empty ev with non-empty evidence resets to 1" {
+  issues o/a "7:Fix:status:ready"; evidence o/a "7:$NEW"
+  seed_state '""'
+  lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "1" ]
+  [ "$(state_of '.items["o/a#7"].ev')" = "$NEW" ]
+}
+
+@test "evidence: older new evidence keeps the stored maximum" {
+  issues o/a "7:Fix:status:ready"; evidence o/a "7:$OLD"
+  seed_state "\"$NEW\""
+  lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "3" ]
+  [ "$(state_of '.items["o/a#7"].ev')" = "$NEW" ]
+}
+
+@test "evidence: stored ev and empty new evidence keeps the old value" {
+  issues o/a "7:Fix:status:ready"; evidence o/a "7:-"
+  seed_state "\"$NEW\""
+  lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "3" ]
+  [ "$(state_of '.items["o/a#7"].ev')" = "$NEW" ]
+}
+
+@test "evidence: stored null or empty and no evidence stores empty" {
+  issues o/a "7:Fix:status:ready"; evidence o/a "7:-"
+  for s in null '""'; do
+    seed_state "$s"
+    lc; blocked
+    [ "$(state_of '.items["o/a#7"].ev')" = "" ] || { echo "$s"; return 1; }
+    [ "$(state_of '.items["o/a#7"].tries')" = "3" ] || { echo "$s tries"; return 1; }
+  done
+}
+
+@test "evidence: a failed lookup writes the stored ev back unchanged" {
+  issues o/a "7:Fix:status:ready"
+  touch "$GH_STUB_DIR/fail-gql-o__a"
+  seed_state "\"$NEW\""
+  lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "3" ]
+  [ "$(state_of '.items["o/a#7"].ev')" = "$NEW" ]
+}
+
+@test "evidence: 21 items: 20 aliases, item 21 keeps today's count, one stderr line" {
+  local args=() i
+  for i in $(seq 1 21); do args+=("$i:Item $i:status:ready"); done
+  issues o/a "${args[@]}"
+  evidence o/a "21:$NEWER"
+  lc; blocked
+  [ "$(grep graphql "$GH_STUB_DIR/calls.log" | grep -o 'i[0-9]*: issue(' | wc -l)" = "20" ]
+  grep graphql "$GH_STUB_DIR/calls.log" | grep -q 'i20: issue('
+  [ "$(grep graphql "$GH_STUB_DIR/calls.log" | grep -c 'i21: issue(')" = "0" ]
+  [ "$(grep -c '^alfred-loop-check: o/a: 21 actionable items, evidence looked up for the first 20 only$' <<< "$stderr")" = "1" ]
+  [ "$(state_of '.items["o/a#21"].tries')" = "1" ]
+  [ "$(state_of '.items["o/a#21"].ev')" = "null" ]
+}
+
+@test "evidence: an item missing from the answer counts as before, the other still resets (AC 21)" {
+  issues o/a "7:Fix:status:ready" "8:More:status:ready"
+  evidence o/a "7:$OLD" "8:$OLD"
+  lc; blocked
+  evidence o/a "7:$NEW"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "1" ]
+  [ "$(state_of '.items["o/a#8"].tries')" = "2" ]
+  [ "$(state_of '.items["o/a#8"].ev')" = "$OLD" ]
+  [[ "$stderr" == *"evidence missing for o/a#8, count unchanged"* ]]
+}
+
+@test "evidence: an item answered null counts as before, the other still resets (AC 21)" {
+  issues o/a "7:Fix:status:ready" "8:More:status:ready"
+  evidence o/a "7:$OLD" "8:$OLD"
+  lc; blocked
+  evidence o/a "7:$NEW"
+  jq -c '.data.repository.i8 = null' "$GH_STUB_DIR/o__a.evidence.json" > "$BATS_TEST_TMPDIR/e" && mv "$BATS_TEST_TMPDIR/e" "$GH_STUB_DIR/o__a.evidence.json"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "1" ]
+  [ "$(state_of '.items["o/a#8"].tries')" = "2" ]
+  [ "$(state_of '.items["o/a#8"].ev')" = "$OLD" ]
+  [[ "$stderr" == *"evidence missing for o/a#8, count unchanged"* ]]
+}
+
+@test "evidence: wrong shape {data:null} counts as before" {
+  base_block
+  echo '{"data":null}' > "$GH_STUB_DIR/o__a.evidence.json"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "2" ]
+  [ -n "$(reason_of)" ]; no_sysmsg
+  [[ "$stderr" == *"evidence lookup failed for o/a (no repository object in the answer), counts unchanged"* ]]
+}
+
+@test "evidence: wrong shape {data:{repository:null}} counts as before" {
+  base_block
+  echo '{"data":{"repository":null}}' > "$GH_STUB_DIR/o__a.evidence.json"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "2" ]
+  [ -n "$(reason_of)" ]; no_sysmsg
+  [[ "$stderr" == *"evidence lookup failed for o/a (no repository object in the answer), counts unchanged"* ]]
+}
+
+@test "evidence: comments as a string is missing evidence for the item" {
+  base_block
+  echo '{"data":{"repository":{"i7":{"comments":"x","timelineItems":{"nodes":[]}}}}}' > "$GH_STUB_DIR/o__a.evidence.json"
+  at 601; lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "2" ]
+  [ -n "$(reason_of)" ]; no_sysmsg
+  [[ "$stderr" == *"evidence missing for o/a#7"* ]]
+}
+
+@test "evidence: CLI mode prints the same JSON and makes no graphql call" {
+  issues o/a "7:Fix:status:ready"
+  run --separate-stderr bash -c 'cd "$1" && "$2" --thresholds "$3"' _ "$PROJ" "$LC" "$THR"
+  [ "$status" -eq 0 ]
+  [ "$(jq -c 'keys' <<< "$output")" = '["direct_unread","items","warnings"]' ]
+  [ "$(gql_calls)" = "0" ]
+}
+
+@test "evidence: hub level with a thresholds file lacking the key makes no call; with the key it does" {
+  issues o/a "7:Fix:status:ready"
+  echo '{"agent_id":"hub","repos":["o/a"]}' > "$PROJ/.alfred/config.json"
+  jq 'del(.["loop-check-evidence-timeout-seconds"])' "$THR" > "$THR.nokey"
+  run --separate-stderr bash -c 'printf "%s" "$1" | "$2" --level hub --hook --thresholds "$3"' _ "$(hook_json)" "$LC" "$THR.nokey"
+  blocked
+  [ "$(gql_calls)" = "0" ]
+  rm -rf "$STATEDIR"
+  run --separate-stderr bash -c 'printf "%s" "$1" | "$2" --level hub --hook --thresholds "$3"' _ "$(hook_json)" "$LC" "$THR"
+  blocked
+  [ "$(gql_calls)" = "1" ]
+}

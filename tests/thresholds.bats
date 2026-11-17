@@ -49,7 +49,8 @@ names_in() {
 
 @test "the loop-check names resolve" {
   for n in ready-state workable-states loop-check-enabled loop-check-timeout-seconds loop-check-deadline-seconds \
-           chase-interval-minutes chase-max-tries loop-check-max-blocks-per-hour parked-labels owner-note-max-age-minutes; do
+           chase-interval-minutes chase-max-tries loop-check-max-blocks-per-hour parked-labels owner-note-max-age-minutes \
+           loop-check-evidence-timeout-seconds; do
     run "$CFG" get "$n"
     [ "$status" -eq 0 ] || { echo "no $n"; return 1; }
   done
@@ -61,6 +62,13 @@ names_in() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ ^[0-9]+$ ]]
   [ "$output" = "15" ]
+}
+
+@test "loop-check-evidence-timeout-seconds resolves to a whole number (CCW-213), start value 2" {
+  run "$CFG" get loop-check-evidence-timeout-seconds
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^[0-9]+$ ]]
+  [ "$output" = "2" ]
 }
 
 @test "an unknown name exits 2 and prints nothing on stdout" {
