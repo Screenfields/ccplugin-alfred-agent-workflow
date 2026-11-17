@@ -125,7 +125,8 @@ that every relay subscription requires. `alfred-wake` never reads a key.
 ### Arming it
 
 ```bash
-# once per pod — puts alfred-wake on PATH via ~/.local/bin
+# puts alfred-wake on PATH via ~/.local/bin when it is not there yet; an existing
+# link or copy is refreshed at session start by hooks/wake-link-check.sh
 command -v alfred-wake >/dev/null 2>&1 || "${CLAUDE_PLUGIN_ROOT}/bin/alfred-wake" install
 ```
 
@@ -196,6 +197,22 @@ is logged as `upgrade: <old> -> <new>` in `alfred-wake.log`; stdout is unchanged
 off, set `ALFRED_WAKE_NO_UPGRADE=1`. The newer script must start (`--version`), or the upgrade is
 skipped and logged; the `~/.local/bin` link is swapped atomically.
 
+**Refresh after a plugin update.** `self_upgrade` runs only when a `wait` or `run` launches, and a
+bridge older than 1.3.0 or a Windows copy never refreshes. So the SessionStart hook
+`hooks/wake-link-check.sh` compares `${ALFRED_WAKE_BIN_DIR:-$HOME/.local/bin}/alfred-wake` with
+the plugin's own `bin/alfred-wake` and runs the plugin's `install` when it is stale. It is silent
+when all is well. When the refresh fails, the session context gets one line naming both versions
+and the command to run. Limits:
+
+- The hook runs at startup and resume only, not at clear or compact.
+- It checks only that one file, not other copies on PATH, and never creates a link where there is none.
+- A symlink is repointed unless its target has a newer `VERSION` or it points to a directory. A
+  regular file is replaced only when it has a `VERSION="x.y.z"` line and the word `alfred-wake`.
+- A link or copy with a newer `VERSION` than the plugin's is left alone.
+- A `wait` that is already running keeps its old code until its next launch.
+
+Set `ALFRED_WAKE_LINK_CHECK=0` to switch it off. See `docs/baseline/wake-install-refresh.md`.
+
 ### Event lines (the stdout contract)
 
 Only these shapes are ever printed to stdout. Anything else there is a bug.
@@ -240,6 +257,7 @@ Everything is env-driven; the defaults are correct for a standard devbox pod.
 | `ALFRED_WAKE_TZ` | `Europe/Amsterdam` | Timezone for `last=` timestamps |
 | `ALFRED_WAKE_BIN_DIR` | `$HOME/.local/bin` | Target of `alfred-wake install`, and the link self-upgrade repoints |
 | `ALFRED_WAKE_NO_UPGRADE` | — | `1` = never exec a newer installed alfred-wake |
+| `ALFRED_WAKE_LINK_CHECK` | — | `0` = the SessionStart hook never refreshes the installed `alfred-wake` link or copy |
 | `ALFRED_WAKE_PLUGINS_JSON` | `$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json` | Where self-upgrade looks up the installed plugin |
 
 ### State

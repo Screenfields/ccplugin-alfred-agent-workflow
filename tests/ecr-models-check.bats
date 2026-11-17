@@ -143,8 +143,8 @@ setup() {
   no_leftovers
 }
 
-@test "plugin version is 2.49.0" {
-  [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = 2.49.0 ]
+@test "plugin version is 2.50.0" {
+  [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = 2.50.0 ]
 }
 
 @test "no file under tests or .claude-plugin still carries the previous version" {

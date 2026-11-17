@@ -23,6 +23,16 @@
         ]
       },
       {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/wake-link-check.sh\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "resume",
         "hooks": [
           {
