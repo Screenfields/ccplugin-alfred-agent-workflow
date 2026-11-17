@@ -328,7 +328,9 @@ marker_bridge() {
 }
 
 @test "CCW-220 AC16d: a plugin script without a VERSION line changes nothing" {
-  stale_link
+  printf '#!/bin/sh\necho hi\n' >"$OLD/bin/alfred-wake"
+  mkdir -p "$BIN"
+  ln -s "$OLD/bin/alfred-wake" "$BIN/alfred-wake"
   grep -v '^VERSION=' "$REPO/bin/alfred-wake" >"$NEW/bin/alfred-wake"
   chmod +x "$NEW/bin/alfred-wake"
   run hook
@@ -358,6 +360,32 @@ marker_bridge() {
   [ "$status" -eq 0 ]
   [ "$(st "$BIN/alfred-wake")" = "$before" ]
   one_line_json 1.0.0
+}
+
+@test "CCW-220 AC17: a regular file with alfred-wake but no VERSION is not clobbered" {
+  mkdir -p "$BIN"
+  printf '#!/bin/sh\n# alfred-wake\necho hi\n' >"$BIN/alfred-wake"
+  touch -d '2020-01-01 00:00:00' "$BIN/alfred-wake"
+  before=$(st "$BIN/alfred-wake")
+  content=$(cat "$BIN/alfred-wake")
+  run hook
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BIN/alfred-wake")" = "$content" ]
+  [ "$(st "$BIN/alfred-wake")" = "$before" ]
+  one_line_json unknown
+}
+
+@test "CCW-220 AC17: an empty or dot-only VERSION counts as no VERSION" {
+  mkdir -p "$BIN"
+  for v in '' '.'; do
+    printf '#!/bin/sh\n# alfred-wake\nVERSION="%s"\n' "$v" >"$BIN/alfred-wake"
+    touch -d '2020-01-01 00:00:00' "$BIN/alfred-wake"
+    before=$(st "$BIN/alfred-wake")
+    run hook
+    [ "$status" -eq 0 ]
+    [ "$(st "$BIN/alfred-wake")" = "$before" ]
+    one_line_json unknown
+  done
 }
 
 @test "CCW-220 AC18: compact, clear and a missing source change nothing" {
