@@ -1856,6 +1856,30 @@ base_block() {
   [ "$(gql_calls)" = "2" ]
 }
 
+@test "evidence: a leading-zero env override reads as base 10 (08 is off, 09 clamps to 1, 010 is 10)" {
+  issues o/a "7:Fix:status:ready"
+  ALFRED_STOP_LOOP_SECONDS=08 lc
+  [ "$status" -eq 0 ]
+  blocked
+  [ "$(gql_calls)" = "0" ]
+  rm -rf "$STATEDIR"
+  ALFRED_STOP_LOOP_SECONDS=09 lc
+  [ "$status" -eq 0 ]; blocked
+  [ "$(gql_calls)" = "1" ]
+  rm -rf "$STATEDIR"
+  ALFRED_STOP_LOOP_SECONDS=010 lc
+  [ "$status" -eq 0 ]; blocked
+  [ "$(gql_calls)" = "2" ]
+}
+
+@test "evidence: a label change with empty evidence keeps a non-empty stored ev" {
+  seed_state "\"$NEW\""
+  issues o/a "7:Fix:status:in-progress"; evidence o/a "7:-"
+  lc; blocked
+  [ "$(state_of '.items["o/a#7"].tries')" = "1" ]
+  [ "$(state_of '.items["o/a#7"].ev')" = "$NEW" ]
+}
+
 @test "evidence: 2.5 floors to 2 (call cut at 2 s)" {
   base_block
   echo 20 > "$GH_STUB_DIR/slow-gql-o__a"

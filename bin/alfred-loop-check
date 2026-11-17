@@ -217,7 +217,7 @@ load_thresholds() {
   # inside it. Below 1 means off.
   [[ "$ev_t" =~ ^-?[0-9]+$ ]] || ev_t=0
   [[ "$dl" =~ ^-?[0-9]+$ ]] || dl=10
-  case "${ALFRED_STOP_LOOP_SECONDS:-}" in ''|*[!0-9]*) ;; *) dl="$ALFRED_STOP_LOOP_SECONDS" ;; esac
+  case "${ALFRED_STOP_LOOP_SECONDS:-}" in ''|*[!0-9]*) ;; *) dl=$((10#$ALFRED_STOP_LOOP_SECONDS)) ;; esac
   T_EVTIMEOUT=$ev_t
   [ "$T_EVTIMEOUT" -gt $((dl - T_TIMEOUT - 3)) ] && T_EVTIMEOUT=$((dl - T_TIMEOUT - 3))
   [ "$T_EVTIMEOUT" -ge 1 ] || T_EVTIMEOUT=0
@@ -528,7 +528,7 @@ decide() {
       | ($prev[$k] // null) as $p
       | ($p.ev // null) as $pev
       | ($evid[$k]) as $e
-      | (if $p == null or $p.labels != $l then {tries: 1, ev: ($e // $pev)}
+      | (if $p == null or $p.labels != $l then {tries: 1, ev: (if $e == null or ($e == "" and ($pev // "") != "") then $pev else $e end)}
          elif $e == null then {tries: (($p.tries // 0) + 1), ev: $pev}
          elif $pev == null then {tries: (($p.tries // 0) + 1), ev: $e}
          elif $e > $pev then {tries: 1, ev: $e, reset: true}
