@@ -42,8 +42,15 @@
 # signature per chase-interval-minutes; inside a chain (stop_hook_active) a
 # block needs a stored state with a different signature. Per item, at
 # chase-max-tries blocks without a change the reason tells the lead to
-# escalate to the hub. At most loop-check-max-blocks-per-hour blocks per
-# session. Kill switch: ALFRED_LOOP_CHECK=0 or loop-check-enabled false.
+# escalate to the hub. The count also restarts when a comment or a linked pull
+# request shows newer activity (CCW-213): on the block path only, one GraphQL
+# call per repo with actionable items (the first 20 items) reads the newest of
+# the last comment and each linked PR's created/updated/merged time, stored per
+# item as `ev`. A newer value resets the count to 1. The lookup runs under
+# loop-check-evidence-timeout-seconds (clamped to deadline - list timeout - 3;
+# 0 or an absent key means off) and fails open to the plain label count. At
+# most loop-check-max-blocks-per-hour blocks per session. Kill switch:
+# ALFRED_LOOP_CHECK=0 or loop-check-enabled false.
 #
 # Hook mode: no `set -e`, no `set -u`, every path ends in `exit 0`, the work
 # runs in a function, and children run as `cmd & wait` so a TERM, INT or HUP
@@ -67,7 +74,7 @@
 # Environment: ALFRED_LOOP_WAKE_BIN (alfred-wake path), ALFRED_LOOP_NOW
 # (epoch seconds, tests), CLAUDE_CONFIG_DIR, ALFRED_ROLE=worker (silent).
 # Local state, under ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-loop/:
-#   <session_id>.json   {ts, signature, items, blocks, last_turn, pending_note}
+#   <session_id>.json   {ts, signature, items{labels,tries,ev}, blocks, last_turn, pending_note}
 #   friction.jsonl      one line per stop allowed without progress (local only)
 # Nothing is ever written into a repository.
 
@@ -139,7 +146,8 @@ read_state() {
        signature: (if (.signature | type) == "string" then .signature else null end),
        items: ((.items // {}) | if type == "object"
                  then with_entries(select(.value | type == "object")
-                        | .value |= {labels: (if (.labels | type) == "string" then .labels else "" end), tries: ((.tries // 0) | num)})
+                        | .value |= {labels: (if (.labels | type) == "string" then .labels else "" end), tries: ((.tries // 0) | num),
+                                    ev: (if (.ev | type) == "string" then .ev else null end)})
                  else {} end),
        blocks: ((.blocks // []) | if type == "array" then map(select(type == "number")) else [] end),
        last_turn: (if .last_turn == "owner" then "owner" else "machine" end),
@@ -195,11 +203,24 @@ load_thresholds() {
        (.["chase-max-tries"] // 3 | floor),
        (.["loop-check-max-blocks-per-hour"] // 6 | floor),
        (if .["loop-check-enabled"] == false then "off" else "on" end),
-       (([.["waiting-label"]] + (.["parked-labels"] // [])) | unique | tojson)]
+       (([.["waiting-label"]] + (.["parked-labels"] // [])) | unique | tojson),
+       (.["loop-check-evidence-timeout-seconds"] | if type == "number" then floor else 0 end),
+       (.["loop-check-deadline-seconds"] | if type == "number" then floor else 10 end)]
     | @tsv' "$THRESHOLDS" 2>/dev/null) || return 1
   [ -n "$line" ] || return 1
-  IFS=$'\t' read -r T_WORKABLE T_WIP T_READY T_TIMEOUT T_CHASE T_TRIES T_MAXBLOCKS T_ENABLED T_PARKED <<< "$line"
+  local ev_t dl
+  IFS=$'\t' read -r T_WORKABLE T_WIP T_READY T_TIMEOUT T_CHASE T_TRIES T_MAXBLOCKS T_ENABLED T_PARKED ev_t dl <<< "$line"
   case "$T_TIMEOUT$T_CHASE$T_TRIES$T_MAXBLOCKS$T_WIP" in *[!0-9]*) return 1 ;; esac
+  # Evidence lookup timeout: never fails the load. A value that is not a plain
+  # integer reads as the fallback; the deadline is stop.sh's (digits-only env
+  # override, else the file's), and the clamp keeps list + lookup + margin
+  # inside it. Below 1 means off.
+  [[ "$ev_t" =~ ^-?[0-9]+$ ]] || ev_t=0
+  [[ "$dl" =~ ^-?[0-9]+$ ]] || dl=10
+  case "${ALFRED_STOP_LOOP_SECONDS:-}" in ''|*[!0-9]*) ;; *) dl=$((10#$ALFRED_STOP_LOOP_SECONDS)) ;; esac
+  T_EVTIMEOUT=$ev_t
+  [ "$T_EVTIMEOUT" -gt $((dl - T_TIMEOUT - 3)) ] && T_EVTIMEOUT=$((dl - T_TIMEOUT - 3))
+  [ "$T_EVTIMEOUT" -ge 1 ] || T_EVTIMEOUT=0
   return 0
 }
 
@@ -296,6 +317,89 @@ actionable() {
 }
 
 # --- decision ----------------------------------------------------------------
+
+# fetch_evidence <act-json>: sets EVID, {"repo#n": "<newest ISO time or empty>"}
+# for each item whose answer was usable. One gh api graphql call per repo with
+# actionable items (the first 20 items), in parallel under T_EVTIMEOUT. Block
+# path only. Every failure is stderr only (info), never a warning, and leaves
+# the item out of EVID so its count stays the plain label count.
+fetch_evidence() {
+  EVID='{}'
+  [ "${T_EVTIMEOUT:-0}" -ge 1 ] || return 0
+  local act="$1" repo i=0 p rc k n total q al nums
+  local -a rpids=() rnames=() rnums=()
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    i=$((i + 1))
+    total=$(jq -r --arg r "$repo" '[.[] | select(.repo == $r)] | length' <<< "$act")
+    nums=$(jq -c --arg r "$repo" '[.[] | select(.repo == $r) | .number] | .[0:20]' <<< "$act")
+    [ "$total" -gt 20 ] && info "$repo: $total actionable items, evidence looked up for the first 20 only"
+    al=""
+    for n in $(jq -r '.[]' <<< "$nums"); do
+      al="$al i$n: issue(number: $n) { comments(last: 1) { nodes { createdAt } } timelineItems(last: 30, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) { nodes { ... on CrossReferencedEvent { createdAt source { ... on PullRequest { updatedAt mergedAt } } } ... on ConnectedEvent { createdAt subject { ... on PullRequest { updatedAt mergedAt } } } } } }"
+    done
+    q="query(\$o: String!, \$n: String!) { repository(owner: \$o, name: \$n) {$al } }"
+    timeout -k 1 "$T_EVTIMEOUT" gh api graphql -f query="$q" -f o="${repo%%/*}" -f n="${repo#*/}" \
+      > "$WORK/ev.$i" 2> "$WORK/ev.$i.err" &
+    rpids+=("$!")
+    rnames+=("$repo")
+    rnums+=("$nums")
+    CHILD_PIDS+=("$!")
+  done < <(jq -r '[.[].repo] | unique | .[]' <<< "$act")
+  k=0
+  for p in "${rpids[@]}"; do
+    k=$((k + 1))
+    repo="${rnames[$((k - 1))]}"
+    wait "$p"; rc=$?
+    local reason=""
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then reason="timed out"
+    elif [ "$rc" -ne 0 ]; then reason="exit $rc: $(head -c 120 "$WORK/ev.$k.err" 2>/dev/null | tr '\n' ' ')"
+    elif ! is_obj "$(cat "$WORK/ev.$k" 2>/dev/null)"; then reason="answer is not a JSON object"
+    elif ! jq -e '.data | type == "object" and (.repository | type == "object")' "$WORK/ev.$k" >/dev/null 2>&1; then
+      reason="no repository object in the answer"
+    fi
+    if [ -n "$reason" ]; then
+      info "evidence lookup failed for $repo ($reason), counts unchanged"
+      continue
+    fi
+    local res m
+    res=$(jq -c --arg r "$repo" --argjson nums "${rnums[$((k - 1))]}" '
+      def evid:
+        try (
+          if type == "object"
+             and (.comments | type) == "object" and (.comments.nodes | type) == "array"
+             and (.timelineItems | type) == "object" and (.timelineItems.nodes | type) == "array"
+          then
+            ([.comments.nodes[] | if type == "object" and (.createdAt | type) == "string" then .createdAt else error("shape") end]
+             + [.timelineItems.nodes[]
+                | if type != "object" then error("shape") else . end
+                | (.source // .subject) as $p
+                | if ($p | type) == "object" and ($p | has("updatedAt")) then
+                    (if (.createdAt | type) == "string" and ($p.updatedAt | type) == "string"
+                        and (($p.mergedAt | type) == "string" or $p.mergedAt == null)
+                     then [.createdAt, $p.updatedAt, $p.mergedAt] | map(select(. != null)) | .[]
+                     else error("shape") end)
+                  else empty end])
+            | if length == 0 then "" else max end
+          else null end
+        ) catch null;
+      .data.repository as $repo
+      | reduce $nums[] as $n ({ok: {}, miss: []};
+          ($repo["i\($n)"] | evid) as $e
+          | if $e == null then .miss += [$n] else .ok["\($r)#\($n)"] = $e end)' "$WORK/ev.$k" 2>/dev/null)
+    if ! is_obj "$res"; then
+      info "evidence lookup failed for $repo (no repository object in the answer), counts unchanged"
+      continue
+    fi
+    for m in $(jq -r '.miss[]' <<< "$res"); do
+      info "evidence missing for $repo#$m, count unchanged"
+    done
+    EVID=$(jq -c --argjson add "$(jq -c '.ok' <<< "$res")" '. + $add' <<< "$EVID")
+  done
+  is_obj "$EVID" || EVID='{}'
+  return 0
+}
+
 
 # reason_text <act-json> <tries-json> <direct>: the block reason.
 reason_text() {
@@ -414,11 +518,27 @@ decide() {
   fi
 
   prev_items=$(jq -c '.items // {}' <<< "$prev")
-  tries=$(jq -cn --argjson prev "$prev_items" --argjson act "$act" '
-    reduce $act[] as $i ({};
+  EVID='{}'
+  fetch_evidence "$act"
+  local calc k
+  calc=$(jq -cn --argjson prev "$prev_items" --argjson act "$act" --argjson evid "$EVID" '
+    reduce $act[] as $i ({items: {}, resets: []};
       ("\($i.repo)#\($i.number)") as $k
       | ($i.labels | sort | join(",")) as $l
-      | . + {($k): {labels: $l, tries: (if ($prev[$k].labels == $l) then (($prev[$k].tries // 0) + 1) else 1 end)}})')
+      | ($prev[$k] // null) as $p
+      | ($p.ev // null) as $pev
+      | ($evid[$k]) as $e
+      | (if $p == null or $p.labels != $l then {tries: 1, ev: (if $e == null or ($e == "" and ($pev // "") != "") then $pev else $e end)}
+         elif $e == null then {tries: (($p.tries // 0) + 1), ev: $pev}
+         elif $pev == null then {tries: (($p.tries // 0) + 1), ev: $e}
+         elif $e > $pev then {tries: 1, ev: $e, reset: true}
+         else {tries: (($p.tries // 0) + 1), ev: ([$pev, $e] | max)} end) as $r
+      | .items[$k] = {labels: $l, tries: $r.tries, ev: $r.ev}
+      | if $r.reset then .resets += [$k] else . end)')
+  tries=$(jq -c '.items' <<< "$calc")
+  for k in $(jq -r '.resets[]' <<< "$calc"); do
+    info "$k count reset by newer activity"
+  done
   D_REASON=$(reason_text "$act" "$tries" "$DIRECT")
   D_KIND=block
   if ! write_state "$(jq -cn --argjson prev "$prev" --argjson n "$nowt" --arg sig "$sig" --argjson tries "$tries" \

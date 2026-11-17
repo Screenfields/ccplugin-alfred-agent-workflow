@@ -494,8 +494,12 @@ whether to block the stop once. Items parked as waiting on the owner or on a pee
   one line goes to stderr and to
   `${CLAUDE_CONFIG_DIR:-~/.claude}/alfred-loop/friction.jsonl` (local only).
 - **Chase, then escalate:** an item that is still unchanged after `chase-max-tries` blocks makes
-  the block reason say to escalate to the hub and record it on the item. The count resets when the
-  item's labels change.
+  the block reason say to escalate to the hub and record it on the item.
+  The count resets when the item's labels change, or when a comment or linked pull request shows newer activity.
+  On the block path only, one GraphQL call per repo with actionable items (the first 20 items) reads the last comment
+  and the created, updated and merged times of linked pull requests (closed-unmerged and draft included), under
+  `loop-check-evidence-timeout-seconds` (2; 0 or an absent key turns the lookup off). Any failure leaves the plain
+  label count.
 - **Owner present:** `bin/alfred-loop-check note-turn` (UserPromptSubmit) records whether the turn
   started with the owner. In an interactive session (`CLAUDE_CODE_ENTRYPOINT` is `cli`, `claude-vscode` or
   `claude-desktop`; anything else, or unset, is a machine), a prompt without a machine prefix
@@ -561,7 +565,11 @@ Printed on stderr as `alfred-loop-check: <text>` (and, where the stop decision c
 `no repos to check (no repos key in the config, no origin remote)` · `inbox unreachable (...)` ·
 `inbox scan partial: ...` · `all sources failed, stop allowed` · `some sources failed, stop allowed` ·
 `no state for this chain, stop allowed` · `state not written, stop allowed` ·
-`state not written, the note is lost`. Stderr and the friction file only, never the owner's screen:
+`state not written, the note is lost`. Stderr only, never the owner's screen, from the evidence lookup:
+`evidence lookup failed for <repo> (<reason>), counts unchanged` ·
+`evidence missing for <repo>#<n>, count unchanged` ·
+`<repo>: <N> actionable items, evidence looked up for the first 20 only` ·
+`<repo>#<n> count reset by newer activity`. Stderr and the friction file only, never the owner's screen:
 `block cap reached, stop allowed` and `no progress since the last block, stop allowed`. From `stop.sh`:
 `<bridge|loop|audit> part gave unusable output, ignored` and `<bridge|loop|audit> part timed out, stop allowed`.
 From `hooks/reply-audit.sh`, stderr only: `reply-audit: reply-time-tolerance-minutes unreadable, no audit`.
@@ -575,6 +583,9 @@ From `hooks/reply-audit.sh`, stderr only: `reply-audit: reply-time-tolerance-min
   `chase-interval-minutes` until it is parked or escalated.
 - With several repos, when one repo call fails and no state exists yet, the set from the repos
   that answered can still block.
+- A pull request with no timeline link to the item (no cross-reference or connection event) is
+  invisible to the evidence lookup, so the item can still be flagged as unchanged.
+- Items after the first 20 in number order in one repo keep the label-only count.
 
 ### Known false allows
 
@@ -590,7 +601,10 @@ The script runs outside the plugin's hook entry with an explicit config path, th
 The hub and Alfred keep their own actionable sets by passing their own `workable-states` and
 `waiting-label` in their own thresholds file (required keys: `waiting-label`, `workable-states`,
 `wip-limit`; optional: `ready-state`, `loop-check-timeout-seconds`, `chase-interval-minutes`,
-`chase-max-tries`, `loop-check-max-blocks-per-hour`, `loop-check-enabled`, `parked-labels` (a list of
+`chase-max-tries`, `loop-check-max-blocks-per-hour`, `loop-check-enabled`,
+`loop-check-evidence-timeout-seconds` (the evidence lookup is off for a thresholds file without it; an
+outside Stop setup that sets it must keep it within its own deadline: the clamp reads that file's
+`loop-check-deadline-seconds` or `ALFRED_STOP_LOOP_SECONDS`), `parked-labels` (a list of
 strings, parked next to the `waiting-label`; without it only the `waiting-label` parks) and
 `owner-note-max-age-minutes` (read by `note-turn`)). `note-turn` must stay on `UserPromptSubmit` in
 any Stop setup that uses the check, or the stored notes are never delivered. From another Stop setup:

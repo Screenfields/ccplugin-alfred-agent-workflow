@@ -5,15 +5,37 @@
 #   fail-<owner>__<name>   present → exit 1 with an auth-looking error
 #   slow-<owner>__<name>   present → sleep <its content> seconds first
 #   garbage-<owner>__<name> present → answer text that is not JSON
+# and `gh api graphql -f query=… -f o=<owner> -f n=<name>` (the evidence lookup):
+#   <owner>__<name>.evidence.json   answered as it is; without it, a valid answer
+#                                   with one empty alias per i<number> in the query
+#   fail-gql-/slow-gql-/garbage-gql-<owner>__<name>   like the markers above
 repo=""
 args="$*"
+gql=0; o=""; n=""; query=""
+[ "$1" = "api" ] && [ "$2" = "graphql" ] && gql=1
 while [ $# -gt 0 ]; do
   case "$1" in
     -R) repo="$2"; shift 2 ;;
+    -f) case "$2" in
+          o=*) o="${2#o=}" ;;
+          n=*) n="${2#n=}" ;;
+          query=*) query="${2#query=}" ;;
+        esac
+        shift 2 ;;
     *) shift ;;
   esac
 done
 echo "$args" >> "$GH_STUB_DIR/calls.log"
+if [ "$gql" -eq 1 ]; then
+  f="${o}__${n}"
+  if [ -f "$GH_STUB_DIR/slow-gql-$f" ]; then sleep "$(cat "$GH_STUB_DIR/slow-gql-$f")"; fi
+  if [ -f "$GH_STUB_DIR/fail-gql-$f" ]; then echo "gh: HTTP 502: Bad gateway" >&2; exit 1; fi
+  if [ -f "$GH_STUB_DIR/garbage-gql-$f" ]; then echo "<html>not json</html>"; exit 0; fi
+  if [ -f "$GH_STUB_DIR/$f.evidence.json" ]; then cat "$GH_STUB_DIR/$f.evidence.json"; exit 0; fi
+  grep -o 'i[0-9][0-9]*: issue' <<< "$query" | sed 's/: issue//' \
+    | jq -Rn '{data: {repository: ([inputs | {(.): {comments: {nodes: []}, timelineItems: {nodes: []}}}] | add // {})}}'
+  exit 0
+fi
 f="${repo//\//__}"
 if [ -f "$GH_STUB_DIR/slow-$f" ]; then sleep "$(cat "$GH_STUB_DIR/slow-$f")"; fi
 if [ -f "$GH_STUB_DIR/fail-$f" ]; then echo "gh: HTTP 401: Bad credentials" >&2; exit 1; fi
