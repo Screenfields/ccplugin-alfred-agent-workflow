@@ -1,0 +1,18 @@
+#!/bin/bash
+# Test double for age, used by tests/test-run.bats. Logs argv (one line) to
+# $STUB_DIR/age.argv and the environment to $STUB_DIR/age.env, copies stdin to
+# $STUB_DIR/age.plain and prints a fixed armored block. $STUB_DIR/age-mode:
+#   fail | bad-header | no-end | echo-plain
+PATH=${SHIM_REAL_PATH:-$PATH}
+printf '%s\n' "$*" >> "$STUB_DIR/age.argv"
+export -p >> "$STUB_DIR/age.env"
+plain=$(cat)
+printf '%s\n' "$plain" > "$STUB_DIR/age.plain"
+mode=""; [ -f "$STUB_DIR/age-mode" ] && mode=$(<"$STUB_DIR/age-mode")
+case $mode in
+  fail) echo "age: stubbed failure" >&2; exit 1 ;;
+  bad-header) echo "not an age file"; exit 0 ;;
+  no-end) printf -- '-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCg==\n'; exit 0 ;;
+  echo-plain) printf -- '-----BEGIN AGE ENCRYPTED FILE-----\n%s\n-----END AGE ENCRYPTED FILE-----\n' "$plain"; exit 0 ;;
+esac
+printf -- '-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB0ZXN0\nZmFrZS1jaXBoZXJ0ZXh0\n-----END AGE ENCRYPTED FILE-----\n'

@@ -1,0 +1,13 @@
+#!/bin/bash
+# Test double for gh, used by tests/test-run.bats. Answers
+# `gh api repos/<o>/<r>/commits/<sha> --jq .sha`. Logs argv to $STUB_DIR/gh.argv and the
+# environment to $STUB_DIR/gh.env. $STUB_DIR/gh-mode: notfound | wrongsha | (default: echo the sha)
+PATH=${SHIM_REAL_PATH:-$PATH}
+printf '%s\n' "$*" >> "$STUB_DIR/gh.argv"
+export -p >> "$STUB_DIR/gh.env"
+mode=""; [ -f "$STUB_DIR/gh-mode" ] && mode=$(<"$STUB_DIR/gh-mode")
+case $mode in
+  notfound) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+  wrongsha) echo "0000000000000000000000000000000000000000"; exit 0 ;;
+esac
+echo "${2##*/}"

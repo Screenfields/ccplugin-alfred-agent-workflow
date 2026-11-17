@@ -1,0 +1,24 @@
+#!/bin/bash
+# Test shim for tests/test-run.bats: symlinked in the private PATH dir under every
+# external command alfred-test-run runs. Appends "<name> <argv>" to $ARGV_LOG and the
+# environment (export -p, a builtin) to $ARGV_LOG.env, then execs the real binary,
+# found on $SHIM_REAL_PATH (never the shim dir) and run with the current PATH so the
+# stubs are still found. $SHIM_FAIL (space-separated names) makes a command exit 1;
+# with $SHIM_FAIL_ARG set it fails only when an argument equals it.
+# $SHIM_FAKE_SLEEP=1 makes the sleep shim return at once.
+name=${0##*/}
+{ printf '%s' "$name"; printf ' %s' "$@"; printf '\n'; } >> "${ARGV_LOG:-/dev/null}"
+export -p >> "${ARGV_LOG:-/dev/null}.env"
+for f in ${SHIM_FAIL:-}; do
+  if [ "$f" = "$name" ]; then
+    if [ -z "${SHIM_FAIL_ARG:-}" ]; then exit 1; fi
+    for a in "$@"; do [ "$a" = "$SHIM_FAIL_ARG" ] && exit 1; done
+  fi
+done
+if [ "$name" = sleep ] && [ "${SHIM_FAKE_SLEEP:-}" = 1 ]; then exit 0; fi
+IFS=: read -ra dirs <<< "${SHIM_REAL_PATH:-}"
+for d in "${dirs[@]}"; do
+  if [ -x "$d/$name" ]; then exec "$d/$name" "$@"; fi
+done
+echo "argv-shim: no real $name" >&2
+exit 127
