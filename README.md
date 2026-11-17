@@ -850,13 +850,14 @@ as the only wait. No polling loop, no second waiter, and a wake during a run sta
 After exit 11 or 4, open the build URL; do not hand-poll.
 
 **Retries.** GET calls (pipeline, build, log) retry up to 3 times on HTTP 429, on 5xx and on curl exits
-6, 7 and 28, waiting the `Retry-After` or `RateLimit-Reset` seconds (at most 30) or 1, 2, 4 s. The create
-request is not retried on a timeout or a 5xx, because it has no idempotency key and the build may
-exist; it is retried only on 429 and curl exits 6 and 7, which are definite refusals. Exit 4 with "the
-build may exist" means: check the pipeline for this commit.
+6, 7 and 28, waiting the `Retry-After` or `RateLimit-Reset` seconds (at most 30) or 1, 2, 4 s.
+The create request is not retried on a timeout or a 5xx, because it has no idempotency key and the build may exist.
+It is retried only on 429 and curl exits 6 and 7, which are definite refusals. Exit 4 with "the build may
+exist" means: check the pipeline for this commit.
 
-**Rebuilds.** Start a new run; do not use rebuild. The worker refuses a rebuild, because a rebuild
-copies the old env and the worker admits each envelope for one build only.
+**Rebuilds.**
+Start a new run; do not use rebuild. The worker refuses a rebuild.
+A rebuild copies the old env, and the worker admits each envelope for one build only.
 
 Test seams (`ALFRED_TEST_RUN_*`, for the bats suite only) print one warning line when set.
 
