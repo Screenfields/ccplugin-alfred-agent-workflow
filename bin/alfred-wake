@@ -21,6 +21,16 @@
 #                                wait/run process holds the pidfile AND the
 #                                Claude Code process that started it is alive
 #
+# Windows (Git Bash, MSYS, Cygwin): there is no flock or pgrep in Git for
+# Windows. On a Windows shell without flock there is no lock (LOCK_MODE=none):
+# the pidfile is the only arbiter, and each loop top yields to a newer live
+# wait (yield_to_newer). Two waits that start at nearly the same moment can
+# both run until the older one reaches its next loop top, so one duplicate
+# WAKE line is possible, never a lost one. A shell stand-in answers `pgrep -P`
+# from /proc when pgrep is missing. No owner file is written (the native
+# Claude Code parent is not visible in /proc), so `status` checks the pid only.
+# Linux keeps flock and pgrep exactly as before.
+#
 # Single instance: `wait` and `run` share one pidfile per state dir (one state
 # dir per identity on a devbox). A new instance SIGTERMs the previous one,
 # waits up to ALFRED_WAKE_STOP_GRACE seconds, then SIGKILLs it.
@@ -58,7 +68,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.9.0"
+VERSION="1.10.0"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -94,6 +104,8 @@ LAST_WAKE_FILE="$STATE_DIR/last_wake_exit"
 HANDLING_GRACE="${ALFRED_WAKE_HANDLING_GRACE:-600}"
 [[ "$HANDLING_GRACE" =~ ^[0-9]+$ ]] || HANDLING_GRACE=600
 LOCK_FILE="$STATE_DIR/alfred-wake.lock"
+WINDOWS_SHELL=false   # set in cmd_run: MINGW*/MSYS*/CYGWIN* uname
+LOCK_MODE=flock       # `none` on a Windows shell without flock
 # The Claude Code process that owns the running wait: "<pid> <starttime>" or
 # "unknown" (see the Owner paragraph in the header).
 OWNER_FILE="$STATE_DIR/alfred-wake.owner"
@@ -931,6 +943,50 @@ owner_check() {
   fi
 }
 
+# True on a Windows shell (Git Bash = MINGW*, MSYS2 = MSYS*, Cygwin = CYGWIN*).
+is_windows_shell() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# windows_pgrep -P <pid> — stand-in for `pgrep -P` where procps is missing:
+# print the pids whose parent is <pid>, from /proc/*/stat, read with builtins.
+# The parent pid is field 4, read after the last ") " (the command name may
+# hold spaces and parentheses). Returns 1 when there is no child, as pgrep does.
+windows_pgrep() {
+  local want="${2:-}" f stat rest found=1
+  [ "${1:-}" = "-P" ] || return 2
+  for f in /proc/[0-9]*/stat; do
+    { read -r stat < "$f"; } 2>/dev/null
+    [ -n "$stat" ] || continue
+    rest=${stat##*) }
+    rest=${rest#* }
+    if [ "${rest%% *}" = "$want" ]; then
+      f=${f#/proc/}
+      echo "${f%%/*}"
+      found=0
+    fi
+  done
+  return "$found"
+}
+
+# yield_to_newer — only with LOCK_MODE=none. When the pidfile names another
+# live `alfred-wake wait|run`, a newer instance took over: stop quietly. Its
+# temp files (*.json.??????) are the winner's, so only RUN_TMP is removed.
+yield_to_newer() {
+  local p=""
+  { read -r p < "$PID_FILE"; } 2>/dev/null
+  [[ "$p" =~ ^[0-9]+$ ]] || return 0
+  [ "$p" != "$$" ] || return 0
+  is_wake_pid "$p" || return 0
+  if [ -n "$RUN_TMP" ]; then rm -rf "$RUN_TMP"; fi
+  log_line "yielded to $p"
+  if [ "$WAIT_MODE" = "true" ]; then echo "WAKE-STOPPED replaced by=$p"; fi
+  exit 0
+}
+
 # Kill <pid> and everything below it (curl, sleep, the pass subshell),
 # deepest first so nothing is re-parented to init and left running.
 kill_tree() {
@@ -945,8 +1001,10 @@ kill_tree() {
 # instances started together cannot both win.
 take_over() {
   local old waited=0 limit=$((STOP_GRACE_S * 10)) dir owner
-  exec 9>"$LOCK_FILE"
-  flock -w $((STOP_GRACE_S + 10)) 9 2>/dev/null || true
+  if [ "$LOCK_MODE" = flock ]; then
+    exec 9>"$LOCK_FILE"
+    flock -w $((STOP_GRACE_S + 10)) 9 2>/dev/null || true
+  fi
 
   old=$(cat "$PID_FILE" 2>/dev/null || true)
   if [ "$old" != "$$" ] && is_wake_pid "$old"; then
@@ -976,14 +1034,16 @@ take_over() {
   # Owner first, pidfile second: a pidfile never exists without its owner.
   if owner=$(find_owner); then
     printf '%s\n' "$owner" > "$OWNER_FILE"
-  elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && [ "$WINDOWS_SHELL" != true ]; then
     echo unknown > "$OWNER_FILE"
   else
     rm -f "$OWNER_FILE"
   fi
   printf '%s\n' "$$" > "$PID_FILE"
-  flock -u 9 2>/dev/null || true
-  exec 9>&-
+  if [ "$LOCK_MODE" = flock ]; then
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
+  fi
 }
 
 release_pidfile() {
@@ -1079,9 +1139,18 @@ cmd_run() {
     interval="$DEFAULT_INTERVAL"
   fi
   ensure_state_dir || exit 1
-  if ! command -v flock >/dev/null 2>&1 || ! command -v pgrep >/dev/null 2>&1; then
-    echo "WAKE-ERROR alfred-wake: requires flock and pgrep (util-linux, procps)"
-    exit 2
+  if is_windows_shell; then
+    WINDOWS_SHELL=true
+    if ! command -v pgrep >/dev/null 2>&1; then
+      pgrep() { windows_pgrep "$@"; }
+    fi
+    if ! command -v flock >/dev/null 2>&1; then LOCK_MODE=none; fi
+  fi
+  if [ "$WINDOWS_SHELL" != true ]; then
+    if ! command -v flock >/dev/null 2>&1 || ! command -v pgrep >/dev/null 2>&1; then
+      echo "WAKE-ERROR alfred-wake: requires flock and pgrep (util-linux, procps)"
+      exit 2
+    fi
   fi
   trap 'on_signal TERM' TERM
   trap 'on_signal INT' INT
@@ -1108,6 +1177,7 @@ cmd_run() {
 
   local now do_am consecutive news="$RUN_TMP/news" rc
   while true; do
+    if [ "$LOCK_MODE" = none ]; then yield_to_newer; fi
     now=$(now_epoch)
     do_am=false
     if [ "$now" -ge "$AM_NEXT_AT" ]; then do_am=true; fi
