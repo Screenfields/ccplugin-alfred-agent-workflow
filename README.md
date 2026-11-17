@@ -273,6 +273,29 @@ Delete the state dir to force a fresh seed.
 - Read-only against both services — no mark-as-read, no sends, no posts. The
   woken session decides what to do.
 
+### Windows (Git Bash)
+
+`alfred-wake wait` runs in Git Bash on Windows without `flock` or `pgrep`
+(CCW-214, alfred-wake 1.10.0).
+
+- **Requirements:** full Git for Windows (not MinGit, which lacks `stat`,
+  `sleep` and `timeout`), plus `curl` and `jq`. `flock` and `pgrep` are not
+  needed. Linux and macOS are unchanged: Linux keeps `flock` and `pgrep`, and
+  a shell that is not MINGW, MSYS or Cygwin and lacks either still gets
+  `WAKE-ERROR alfred-wake: requires flock and pgrep (util-linux, procps)`.
+- **No lock:** on a Windows shell without `flock` the pidfile is the only
+  arbiter. A new wait replaces the running one as on Linux, and every wait
+  checks the pidfile at the top of each loop and stops with
+  `WAKE-STOPPED replaced by=<pid>` when another live wait holds it. When two
+  waits start at nearly the same moment, both can run until the older one
+  reaches its next loop top, so one duplicate WAKE line is possible (never a
+  lost one).
+- **`pgrep -P` stand-in:** when `pgrep` is missing, a shell function reads
+  `/proc/*/stat` to find child processes when a wait is stopped.
+- **No orphan detection:** no owner file is written, so `status` checks the
+  pid only. A wait left behind by a crashed Claude Code counts as armed until
+  a new wait replaces it, and news it takes can be missed in the meantime.
+
 ### Status of the roll-out
 
 | Agent | Today |
