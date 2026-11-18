@@ -702,7 +702,7 @@ mkplug() {
   [ ! -e "$ALFRED_WAKE_BIN_DIR/alfred-test-run" ]
 }
 
-# shim_run <shim-name> <body> — a wait with a failing ln or mv first on PATH,
+# shim_wait_case <name> <body> <real> — a wait with a failing ln or mv first on PATH,
 # against a fresh bin dir and state dir each; sets rc, and leaves the two
 # captures in $BATS_TEST_TMPDIR/{plain,shimmed}.out.
 shim_wait_case() {
