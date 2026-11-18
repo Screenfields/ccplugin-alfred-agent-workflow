@@ -368,6 +368,16 @@ teardown() {
   save_prompt; mk_panel r1
   printf 1 > "$STUB_DIR/chat.sleep"
   make_template "$PANEL_F" ecr-openai
+  # CCW-209 diagnostics: a logging mkdir in front of the real one, installed
+  # after mk_panel so the fixture's own mkdir calls are not logged.
+  cat > "$BATS_TEST_TMPDIR/bin/mkdir" <<'WRAP'
+#!/bin/bash
+command -p mkdir "$@"; rc=$?
+last="${*: -1}"
+printf '%s ppid=%s args=%s rc=%s inode=%s\n' "$(date +%s.%N)" "$PPID" "$*" "$rc" "$(stat -c %i "$last" 2>/dev/null)" >> "$STUB_DIR/mkdir.log"
+exit "$rc"
+WRAP
+  chmod +x "$BATS_TEST_TMPDIR/bin/mkdir"
   env PATH="$BATS_TEST_TMPDIR/bin:$PATH" TMPDIR="$TMPDIR" bash "$BATS_TEST_TMPDIR/template.sh" > "$BATS_TEST_TMPDIR/o1" 2>&1 &
   p1=$!
   env PATH="$BATS_TEST_TMPDIR/bin:$PATH" TMPDIR="$TMPDIR" bash "$BATS_TEST_TMPDIR/template.sh" > "$BATS_TEST_TMPDIR/o2" 2>&1 &
@@ -382,6 +392,9 @@ teardown() {
       echo "DIAG o1:"; cat "$BATS_TEST_TMPDIR/o1"
       echo "DIAG o2:"; cat "$BATS_TEST_TMPDIR/o2"
       if [ -d "$PANEL_DIR/called.ecr-openai" ]; then echo "DIAG called.ecr-openai exists"; else echo "DIAG called.ecr-openai missing"; fi
+      echo "DIAG mkdir.log:"; cat "$STUB_DIR/mkdir.log"
+      echo "DIAG bats: $(bats --version)  kernel: $(uname -r)  fstype: $(stat -f -c %T "$PANEL_DIR")"
+      echo "DIAG marker: $(ls -lid "$PANEL_DIR/called.ecr-openai" 2>&1)"
     } >&3
   fi
   [ "$n" -eq 1 ]
