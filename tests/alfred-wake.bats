@@ -63,6 +63,17 @@ start() {
 }
 
 out_of() { cat "$BATS_TEST_TMPDIR/$1.out"; }
+# The single WAKE line of an output file; fails unless there is exactly one.
+# For bridges that were killed or replaced: the kill can break a pipe inside the
+# bridge and put stderr noise (e.g. "tr: write error: Broken pipe") in the file
+# next to the WAKE line, so such tests must not compare the whole file (CCW-139).
+wake_line_of() {
+  local n
+  n=$(grep -c '^WAKE' "$1") || true
+  [ "$n" -eq 1 ] || return 1
+  grep '^WAKE' "$1"
+}
+wake_line_out_of() { wake_line_of "$BATS_TEST_TMPDIR/$1.out"; }
 
 # until_true <tenths-of-a-second> <command...>
 until_true() {
@@ -272,7 +283,7 @@ no_leftovers() {
   start b wait
   reap "$a_pid"
   [ "$rc" -eq 0 ]
-  [ "$(out_of a)" = "WAKE-STOPPED replaced by=$b_pid" ] || { echo "a printed: $(out_of a)"; false; }
+  [ "$(wake_line_out_of a)" = "WAKE-STOPPED replaced by=$b_pid" ] || { echo "a printed: $(out_of a)"; false; }
   until_true 30 pidfile_is "$b_pid"
   alive "$b_pid"
 }
@@ -304,7 +315,7 @@ no_leftovers() {
     reap "$a_pid"
     [ "$rc" -eq 0 ]
     [ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 1500 ]
-    [ "$(out_of a)" = "WAKE-STOPPED signal=$sig" ]
+    [ "$(wake_line_out_of a)" = "WAKE-STOPPED signal=$sig" ] || { echo "a printed: $(out_of a)"; false; }
     run pgrep -f "sleep 31.4159"
     [ "$status" -ne 0 ]
     no_leftovers
@@ -415,7 +426,7 @@ holders_of() {
   until_true 50 pidfile_not "$orphan"
   wait_pid=$(cat "$STATE/alfred-wake.pid")
   reap "$orphan"
-  [ "$(cat "$BATS_TEST_TMPDIR/fake.out")" = "WAKE-STOPPED replaced by=$wait_pid" ] || { echo "orphan printed: $(cat "$BATS_TEST_TMPDIR/fake.out")"; false; }
+  [ "$(wake_line_of "$BATS_TEST_TMPDIR/fake.out")" = "WAKE-STOPPED replaced by=$wait_pid" ] || { echo "orphan printed: $(cat "$BATS_TEST_TMPDIR/fake.out")"; false; }
   [ "$(cut -d' ' -f1 "$STATE/alfred-wake.owner")" = "$fake_pid" ]
   run "$WAKE" status
   [ "$status" -eq 0 ]
@@ -1156,7 +1167,7 @@ fake_wait() {
   start_with "$WIN_PATH" b wait
   reap "$a_pid"
   [ "$rc" -eq 0 ]
-  [ "$(out_of a)" = "WAKE-STOPPED replaced by=$b_pid" ]
+  [ "$(wake_line_out_of a)" = "WAKE-STOPPED replaced by=$b_pid" ] || { echo "a printed: $(out_of a)"; false; }
   until_true 30 pidfile_is "$b_pid"
   [ ! -e "$STATE/alfred-wake.lock.d" ]
   [ ! -e "$STATE/run.$a_pid" ]
@@ -1192,7 +1203,7 @@ fake_wait() {
   echo "$fake_pid" > "$STATE/alfred-wake.pid"
   reap "$a_pid" || { out_of a; false; }
   [ "$rc" -eq 0 ]
-  [ "$(out_of a)" = "WAKE-STOPPED replaced by=$fake_pid" ]
+  [ "$(wake_line_out_of a)" = "WAKE-STOPPED replaced by=$fake_pid" ] || { echo "a printed: $(out_of a)"; false; }
   pidfile_is "$fake_pid"
   [ ! -e "$STATE/run.$a_pid" ]
   grep -q "yielded to $fake_pid" "$STATE/alfred-wake.log"
@@ -1235,7 +1246,7 @@ fake_wait() {
     kill "-$sig" "$a_pid"
     reap "$a_pid"
     [ "$rc" -eq 0 ]
-    [ "$(out_of a)" = "WAKE-STOPPED signal=$sig" ]
+    [ "$(wake_line_out_of a)" = "WAKE-STOPPED signal=$sig" ] || { echo "a printed: $(out_of a)"; false; }
     run pgrep -f "sleep 31.4159"
     [ "$status" -ne 0 ]
     no_leftovers
