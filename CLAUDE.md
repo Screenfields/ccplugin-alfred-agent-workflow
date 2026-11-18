@@ -158,3 +158,5 @@ Every PR that changes plugin contents (skills, commands, rules, MCP config) **mu
 After merging here, open a follow-up PR in `Screenfields/alfred-cc-tools` to bump the `version` field for `alfred-agent` in `.claude-plugin/marketplace.json` to match. This is what triggers cache-invalidation and distributes the new version to devboxes on next cold-restart.
 
 The two version numbers must stay in sync. If they drift, devboxes load stale skill versions without any warning (see ccplugin-alfred-agent-workflow#51 for the detection work).
+
+The tests read the version from `plugin.json`, so a release edits `plugin.json` only. The previous-version check is `tests/plugin-version.bats`, and it needs `origin/main` fetched.

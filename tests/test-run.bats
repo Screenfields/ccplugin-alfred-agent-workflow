@@ -805,13 +805,6 @@ sig_run() {
   done
 }
 
-# AC 15: version
-@test "AC15: plugin.json is 2.52.0 and nothing under tests or .claude-plugin carries main's version" {
-  [ "$(jq -r .version "$ROOT/.claude-plugin/plugin.json")" = 2.52.0 ]
-  run grep -rn "2\.5""1\.0" "$ROOT/tests" "$ROOT/.claude-plugin"
-  [ "$status" -eq 1 ]
-}
-
 # review round 1
 @test "AC7: an exported internal name does not reach a child environment" {
   export BK_TOKEN=callerx TOKVAL=callery
