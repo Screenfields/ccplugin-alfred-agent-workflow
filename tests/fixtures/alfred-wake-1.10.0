@@ -1,0 +1,1504 @@
+#!/usr/bin/env bash
+# alfred-wake — deterministic, no-LLM inbox wake bridge for Alfred lead agents.
+#
+# A lead's Claude Code session runs `alfred-wake wait` as a background Bash
+# task. It watches the lead's agent-messaging inbox (and, when the pod has a
+# Buzz identity, the lead's Buzz channels) and stays completely silent until
+# there is genuinely new news; then it prints the news line(s) and exits. The
+# harness re-invokes the session on that exit, the session handles the news
+# and starts a fresh `wait`. Silence costs no tokens: no 30-minute Monitor
+# expiry, no re-arm turn, no unfinished task left behind per re-arm.
+#
+# Modes:
+#   alfred-wake wait [interval]  one-shot: block until the first news, print it,
+#                                exit 0 (exit 2 if a WAKE-ERROR was printed)
+#   alfred-wake run --until-wake same as `wait`
+#   alfred-wake run [interval]   loop forever (legacy Monitor mode)
+#   alfred-wake check            one pass, DRY RUN (never writes cursors),
+#                                diagnostics on stderr, events on stdout
+#   alfred-wake install          symlink this script into ~/.local/bin
+#   alfred-wake status           show config; exit 0 only while a live
+#                                wait/run process holds the pidfile AND the
+#                                Claude Code process that started it is alive
+#
+# Windows (Git Bash, MSYS, Cygwin): there is no flock or pgrep in Git for
+# Windows. On a Windows shell without flock there is no lock (LOCK_MODE=none):
+# the pidfile is the only arbiter, and each loop top yields to a newer live
+# wait (yield_to_newer). Two waits that start at nearly the same moment can
+# both run until the older one reaches its next loop top, so one duplicate
+# WAKE line is possible, never a lost one. A shell stand-in answers `pgrep -P`
+# from /proc when pgrep is missing. No owner file is written (the native
+# Claude Code parent is not visible in /proc), so `status` checks the pid only.
+# Linux keeps flock and pgrep exactly as before.
+#
+# Single instance: `wait` and `run` share one pidfile per state dir (one state
+# dir per identity on a devbox). A new instance SIGTERMs the previous one,
+# waits up to ALFRED_WAKE_STOP_GRACE seconds, then SIGKILLs it.
+#
+# Owner: `wait`/`run` records which Claude Code process started it, in
+# $STATE_DIR/alfred-wake.owner (one line, written in take_over before the
+# pidfile). The owner is the nearest ancestor of the wait whose command name
+# (/proc/<pid>/comm, 15 characters) equals ALFRED_WAKE_OWNER_COMM (default
+# `claude`; set it only when the harness binary has another name). The file
+# holds `<pid> <starttime>` (start time = field 22 of /proc/<pid>/stat), or
+# `unknown`. The parent pid (field 4) and the start time are read after the
+# LAST `)` of the stat line, because the command name may hold spaces and
+# parentheses. `status` (and `status --json`) report a wait as running only
+# while its owner is alive with the same start time (a zombie is dead; a reused
+# pid has another start time). A wait whose owner crashed, and which survived as
+# an orphan, is therefore "not running": the hooks read that exit code and the
+# revived session launches its own wait, which takes over from the orphan.
+# No owner found: with CLAUDE_CODE_SESSION_ID unset (a human shell) no file is
+# written and `status` is unchanged; with it set the file holds `unknown` and
+# `status` fails closed. A wait with no owner file (older version) counts as
+# running. The session id is NOT used: `claude -c` reuses it.
+#
+# Security invariants:
+#   - No token, header value, private key or message body is ever printed,
+#     logged, or placed in argv. curl auth goes through a `-K` config file in a
+#     private (umask 077) temp dir, removed on exit.
+#   - No `set -x` anywhere.
+#   - The Buzz private key is NEVER read by this script. Buzz is reached through
+#     the pod-local buzz-mcp sidecar, which is the only holder of the key and
+#     does NIP-42 AUTH against the relay on our behalf.
+#   - Read-only against both services: no mark-as-read, no sends, no posts.
+#
+# Deps: bash, curl, jq.
+
+set -uo pipefail
+umask 077
+
+VERSION="1.10.0"
+
+# ---------------------------------------------------------------------------
+# State directory
+#
+# Cursors MUST survive a pod restart, or a restarted lead replays its whole
+# history as "new". In a devbox pod only the workspace PVC is guaranteed
+# persistent ($HOME comes from the image on scaffolded-project devboxes), so
+# /workspace wins over $HOME whenever it is writable.
+# ---------------------------------------------------------------------------
+default_state_dir() {
+  if [ -d /workspace ] && [ -w /workspace ]; then
+    echo "/workspace/.alfred-wake"
+  else
+    echo "${XDG_STATE_HOME:-$HOME/.local/state}/alfred-wake"
+  fi
+}
+
+STATE_DIR="${ALFRED_WAKE_STATE_DIR:-$(default_state_dir)}"
+LOG_FILE="$STATE_DIR/alfred-wake.log"
+LOG_MAX_BYTES=1048576
+ARMED_MARKER="$STATE_DIR/armed"
+INIT_MARKER="$STATE_DIR/.initialized"
+AM_STATE_FILE="$STATE_DIR/am_state.json"
+AM_LEGACY_FILE="$STATE_DIR/am_legacy_until"
+FAILURES_FILE="$STATE_DIR/failures.json"
+BUZZ_IDENTITY_FILE="$STATE_DIR/buzz_identity.json"
+PID_FILE="$STATE_DIR/alfred-wake.pid"
+# Epoch of the last `wait` that exited with news (any WAKE line, WAKE-ERROR
+# included: the lead has to act on that too); `status --json` reports the lead
+# as "handling" (still armed) for HANDLING_GRACE seconds after it, until the
+# next wait starts.
+LAST_WAKE_FILE="$STATE_DIR/last_wake_exit"
+HANDLING_GRACE="${ALFRED_WAKE_HANDLING_GRACE:-600}"
+[[ "$HANDLING_GRACE" =~ ^[0-9]+$ ]] || HANDLING_GRACE=600
+LOCK_FILE="$STATE_DIR/alfred-wake.lock"
+WINDOWS_SHELL=false   # set in cmd_run: MINGW*/MSYS*/CYGWIN* uname
+LOCK_MODE=flock       # `none` on a Windows shell without flock
+# The Claude Code process that owns the running wait: "<pid> <starttime>" or
+# "unknown" (see the Owner paragraph in the header).
+OWNER_FILE="$STATE_DIR/alfred-wake.owner"
+OWNER_COMM="${ALFRED_WAKE_OWNER_COMM:-claude}"
+
+# ---------------------------------------------------------------------------
+# agent-messaging configuration
+# ---------------------------------------------------------------------------
+AM_URL="${AGENT_MESSAGING_URL:-https://agent-messaging.screenfields.net/mcp/}"
+AM_MCP_JSON="${ALFRED_WAKE_MCP_JSON:-}"
+AM_SERVER_NAME="${ALFRED_WAKE_AM_SERVER:-agent-messaging}"
+AM_PROTOCOL_VERSION="${ALFRED_WAKE_MCP_PROTOCOL:-2025-06-18}"
+AM_INTERVAL="${ALFRED_WAKE_AM_INTERVAL:-60}"
+AM_MAX_INTERVAL="${ALFRED_WAKE_AM_MAX_INTERVAL:-600}"
+
+# ---------------------------------------------------------------------------
+# Buzz configuration (OPTIONAL — no Buzz config means agent-messaging only)
+#
+# Buzz is reached over the pod-local buzz-mcp sidecar (Streamable HTTP MCP).
+# The devbox image ships no `buzz` CLI and never holds the Nostr key.
+# ---------------------------------------------------------------------------
+BUZZ_MODE="${ALFRED_WAKE_BUZZ:-auto}"                 # auto | on | off
+BUZZ_MCP_URL="${ALFRED_WAKE_BUZZ_MCP_URL:-http://127.0.0.1:8765/mcp}"
+BUZZ_CHANNELS_CFG="${ALFRED_WAKE_BUZZ_CHANNELS:-}"    # "<id>[:<label>],..." — empty = all visible
+BUZZ_NAMES_CFG="${ALFRED_WAKE_BUZZ_NAMES:-}"          # "<pubkey>:<name>,..." — optional prettifier
+BUZZ_CHANNEL_REFRESH_S="${ALFRED_WAKE_BUZZ_CHANNEL_REFRESH:-900}"
+
+# ---------------------------------------------------------------------------
+# Generic tuning
+# ---------------------------------------------------------------------------
+DEFAULT_INTERVAL="${ALFRED_WAKE_INTERVAL:-20}"
+HTTP_TIMEOUT="${ALFRED_WAKE_HTTP_TIMEOUT:-25}"
+FETCH_LIMIT=50
+FAIL_THRESHOLD="${ALFRED_WAKE_FAIL_THRESHOLD:-5}"
+ERROR_REPEAT_S=3600
+STOP_GRACE_S="${ALFRED_WAKE_STOP_GRACE:-5}"
+TZ_LOCAL="${ALFRED_WAKE_TZ:-Europe/Amsterdam}"
+
+# Runtime flags
+PERSIST=true          # `check` flips this to false — a dry run must not eat news
+WAIT_MODE=false       # `wait` flips this: exit after the first pass with news
+CHILD_PID=""          # the pass or sleep currently being waited on
+FORKING=false         # true between forking a child and recording its pid
+PENDING_SIG=""        # signal that arrived while FORKING; acted on once CHILD_PID is set
+RUN_TMP=""            # private per-process temp dir (holds curl auth configs)
+BUZZ_ENABLED=false
+BUZZ_SKIP_LOGGED=false
+BUZZ_SELF_PUBKEY=""
+BUZZ_CHANNELS_RESOLVED=""   # newline-separated "<id><TAB><label>"
+BUZZ_CHANNELS_AT=0
+AM_NEXT_AT=0
+AM_BACKOFF="$AM_INTERVAL"
+MCP_HTTP_CODE=0
+MCP_BODY=""
+AM_CFG=""
+AM_RESULT=""
+AM_ERR=""
+
+TAB=$'\t'
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+now_epoch() { date +%s; }
+now_local_hm() { TZ="$TZ_LOCAL" date '+%H:%M %Z'; }
+now_local_ts() { TZ="$TZ_LOCAL" date '+%Y-%m-%d %H:%M:%S %Z'; }
+
+# Diagnostics go to stderr and only in dry-run mode: stdout is the wake channel
+# and must carry nothing but WAKE lines.
+diag() {
+  if [ "$PERSIST" = "false" ]; then
+    printf 'alfred-wake: %s\n' "$1" >&2
+  fi
+  return 0
+}
+
+rotate_log_if_needed() {
+  [ -f "$LOG_FILE" ] || return 0
+  local size
+  size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+  if [ "$size" -ge "$LOG_MAX_BYTES" ]; then
+    mv -f "$LOG_FILE" "${LOG_FILE}.1" 2>/dev/null || true
+  fi
+}
+
+log_line() {
+  [ -d "$STATE_DIR" ] || return 0
+  rotate_log_if_needed
+  printf '%s %s\n' "$(now_local_ts)" "$1" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+read_json_state() {
+  local file="$1" default="$2"
+  if [ -f "$file" ]; then
+    jq -e '.' "$file" 2>/dev/null || echo "$default"
+  else
+    echo "$default"
+  fi
+}
+
+write_json_state() {
+  local file="$1" content="$2"
+  [ "$PERSIST" = "true" ] || return 0
+  local tmp
+  tmp=$(mktemp "${file}.XXXXXX") || return 0
+  printf '%s' "$content" > "$tmp"
+  mv -f "$tmp" "$file"
+}
+
+# Escape a value for use inside a curl -K `header = "..."` directive.
+curl_cfg_escape() {
+  local v="$1"
+  v="${v//\\/\\\\}"
+  v="${v//\"/\\\"}"
+  printf '%s' "$v"
+}
+
+# Expand ${VAR} and ${VAR:-default} placeholders from the environment. Needed
+# because the plugin's own .mcp.json carries placeholders, not literals.
+expand_placeholders() {
+  local rest="$1" out="" pre var def tail val
+  while [[ "$rest" =~ ^([^$]*)\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}(.*)$ ]]; do
+    pre="${BASH_REMATCH[1]}"
+    var="${BASH_REMATCH[2]}"
+    def="${BASH_REMATCH[4]}"
+    tail="${BASH_REMATCH[5]}"
+    val="${!var-}"
+    if [ -z "$val" ]; then val="$def"; fi
+    out+="$pre$val"
+    rest="$tail"
+  done
+  printf '%s' "$out$rest"
+}
+
+# ---------------------------------------------------------------------------
+# Failure / recovery signalling, per source
+# ---------------------------------------------------------------------------
+
+record_result() {
+  local source="$1" ok="$2" reason="${3:-}"
+  local state now consecutive reported last_ts elapsed
+  state=$(read_json_state "$FAILURES_FILE" '{}')
+  consecutive=$(printf '%s' "$state" | jq -r --arg s "$source" '.[$s].consecutive // 0')
+  reported=$(printf '%s' "$state" | jq -r --arg s "$source" '.[$s].reported // false')
+  last_ts=$(printf '%s' "$state" | jq -r --arg s "$source" '.[$s].last_error_ts // 0')
+  now=$(now_epoch)
+
+  if [ "$ok" = "true" ]; then
+    if [ "$reported" = "true" ]; then
+      echo "WAKE-RECOVERED $source"
+    fi
+    state=$(printf '%s' "$state" | jq --arg s "$source" \
+      '.[$s] = {"consecutive":0,"reported":false,"last_error_ts":0}')
+  else
+    diag "$source failed: $reason"
+    consecutive=$((consecutive + 1))
+    if [ "$consecutive" -ge "$FAIL_THRESHOLD" ]; then
+      elapsed=$((now - last_ts))
+      if [ "$reported" != "true" ] || [ "$elapsed" -ge "$ERROR_REPEAT_S" ]; then
+        echo "WAKE-ERROR $source: $reason"
+        state=$(printf '%s' "$state" | jq --arg s "$source" --argjson c "$consecutive" --argjson t "$now" \
+          '.[$s] = {"consecutive":$c,"reported":true,"last_error_ts":$t}')
+      else
+        state=$(printf '%s' "$state" | jq --arg s "$source" --argjson c "$consecutive" \
+          '.[$s].consecutive = $c')
+      fi
+    else
+      state=$(printf '%s' "$state" | jq --arg s "$source" --argjson c "$consecutive" \
+        '.[$s] = {"consecutive":$c,"reported":false,"last_error_ts":0}')
+    fi
+  fi
+  write_json_state "$FAILURES_FILE" "$state"
+}
+
+# ---------------------------------------------------------------------------
+# Minimal MCP (Streamable HTTP JSON-RPC) client
+# ---------------------------------------------------------------------------
+
+# mcp_post <url> <curl-config-file> <json-body> [header-dump-file]
+# Sets MCP_HTTP_CODE and MCP_BODY. Never echoes the config file.
+mcp_post() {
+  local url="$1" cfg="$2" body="$3" hdr_out="${4:-}"
+  local resp
+  if [ -n "$hdr_out" ]; then
+    resp=$(curl -K "$cfg" -D "$hdr_out" -w '\n%{http_code}' -X POST "$url" -d "$body" 2>/dev/null)
+  else
+    resp=$(curl -K "$cfg" -w '\n%{http_code}' -X POST "$url" -d "$body" 2>/dev/null)
+  fi
+  MCP_HTTP_CODE=$(printf '%s' "$resp" | tail -1)
+  MCP_BODY=$(printf '%s' "$resp" | sed '$d')
+  if [ -z "$MCP_HTTP_CODE" ]; then MCP_HTTP_CODE=0; fi
+}
+
+# Some servers answer JSON-RPC over SSE ("data: {...}"). Normalise to one object.
+mcp_json() {
+  local raw="$1"
+  if printf '%s' "$raw" | grep -q '^data: '; then
+    printf '%s' "$raw" | grep '^data: ' | sed 's/^data: //' | tail -1
+  else
+    printf '%s' "$raw"
+  fi
+}
+
+# Open an MCP session; appends Mcp-Session-Id to <cfg> when the server issues
+# one (agent-messaging currently does not, and works fine without).
+mcp_initialize() {
+  local url="$1" cfg="$2" workdir="$3" client="$4"
+  local body hdr session_id
+  body=$(jq -cn --arg pv "$AM_PROTOCOL_VERSION" --arg c "$client" --arg v "$VERSION" \
+    '{jsonrpc:"2.0",method:"initialize",id:1,
+      params:{protocolVersion:$pv,capabilities:{},clientInfo:{name:$c,version:$v}}}')
+  hdr="$workdir/init_headers.txt"
+  mcp_post "$url" "$cfg" "$body" "$hdr"
+  if [ "$MCP_HTTP_CODE" != "200" ]; then return 1; fi
+
+  session_id=$(grep -i '^mcp-session-id:' "$hdr" 2>/dev/null | head -1 | cut -d: -f2- | tr -d ' \r\n')
+  if [ -n "$session_id" ]; then
+    printf 'header = "Mcp-Session-Id: %s"\n' "$(curl_cfg_escape "$session_id")" >> "$cfg"
+  fi
+  mcp_post "$url" "$cfg" '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  return 0
+}
+
+# mcp_tool_call <url> <cfg> <tool-name> <arguments-json>
+# On success MCP_BODY holds the normalised JSON-RPC response object.
+mcp_tool_call() {
+  local url="$1" cfg="$2" tool="$3" args="$4"
+  local body
+  body=$(jq -cn --arg n "$tool" --argjson a "$args" \
+    '{jsonrpc:"2.0",method:"tools/call",id:2,params:{name:$n,arguments:$a}}')
+  mcp_post "$url" "$cfg" "$body"
+  if [ "$MCP_HTTP_CODE" != "200" ]; then return 1; fi
+  MCP_BODY=$(mcp_json "$MCP_BODY")
+  if printf '%s' "$MCP_BODY" | jq -e '.error' >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+# Normalise a tools/call result into a JSON array of items, covering every shape
+# a FastMCP server can emit: structuredContent.result (list return),
+# structuredContent (object return), or content[].text carrying JSON.
+mcp_items() {
+  printf '%s' "$1" | jq -c '
+    (if (.result.structuredContent? | type) == "object" and (.result.structuredContent.result? != null)
+       then .result.structuredContent.result
+     elif (.result.structuredContent? | type) == "array" then .result.structuredContent
+     elif (.result.structuredContent? | type) == "object" then .result.structuredContent
+     elif (.result.content? != null)
+       then [ .result.content[] | select(.type == "text") | .text | (fromjson? // empty) ]
+     else [] end)
+    | (if type == "array" then . else [.] end)
+    | [ .[] | if type == "array" then .[] else . end ]
+  ' 2>/dev/null
+}
+
+# Build a private curl config dir + file. Echoes the workdir path.
+new_curl_workdir() {
+  local workdir
+  workdir=$(umask 077 && mktemp -d) || return 1
+  {
+    echo 'header = "Content-Type: application/json"'
+    echo 'header = "Accept: application/json, text/event-stream"'
+    echo 'silent'
+    echo 'show-error'
+    printf 'max-time = %s\n' "$HTTP_TIMEOUT"
+  } > "$workdir/curl.cfg"
+  printf '%s' "$workdir"
+}
+
+# ---------------------------------------------------------------------------
+# agent-messaging
+# ---------------------------------------------------------------------------
+
+am_auth_mode() {
+  if [ -n "$AM_MCP_JSON" ] && [ -f "$AM_MCP_JSON" ]; then
+    echo "$AM_MCP_JSON"
+  elif [ -n "${AGENT_MESSAGING_TOKEN:-}" ]; then
+    echo "env AGENT_MESSAGING_TOKEN"
+  else
+    echo "NONE"
+  fi
+}
+
+# Append the agent-messaging auth headers to <cfg>. Returns non-zero when no
+# usable credential is configured. Values go straight into the config file —
+# never echoed, never in argv.
+am_write_auth_headers() {
+  local cfg="$1"
+  local token="${AGENT_MESSAGING_TOKEN:-}" agent="${AGENT_ID:-}"
+  local cf_id="${CF_ACCESS_CLIENT_ID:-}" cf_secret="${CF_ACCESS_CLIENT_SECRET:-}"
+
+  # A .mcp.json (hub-style, or an explicit ALFRED_WAKE_MCP_JSON) wins when it
+  # yields at least one usable header. Its values may be ${VAR} placeholders.
+  if [ -n "$AM_MCP_JSON" ] && [ -f "$AM_MCP_JSON" ]; then
+    local url_raw entries key value found=false
+    url_raw=$(jq -r --arg s "$AM_SERVER_NAME" '.mcpServers[$s].url // empty' "$AM_MCP_JSON" 2>/dev/null)
+    if [ -n "$url_raw" ]; then AM_URL=$(expand_placeholders "$url_raw"); fi
+    entries=$(jq -r --arg s "$AM_SERVER_NAME" \
+      '.mcpServers[$s].headers // {} | to_entries[] | .key + "	" + .value' "$AM_MCP_JSON" 2>/dev/null)
+    while IFS="$TAB" read -r key value; do
+      if [ -z "$key" ]; then continue; fi
+      value=$(expand_placeholders "$value")
+      # Drop headers whose placeholder resolved to nothing.
+      case "$value" in ''|'Bearer'|'Bearer ') continue ;; esac
+      printf 'header = "%s: %s"\n' "$(curl_cfg_escape "$key")" "$(curl_cfg_escape "$value")" >> "$cfg"
+      found=true
+    done <<< "$entries"
+    if [ "$found" = "true" ]; then return 0; fi
+  fi
+
+  # Fallback: plain env vars, which is how every devbox pod is wired.
+  if [ -z "$token" ]; then return 1; fi
+  printf 'header = "Authorization: Bearer %s"\n' "$(curl_cfg_escape "$token")" >> "$cfg"
+  if [ -n "$agent" ]; then
+    printf 'header = "X-Agent-ID: %s"\n' "$(curl_cfg_escape "$agent")" >> "$cfg"
+  fi
+  if [ -n "$cf_id" ]; then
+    printf 'header = "CF-Access-Client-Id: %s"\n' "$(curl_cfg_escape "$cf_id")" >> "$cfg"
+  fi
+  if [ -n "$cf_secret" ]; then
+    printf 'header = "CF-Access-Client-Secret: %s"\n' "$(curl_cfg_escape "$cf_secret")" >> "$cfg"
+  fi
+  return 0
+}
+
+# One get_messages call through the open MCP session. Sets AM_RESULT to the
+# structured payload. Returns 1 on transport/shape errors (AM_ERR says which)
+# and 2 when the server rejects an argument it does not know yet (an
+# agent-messaging deploy without the cursor API).
+am_call() {
+  local args="$1" structured
+  AM_RESULT=""
+  if ! mcp_tool_call "$AM_URL" "$AM_CFG" "get_messages" "$args"; then
+    AM_ERR="get_messages http $MCP_HTTP_CODE"
+    return 1
+  fi
+  if printf '%s' "$MCP_BODY" | jq -e '.result.isError == true' >/dev/null 2>&1; then
+    if printf '%s' "$MCP_BODY" | grep -qiE 'unexpected.keyword'; then return 2; fi
+    AM_ERR="get_messages returned an error"
+    return 1
+  fi
+  structured=$(printf '%s' "$MCP_BODY" | jq -c '.result.structuredContent // empty' 2>/dev/null)
+  if [ -z "$structured" ] || [ "$structured" = "null" ]; then
+    structured=$(mcp_items "$MCP_BODY" | jq -c '.[0] // empty' 2>/dev/null)
+  fi
+  if [ -z "$structured" ] || ! printf '%s' "$structured" | jq -e '.messages? != null' >/dev/null 2>&1; then
+    AM_ERR="unrecognised get_messages response shape"
+    return 1
+  fi
+  AM_RESULT="$structured"
+  return 0
+}
+
+# Senders of up to 5 unread messages, for a pending line.
+am_pending_senders() {
+  if am_call '{"unread_only":true,"limit":5,"include_body":false}'; then
+    printf '%s' "$AM_RESULT" | jq -r '[.messages[].from_agent] | unique | join(",")'
+  fi
+}
+
+# Cursor pass (alfred-platform#849): ask the server for exactly the messages
+# after our stored position, so a backlog of any size can neither replay nor
+# hide a wake. Contract agreed with the agent-messaging lead:
+#   get_messages(since, limit, include_body:false)
+#     -> {messages (ascending), total_unread, next_cursor, has_more, cursor_reset}
+#   limit:0 without since seeds next_cursor at the high-water mark.
+# Returns like am_call (2 = server has no cursor API yet).
+am_cursor_pass() {
+  local state cursor total next reset args n from="" new_count=0 pages=0 rc
+  state=$(read_json_state "$AM_STATE_FILE" '{}')
+  cursor=$(printf '%s' "$state" | jq -r '.cursor // empty')
+
+  if [ -z "$cursor" ]; then
+    am_call '{"unread_only":true,"limit":0,"include_body":false}' || return $?
+    next=$(printf '%s' "$AM_RESULT" | jq -r '.next_cursor // empty')
+    [ -n "$next" ] || return 2
+    total=$(printf '%s' "$AM_RESULT" | jq -r '.total_unread // 0')
+    write_json_state "$AM_STATE_FILE" "$(jq -cn --arg c "$next" '{cursor:$c}')"
+    diag "agent-messaging: seeded cursor (unread=$total)"
+    # A `wait` that seeds over a non-empty inbox reports it once: a lead that
+    # switched to the bridge mid-session, or lost its state, has not
+    # necessarily called get_messages. Count and senders only, never history.
+    if [ "$WAIT_MODE" = "true" ] && [ "$total" -gt 0 ]; then
+      echo "WAKE am unread=$total from=$(am_pending_senders) pending-at-start"
+    fi
+    return 0
+  fi
+
+  while :; do
+    args=$(jq -cn --arg c "$cursor" '{unread_only:true,limit:50,include_body:false,since:$c}')
+    am_call "$args"
+    rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    reset=$(printf '%s' "$AM_RESULT" | jq -r '.cursor_reset // false')
+    next=$(printf '%s' "$AM_RESULT" | jq -r '.next_cursor // empty')
+    total=$(printf '%s' "$AM_RESULT" | jq -r '.total_unread // 0')
+    [ -n "$next" ] || { AM_ERR="get_messages returned no next_cursor"; return 1; }
+    if [ "$reset" = "true" ]; then
+      # The server no longer knows our position: never replay, reseat and
+      # report what is pending.
+      write_json_state "$AM_STATE_FILE" "$(jq -cn --arg c "$next" '{cursor:$c}')"
+      if [ "$total" -gt 0 ]; then echo "WAKE am unread=$total from=$(am_pending_senders) cursor-reset"; fi
+      return 0
+    fi
+    n=$(printf '%s' "$AM_RESULT" | jq '.messages | length')
+    new_count=$((new_count + n))
+    from="$from $(printf '%s' "$AM_RESULT" | jq -r '[.messages[].from_agent] | join(" ")')"
+    cursor="$next"
+    pages=$((pages + 1))
+    if [ "$(printf '%s' "$AM_RESULT" | jq -r '.has_more // false')" != "true" ] || [ "$pages" -ge 20 ]; then break; fi
+  done
+
+  write_json_state "$AM_STATE_FILE" "$(jq -cn --arg c "$cursor" '{cursor:$c}')"
+  if [ "$new_count" -gt 0 ]; then
+    from=$(printf '%s' "$from" | tr ' ' '\n' | grep -v '^$' | sort -u | paste -sd, -)
+    echo "WAKE am unread=$total from=$from"
+  else
+    diag "agent-messaging: nothing new (unread=$total)"
+  fi
+  return 0
+}
+
+# Legacy pass for agent-messaging deploys without the cursor API: diff the
+# ids of a 5-message window. Misses or replays wakes once more than 5 are
+# unread (alfred-platform#849); kept only as a fallback.
+am_window_pass() {
+  local state current_ids total_unread prev_ids new_ids new_count from_list
+  am_call '{"unread_only":true,"limit":5,"preview_chars":0}' || return $?
+  total_unread=$(printf '%s' "$AM_RESULT" | jq -r '.total_unread // (.messages | length)')
+  current_ids=$(printf '%s' "$AM_RESULT" | jq -c '[.messages[]?.id] | sort')
+  state=$(read_json_state "$AM_STATE_FILE" '{}')
+
+  if ! printf '%s' "$state" | jq -e 'has("unread_ids")' >/dev/null 2>&1; then
+    write_json_state "$AM_STATE_FILE" "{\"unread_ids\": $current_ids}"
+    diag "agent-messaging: seeded window (unread=$total_unread)"
+    if [ "$WAIT_MODE" = "true" ] && [ "$total_unread" -gt 0 ]; then
+      echo "WAKE am unread=$total_unread from=$(printf '%s' "$AM_RESULT" | jq -r '[.messages[].from_agent] | unique | join(",")') pending-at-start"
+    fi
+    return 0
+  fi
+
+  prev_ids=$(printf '%s' "$state" | jq -c '.unread_ids // []')
+  new_ids=$(jq -cn --argjson cur "$current_ids" --argjson prev "$prev_ids" '$cur - $prev')
+  new_count=$(printf '%s' "$new_ids" | jq 'length')
+  if [ "$new_count" -gt 0 ]; then
+    from_list=$(printf '%s' "$AM_RESULT" | jq -r --argjson newids "$new_ids" \
+      '[.messages[] | select(.id as $i | $newids | index($i)) | .from_agent] | unique | join(",")')
+    echo "WAKE am unread=$total_unread from=$from_list"
+  else
+    diag "agent-messaging: nothing new (unread=$total_unread)"
+  fi
+  write_json_state "$AM_STATE_FILE" "{\"unread_ids\": $current_ids}"
+  return 0
+}
+
+check_agent_messaging() {
+  local workdir rc now legacy_until
+  workdir=$(new_curl_workdir) || { record_result "agent-messaging" false "cannot create temp dir"; return; }
+  AM_CFG="$workdir/curl.cfg"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$workdir'" RETURN
+
+  if ! am_write_auth_headers "$AM_CFG"; then
+    record_result "agent-messaging" false "no credential: set AGENT_MESSAGING_TOKEN (or ALFRED_WAKE_MCP_JSON)"
+    return
+  fi
+
+  if ! mcp_initialize "$AM_URL" "$AM_CFG" "$workdir" "alfred-wake"; then
+    record_result "agent-messaging" false "initialize http $MCP_HTTP_CODE"
+    return
+  fi
+
+  # A server without the cursor API is re-tried at most hourly, so an old
+  # deploy costs one extra call per hour, not one per pass.
+  now=$(now_epoch)
+  legacy_until=$(cat "$AM_LEGACY_FILE" 2>/dev/null || echo 0)
+  [[ "$legacy_until" =~ ^[0-9]+$ ]] || legacy_until=0
+  rc=2
+  if [ "$now" -ge "$legacy_until" ]; then
+    am_cursor_pass
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      diag "agent-messaging: no cursor API on this server - using the 5-message window"
+      [ "$PERSIST" = "true" ] && printf '%s' $((now + 3600)) > "$AM_LEGACY_FILE"
+    elif [ "$rc" -eq 0 ]; then
+      rm -f "$AM_LEGACY_FILE"
+    fi
+  fi
+  if [ "$rc" -eq 2 ]; then
+    am_window_pass
+    rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    record_result "agent-messaging" true
+  else
+    record_result "agent-messaging" false "${AM_ERR:-get_messages failed}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Buzz (optional, via the pod-local buzz-mcp sidecar)
+# ---------------------------------------------------------------------------
+
+buzz_channel_state_file() {
+  echo "$STATE_DIR/buzz_channel_$1.json"
+}
+
+# The sidecar exposes no display-name lookup, so a pubkey prefix is the default
+# label; ALFRED_WAKE_BUZZ_NAMES lets an operator make wake lines readable.
+buzz_pretty_name() {
+  local pubkey="$1" entry id name
+  if [ -n "$BUZZ_NAMES_CFG" ]; then
+    local IFS=','
+    for entry in $BUZZ_NAMES_CFG; do
+      id="${entry%%:*}"
+      name="${entry#*:}"
+      if [ "$id" = "$pubkey" ] && [ -n "$name" ] && [ "$name" != "$entry" ]; then
+        printf '%s' "$name"
+        return 0
+      fi
+    done
+  fi
+  printf '%s' "${pubkey:0:8}"
+}
+
+# One-shot probe: is a buzz-mcp sidecar answering, and does it have an identity?
+buzz_probe() {
+  if [ "$BUZZ_MODE" = "off" ]; then
+    diag "buzz: disabled (ALFRED_WAKE_BUZZ=off)"
+    return 1
+  fi
+
+  local workdir cfg
+  workdir=$(new_curl_workdir) || return 1
+  cfg="$workdir/curl.cfg"
+
+  if ! mcp_initialize "$BUZZ_MCP_URL" "$cfg" "$workdir" "alfred-wake"; then
+    rm -rf "$workdir"
+    if [ "$BUZZ_MODE" = "on" ]; then
+      record_result "buzz" false "sidecar unreachable at $BUZZ_MCP_URL (http $MCP_HTTP_CODE)"
+    elif [ "$BUZZ_SKIP_LOGGED" = "false" ]; then
+      # Buzz is OPTIONAL. A lead with no Buzz identity is the normal case:
+      # log once, never emit WAKE-ERROR for it.
+      log_line "buzz: no sidecar at $BUZZ_MCP_URL — watching agent-messaging only"
+      diag "buzz: no sidecar at $BUZZ_MCP_URL — agent-messaging only"
+      BUZZ_SKIP_LOGGED=true
+    fi
+    return 1
+  fi
+
+  if mcp_tool_call "$BUZZ_MCP_URL" "$cfg" "buzz_whoami" '{}'; then
+    BUZZ_SELF_PUBKEY=$(mcp_items "$MCP_BODY" | jq -r '.[0].pubkey // empty')
+  fi
+  rm -rf "$workdir"
+
+  if [ -z "$BUZZ_SELF_PUBKEY" ]; then
+    if [ "$BUZZ_SKIP_LOGGED" = "false" ]; then
+      log_line "buzz: sidecar reachable but no identity — watching agent-messaging only"
+      diag "buzz: sidecar reachable but buzz_whoami returned no pubkey"
+      BUZZ_SKIP_LOGGED=true
+    fi
+    return 1
+  fi
+
+  write_json_state "$BUZZ_IDENTITY_FILE" "$(jq -n --arg p "$BUZZ_SELF_PUBKEY" '{pubkey:$p}')"
+  log_line "buzz: identity ${BUZZ_SELF_PUBKEY:0:8} via $BUZZ_MCP_URL"
+  diag "buzz: identity ${BUZZ_SELF_PUBKEY:0:8} via $BUZZ_MCP_URL"
+  return 0
+}
+
+# Resolve the channel list: explicit config wins; otherwise every channel the
+# identity can see (refreshed periodically so newly-joined channels appear).
+buzz_resolve_channels() {
+  local cfg="$1"
+  local now entry id label listing
+  now=$(now_epoch)
+
+  if [ -n "$BUZZ_CHANNELS_CFG" ]; then
+    if [ -n "$BUZZ_CHANNELS_RESOLVED" ]; then return 0; fi
+    local IFS=','
+    for entry in $BUZZ_CHANNELS_CFG; do
+      if [ -z "$entry" ]; then continue; fi
+      id="${entry%%:*}"
+      if [ "$entry" != "$id" ]; then label="${entry#*:}"; else label="${id:0:8}"; fi
+      BUZZ_CHANNELS_RESOLVED="${BUZZ_CHANNELS_RESOLVED}${id}${TAB}${label}"$'\n'
+    done
+    return 0
+  fi
+
+  if [ -n "$BUZZ_CHANNELS_RESOLVED" ] \
+     && [ $((now - BUZZ_CHANNELS_AT)) -lt "$BUZZ_CHANNEL_REFRESH_S" ]; then
+    return 0
+  fi
+
+  if ! mcp_tool_call "$BUZZ_MCP_URL" "$cfg" "buzz_channels" '{}'; then
+    return 1
+  fi
+  listing=$(mcp_items "$MCP_BODY" | jq -r '.[] | select(.channel_id != null)
+    | .channel_id + "	" + ((.name // (.channel_id[0:8])) | tostring)')
+  if [ -z "$listing" ]; then return 1; fi
+  BUZZ_CHANNELS_RESOLVED="$listing"$'\n'
+  BUZZ_CHANNELS_AT="$now"
+  return 0
+}
+
+check_buzz_channel() {
+  local cfg="$1" channel_id="$2" label="$3"
+  local source="buzz-$label"
+  local state_file state prev_ts seeded args raw items max_ts others new_count names pk
+
+  state_file=$(buzz_channel_state_file "$channel_id")
+  state=$(read_json_state "$state_file" '{"last_created_at":0,"seeded":false}')
+  prev_ts=$(printf '%s' "$state" | jq -r '.last_created_at // 0')
+  seeded=$(printf '%s' "$state" | jq -r '.seeded // false')
+
+  args=$(jq -cn --arg c "$channel_id" --argjson l "$FETCH_LIMIT" --argjson s "$prev_ts" \
+    '{channel:$c,limit:$l,since:$s}')
+  if ! mcp_tool_call "$BUZZ_MCP_URL" "$cfg" "buzz_read" "$args"; then
+    record_result "$source" false "buzz_read http $MCP_HTTP_CODE"
+    return
+  fi
+
+  # buzz_read must yield a JSON array. Unlike the shared mcp_items helper
+  # (fine with agent-messaging, where a bare object is a legitimate single
+  # result), an object or error payload here must NOT be coerced into a
+  # fake one-item list — that shape mismatch used to get diffed as if it
+  # were a real message and fire a WAKE on every single pass.
+  raw=$(printf '%s' "$MCP_BODY" | jq -c '
+    if (.result.structuredContent? | type) == "object" and (.result.structuredContent.result? != null)
+      then .result.structuredContent.result
+    elif (.result.structuredContent? | type) == "array" then .result.structuredContent
+    elif (.result.content? != null)
+      then [ .result.content[] | select(.type == "text") | .text | (fromjson? // empty) ]
+    else null end
+  ' 2>/dev/null)
+
+  if [ -z "$raw" ] || [ "$raw" = "null" ] || ! printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    diag "buzz $label: buzz_read returned a non-array payload — treating as nothing new"
+    record_result "$source" false "unrecognised buzz_read response shape"
+    return
+  fi
+
+  # Keep only well-formed items: an object with a numeric created_at and a
+  # string pubkey or id. Anything else never enters the diff, so max_ts only
+  # ever advances on items that actually look like messages.
+  items=$(printf '%s' "$raw" | jq -c '[ .[] | select(
+    (type == "object") and
+    ((.created_at? | type) == "number") and
+    (((.pubkey? | type) == "string") or ((.id? | type) == "string"))
+  ) ]')
+
+  # `since` is inclusive on the relay (created_at >= since), so the cursor
+  # advances one second past the newest event seen — otherwise every pass
+  # re-reports the last message forever.
+  max_ts=$(printf '%s' "$items" | jq '[.[].created_at // 0] + [0] | max')
+  if [ "$max_ts" -ge "$prev_ts" ] && [ "$max_ts" -gt 0 ]; then
+    max_ts=$((max_ts + 1))
+  else
+    max_ts="$prev_ts"
+  fi
+
+  if [ "$seeded" = "true" ]; then
+    others=$(printf '%s' "$items" | jq -c --arg me "$BUZZ_SELF_PUBKEY" '[.[] | select(.pubkey != $me)]')
+    new_count=$(printf '%s' "$others" | jq 'length')
+    if [ "$new_count" -gt 0 ]; then
+      names=""
+      while IFS= read -r pk; do
+        if [ -z "$pk" ]; then continue; fi
+        names="${names:+$names,}$(buzz_pretty_name "$pk")"
+      done < <(printf '%s' "$others" | jq -r '[.[].pubkey] | unique | .[]')
+      echo "WAKE buzz $label new=$new_count from=$names last=$(now_local_hm)"
+    else
+      diag "buzz $label: nothing new"
+    fi
+  else
+    diag "buzz $label: seeded at $max_ts"
+  fi
+
+  write_json_state "$state_file" "$(jq -n --argjson t "$max_ts" '{last_created_at:$t,seeded:true}')"
+  record_result "$source" true
+}
+
+check_buzz() {
+  if [ "$BUZZ_ENABLED" != "true" ]; then return 0; fi
+
+  local workdir cfg id label
+  workdir=$(new_curl_workdir) || { record_result "buzz" false "cannot create temp dir"; return; }
+  cfg="$workdir/curl.cfg"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$workdir'" RETURN
+
+  if ! mcp_initialize "$BUZZ_MCP_URL" "$cfg" "$workdir" "alfred-wake"; then
+    record_result "buzz" false "sidecar initialize http $MCP_HTTP_CODE"
+    return
+  fi
+
+  if ! buzz_resolve_channels "$cfg"; then
+    record_result "buzz" false "buzz_channels returned no channels"
+    return
+  fi
+  record_result "buzz" true
+
+  while IFS="$TAB" read -r id label; do
+    if [ -z "$id" ]; then continue; fi
+    check_buzz_channel "$cfg" "$id" "$label"
+  done <<< "$BUZZ_CHANNELS_RESOLVED"
+}
+
+# ---------------------------------------------------------------------------
+# Passes
+# ---------------------------------------------------------------------------
+
+ensure_state_dir() {
+  if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+    echo "alfred-wake: state dir $STATE_DIR is not writable" >&2
+    return 1
+  fi
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+  return 0
+}
+
+run_pass() {
+  local do_am="${1:-true}"
+  local first_run=false out n_events
+  if [ ! -f "$INIT_MARKER" ]; then first_run=true; fi
+
+  out=$(mktemp) || return 1
+  if [ "$PERSIST" = "true" ]; then
+    # Watch loop: stdout is the wake channel, stderr is noise — drop it.
+    {
+      if [ "$do_am" = "true" ]; then check_agent_messaging; fi
+      check_buzz
+    } > "$out" 2>/dev/null
+  else
+    # Dry run: keep stderr so `check` can explain what it saw.
+    {
+      if [ "$do_am" = "true" ]; then check_agent_messaging; fi
+      check_buzz
+    } > "$out"
+  fi
+
+  if [ "$first_run" = "true" ] && [ "$PERSIST" = "true" ] && [ "$WAIT_MODE" = "false" ]; then
+    # First ever run: cursors are seeded, history is never replayed into the
+    # session. One line so the lead knows the bridge came up.
+    echo "WAKE-INIT alfred-wake armed at $(now_local_hm) state=$STATE_DIR buzz=$BUZZ_ENABLED"
+    touch "$INIT_MARKER"
+  else
+    # In `wait` mode a first run prints no WAKE-INIT: a seed is not news, and
+    # that line would end the wait and spend a model turn on nothing. Mail
+    # already unread at seed time is the exception (`pending-at-start` line
+    # from check_agent_messaging), so a backlog never sits behind an armed
+    # bridge.
+    if [ "$first_run" = "true" ] && [ "$PERSIST" = "true" ]; then touch "$INIT_MARKER"; fi
+    cat "$out"
+  fi
+
+  n_events=$(wc -l < "$out" | tr -d ' ')
+  log_line "pass: am=$do_am events=$n_events first_run=$first_run"
+  rm -f "$out"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Process control: single instance, clean shutdown
+# ---------------------------------------------------------------------------
+
+# True when <pid> is a live `alfred-wake wait|run` process. A bare `kill -0`
+# is not enough: a zombie or a recycled PID would pass it, which is exactly how
+# the old marker-only `status` reported a dead bridge as armed.
+is_wake_pid() {
+  local pid="$1" cmdline
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) || return 1
+  [[ "$cmdline" =~ alfred-wake\ (wait|run)( |$) ]]
+}
+
+# stat_rest <pid> — set STAT_PPID, STAT_STATE and STAT_START from
+# /proc/<pid>/stat, read after the last ") " (the command name may hold spaces
+# and parentheses). rest word 1 is the state (field 3), word 2 the parent pid
+# (field 4), word 20 the start time (field 22). Returns 1 when unreadable.
+stat_rest() {
+  local stat rest
+  local -a w
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  [ -n "$stat" ] || return 1
+  rest=${stat##*) }
+  read -ra w <<< "$rest"
+  STAT_STATE=${w[0]:-}
+  STAT_PPID=${w[1]:-}
+  STAT_START=${w[19]:-}
+  [[ "$STAT_PPID" =~ ^[0-9]+$ ]] && [[ "$STAT_START" =~ ^[0-9]+$ ]]
+}
+
+# find_owner — print "<pid> <starttime>" of the nearest ancestor of this
+# process whose command name is OWNER_COMM; return 1 when there is none.
+find_owner() {
+  local want="${OWNER_COMM:0:15}" p="$$" depth=0 comm
+  while [ "$depth" -lt 64 ]; do
+    stat_rest "$p" || return 1
+    p="$STAT_PPID"
+    [ "$p" -gt 1 ] || return 1
+    comm=$(cat "/proc/$p/comm" 2>/dev/null) || return 1
+    if [ "$comm" = "$want" ]; then
+      stat_rest "$p" || return 1
+      printf '%s %s' "$p" "$STAT_START"
+      return 0
+    fi
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# owner_check — set OWNER_STATE: "ok" (owner alive, or no owner file at all),
+# "gone" (owner dead, a zombie, or its pid reused: other start time) or
+# "unknown" (the file says unknown, or holds anything else). OWNER_PID is the
+# recorded pid, for messages. Sets globals; no subshell, so the caller sees them.
+owner_check() {
+  local line pid start
+  OWNER_PID=""
+  OWNER_STATE=ok
+  [ -e "$OWNER_FILE" ] || return 0
+  line=$(cat "$OWNER_FILE" 2>/dev/null || true)
+  if ! [[ "$line" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then OWNER_STATE=unknown; return 0; fi
+  pid="${BASH_REMATCH[1]}" start="${BASH_REMATCH[2]}"
+  OWNER_PID="$pid"
+  if stat_rest "$pid" && [ "$STAT_START" = "$start" ] \
+     && [ "$STAT_STATE" != Z ] && [ "$STAT_STATE" != X ]; then
+    OWNER_STATE=ok
+  else
+    OWNER_STATE=gone
+  fi
+}
+
+# True on a Windows shell (Git Bash = MINGW*, MSYS2 = MSYS*, Cygwin = CYGWIN*).
+is_windows_shell() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# windows_pgrep -P <pid> — stand-in for `pgrep -P` where procps is missing:
+# print the pids whose parent is <pid>, from /proc/*/stat, read with builtins.
+# The parent pid is field 4, read after the last ") " (the command name may
+# hold spaces and parentheses). Returns 1 when there is no child, as pgrep does.
+windows_pgrep() {
+  local want="${2:-}" f stat rest found=1
+  [ "${1:-}" = "-P" ] || return 2
+  for f in /proc/[0-9]*/stat; do
+    stat=""
+    { read -r stat < "$f"; } 2>/dev/null
+    [ -n "$stat" ] || continue
+    rest=${stat##*) }
+    rest=${rest#* }
+    if [ "${rest%% *}" = "$want" ]; then
+      f=${f#/proc/}
+      echo "${f%%/*}"
+      found=0
+    fi
+  done
+  return "$found"
+}
+
+# yield_to_newer — only with LOCK_MODE=none. When the pidfile names another
+# live `alfred-wake wait|run`, a newer instance took over: stop quietly. Its
+# temp files (*.json.??????) are the winner's, so only RUN_TMP is removed.
+yield_to_newer() {
+  local p=""
+  { read -r p < "$PID_FILE"; } 2>/dev/null
+  [[ "$p" =~ ^[0-9]+$ ]] || return 0
+  [ "$p" != "$$" ] || return 0
+  is_wake_pid "$p" || return 0
+  if [ -n "$RUN_TMP" ]; then rm -rf "$RUN_TMP"; fi
+  log_line "yielded to $p"
+  if [ "$WAIT_MODE" = "true" ]; then echo "WAKE-STOPPED replaced by=$p"; fi
+  exit 0
+}
+
+# Kill <pid> and everything below it (curl, sleep, the pass subshell),
+# deepest first so nothing is re-parented to init and left running.
+kill_tree() {
+  local pid="$1" sig="${2:-TERM}" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_tree "$child" "$sig"
+  done
+  kill "-$sig" "$pid" 2>/dev/null || true
+}
+
+# Become the only wait/run for this state dir. Serialised with flock so two
+# instances started together cannot both win.
+take_over() {
+  local old waited=0 limit=$((STOP_GRACE_S * 10)) dir owner
+  if [ "$LOCK_MODE" = flock ]; then
+    exec 9>"$LOCK_FILE"
+    flock -w $((STOP_GRACE_S + 10)) 9 2>/dev/null || true
+  fi
+
+  old=$(cat "$PID_FILE" 2>/dev/null || true)
+  if [ "$old" != "$$" ] && is_wake_pid "$old"; then
+    # Tell the old instance why it is stopping, so it reports `replaced`
+    # (which the session ignores) rather than an unexplained signal.
+    printf '%s' "$$" > "$STATE_DIR/replaced_by.$old"
+    kill -TERM "$old" 2>/dev/null || true
+    while is_wake_pid "$old" && [ "$waited" -lt "$limit" ]; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if is_wake_pid "$old"; then
+      kill_tree "$old" KILL
+      log_line "previous instance $old ignored SIGTERM for ${STOP_GRACE_S}s — SIGKILLed"
+    else
+      log_line "previous instance $old stopped"
+    fi
+    rm -f "$STATE_DIR/replaced_by.$old"
+  fi
+
+  # Temp dirs of instances that died without cleaning up (SIGKILL, OOM).
+  for dir in "$STATE_DIR"/run.*; do
+    [ -d "$dir" ] || continue
+    is_wake_pid "${dir##*.}" || rm -rf "$dir"
+  done
+
+  # Owner first, pidfile second: a pidfile never exists without its owner.
+  if owner=$(find_owner); then
+    printf '%s\n' "$owner" > "$OWNER_FILE"
+  elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && [ "$WINDOWS_SHELL" != true ]; then
+    echo unknown > "$OWNER_FILE"
+  else
+    rm -f "$OWNER_FILE"
+  fi
+  printf '%s\n' "$$" > "$PID_FILE"
+  if [ "$LOCK_MODE" = flock ]; then
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
+  fi
+}
+
+release_pidfile() {
+  if [ "$(cat "$PID_FILE" 2>/dev/null)" = "$$" ]; then rm -f "$OWNER_FILE" "$PID_FILE"; fi
+}
+
+# Everything this process may have left on disk. Cursors need no flush: each
+# one is written with an atomic rename at the end of the pass that produced
+# it, so stopping mid-pass at worst re-reports that pass's news next time —
+# it never loses it.
+cleanup_files() {
+  if [ -n "$RUN_TMP" ]; then rm -rf "$RUN_TMP"; fi
+  rm -f "$STATE_DIR"/*.json.?????? 2>/dev/null || true
+  release_pidfile
+}
+
+on_signal() {
+  local sig="$1" reason marker="$STATE_DIR/replaced_by.$$"
+  # Between forking a child and recording its pid there is nothing to kill
+  # yet; exiting now would orphan it (CCW-139). Remember the signal and let
+  # run_child replay it as soon as CHILD_PID is known.
+  if [ "$FORKING" = "true" ]; then
+    PENDING_SIG="$sig"
+    return 0
+  fi
+  trap '' TERM INT HUP
+  if [ -n "$CHILD_PID" ]; then
+    kill_tree "$CHILD_PID" TERM
+    wait "$CHILD_PID" 2>/dev/null || true
+  fi
+  if [ -f "$marker" ]; then
+    reason="replaced by=$(cat "$marker" 2>/dev/null)"
+    rm -f "$marker"
+  else
+    reason="signal=$sig"
+  fi
+  cleanup_files
+  log_line "stopped ($reason)"
+  # Only `wait` reports its stop on stdout: its caller gets exactly one line.
+  # A legacy `run` Monitor would turn the line into a pointless wake.
+  if [ "$WAIT_MODE" = "true" ]; then echo "WAKE-STOPPED $reason"; fi
+  exit 0
+}
+
+# Run a command as a waited background child. `wait` returns as soon as a
+# trapped signal arrives, so shutdown takes well under a second instead of
+# waiting out a 25s curl or a 20s sleep in the foreground.
+run_child() {
+  FORKING=true
+  "$@" &
+  # Test-only (ALFRED_WAKE_TEST_FORK_DELAY=<seconds>): hold the window between
+  # the fork and recording its pid open so a test can signal inside it.
+  if [ -n "${ALFRED_WAKE_TEST_FORK_DELAY:-}" ]; then
+    : > "$STATE_DIR/fork_window"
+    sleep "$ALFRED_WAKE_TEST_FORK_DELAY"
+  fi
+  CHILD_PID=$!
+  FORKING=false
+  if [ -n "$PENDING_SIG" ]; then on_signal "$PENDING_SIG"; fi
+  wait "$CHILD_PID" 2>/dev/null
+  CHILD_PID=""
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+cmd_check() {
+  PERSIST=false
+  ensure_state_dir || true
+  diag "version $VERSION"
+  diag "state dir: $STATE_DIR (dry run — cursors NOT written)"
+  diag "agent-messaging url: $AM_URL"
+  diag "agent-messaging auth: $(am_auth_mode) (agent=${AGENT_ID:-unset})"
+  if buzz_probe; then
+    BUZZ_ENABLED=true
+    diag "buzz: enabled via $BUZZ_MCP_URL"
+  else
+    BUZZ_ENABLED=false
+    diag "buzz: not watched (agent-messaging only)"
+  fi
+  run_pass true
+  diag "dry run complete — any stdout line above is what would wake the session"
+  exit 0
+}
+
+cmd_run() {
+  local interval="${1:-}"
+  if [ -z "$interval" ]; then
+    interval="$DEFAULT_INTERVAL"
+  elif ! [[ "$interval" =~ ^[1-9][0-9]*$ ]]; then
+    echo "alfred-wake: invalid interval '$interval' — must be a positive integer, using default ${DEFAULT_INTERVAL}s" >&2
+    interval="$DEFAULT_INTERVAL"
+  fi
+  ensure_state_dir || exit 1
+  if is_windows_shell; then
+    WINDOWS_SHELL=true
+    if ! command -v pgrep >/dev/null 2>&1; then
+      pgrep() { windows_pgrep "$@"; }
+    fi
+    if ! command -v flock >/dev/null 2>&1; then LOCK_MODE=none; fi
+  fi
+  if [ "$WINDOWS_SHELL" != true ]; then
+    if ! command -v flock >/dev/null 2>&1 || ! command -v pgrep >/dev/null 2>&1; then
+      echo "WAKE-ERROR alfred-wake: requires flock and pgrep (util-linux, procps)"
+      exit 2
+    fi
+  fi
+  trap 'on_signal TERM' TERM
+  trap 'on_signal INT' INT
+  trap 'on_signal HUP' HUP
+  take_over
+
+  # curl auth configs live here, not in /tmp, so a killed pass can never
+  # leave a bearer token behind outside the private state dir.
+  RUN_TMP="$STATE_DIR/run.$$"
+  mkdir -p "$RUN_TMP" && chmod 700 "$RUN_TMP"
+  export TMPDIR="$RUN_TMP"
+
+  local mode="run"
+  if [ "$WAIT_MODE" = "true" ]; then mode="wait"; fi
+  log_line "started $mode (pid=$$ tick=${interval}s am_interval=${AM_INTERVAL}s state=$STATE_DIR)"
+  # A new wait ends the "handling" window of the previous wake.
+  rm -f "$LAST_WAKE_FILE"
+
+  if buzz_probe; then BUZZ_ENABLED=true; else BUZZ_ENABLED=false; fi
+
+  AM_BACKOFF="$AM_INTERVAL"
+  AM_NEXT_AT=0
+  local buzz_reprobe_at=$(( $(now_epoch) + BUZZ_CHANNEL_REFRESH_S ))
+
+  local now do_am consecutive news="$RUN_TMP/news" rc
+  while true; do
+    if [ "$LOCK_MODE" = none ]; then yield_to_newer; fi
+    now=$(now_epoch)
+    do_am=false
+    if [ "$now" -ge "$AM_NEXT_AT" ]; then do_am=true; fi
+
+    # A sidecar can appear (or come back) after the bridge started — e.g. the
+    # pod restarted its buzz-mcp container. Without a re-probe Buzz would stay
+    # silently unwatched for the life of the session.
+    if [ "$BUZZ_ENABLED" != "true" ] && [ "$BUZZ_MODE" != "off" ] && [ "$now" -ge "$buzz_reprobe_at" ]; then
+      buzz_reprobe_at=$(( now + BUZZ_CHANNEL_REFRESH_S ))
+      BUZZ_SKIP_LOGGED=false
+      if buzz_probe; then BUZZ_ENABLED=true; fi
+    fi
+
+    touch "$ARMED_MARKER" 2>/dev/null || true
+    if [ "$WAIT_MODE" = "true" ]; then
+      run_child run_pass_to "$news" "$do_am"
+      if [ -s "$news" ]; then
+        flag_no_mark < "$news"
+        rc=0
+        if grep -q '^WAKE-ERROR' "$news"; then rc=2; fi
+        cleanup_files
+        now_epoch > "$LAST_WAKE_FILE" 2>/dev/null || true
+        log_line "wait: news delivered, exit $rc"
+        exit "$rc"
+      fi
+    else
+      run_child run_pass "$do_am"
+    fi
+
+    if [ "$do_am" = "true" ]; then
+      # Backoff on failure only: agent-messaging offers no push, and a broken
+      # endpoint must not be hammered once a minute for hours.
+      consecutive=$(read_json_state "$FAILURES_FILE" '{}' | jq -r '.["agent-messaging"].consecutive // 0')
+      if [ "$consecutive" -gt 0 ]; then
+        AM_BACKOFF=$((AM_BACKOFF * 2))
+        if [ "$AM_BACKOFF" -gt "$AM_MAX_INTERVAL" ]; then AM_BACKOFF="$AM_MAX_INTERVAL"; fi
+      else
+        AM_BACKOFF="$AM_INTERVAL"
+      fi
+      AM_NEXT_AT=$(( $(now_epoch) + AM_BACKOFF ))
+    fi
+
+    run_child sleep "$interval"
+  done
+}
+
+# flag_no_mark: copy stdin to stdout; when the current session has no work item
+# mark file (ccplugin#126), end each news line (WAKE am/buzz) with " no-mark".
+# A wake-only session gets no UserPromptSubmit hook, so the reminder to run
+# `alfred-workitem mark` rides on the wake line. Unknown session: no flag.
+flag_no_mark() {
+  local sid="${CLAUDE_CODE_SESSION_ID:-}"
+  if [ -n "$sid" ] && [[ "$sid" =~ ^[A-Za-z0-9._-]+$ ]] \
+     && [ ! -e "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/alfred-workitem/$sid.json" ]; then
+    sed -E 's/^(WAKE (am|buzz) .*)$/\1 no-mark/'
+  else
+    cat
+  fi
+}
+
+run_pass_to() {
+  local file="$1"
+  shift
+  run_pass "$@" > "$file"
+}
+
+# self_upgrade <args...> (ccplugin#107): a devbox updates its plugins in the
+# background, but a lead keeps relaunching the alfred-wake it started with.
+# At launch, exec the alfred-wake of the plugin version Claude Code has
+# installed when that script is newer than this one, and point the
+# ~/.local/bin link at it so later launches go there directly. Deterministic:
+# one local JSON read, no network. Never upgrades twice in one launch.
+self_upgrade() {
+  [ "${ALFRED_WAKE_NO_UPGRADE:-}" = "1" ] && return 0
+  [ -n "${ALFRED_WAKE_UPGRADED_FROM:-}" ] && return 0
+  local plugins_json self install cand cand_ver newest link
+  plugins_json="${ALFRED_WAKE_PLUGINS_JSON:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json}"
+  [ -r "$plugins_json" ] || return 0
+  install=$(jq -r '[.plugins["alfred-agent@alfred-cc-tools"][]? | select(.scope == "user")][0].installPath // empty' \
+    "$plugins_json" 2>/dev/null) || return 0
+  cand="$install/bin/alfred-wake"
+  if [ -z "$install" ] || [ ! -x "$cand" ]; then return 0; fi
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+  [ "$(readlink -f "$cand")" != "$self" ] || return 0
+  cand_ver=$(sed -n 's/^VERSION="\([0-9][0-9.]*\)"$/\1/p' "$cand" | head -1)
+  if [ -z "$cand_ver" ] || [ "$cand_ver" = "$VERSION" ]; then return 0; fi
+  newest=$(printf '%s\n%s\n' "$VERSION" "$cand_ver" | sort -V | tail -1)
+  [ "$newest" = "$cand_ver" ] || return 0
+  # The newer script must at least start: a syntax error or a missing
+  # interpreter there would otherwise leave the lead with no bridge at all.
+  if ! "$cand" --version >/dev/null 2>&1; then
+    ensure_state_dir >/dev/null 2>&1 && log_line "upgrade skipped: $cand ($cand_ver) does not start"
+    return 0
+  fi
+  link="${ALFRED_WAKE_BIN_DIR:-$HOME/.local/bin}/alfred-wake"
+  if [ -L "$link" ] && [ "$(readlink -f "$link")" = "$self" ]; then
+    # Atomic swap (rename over the old link): `ln -sf` unlinks first, and a
+    # launch in that gap would find no alfred-wake.
+    if ! { ln -s "$cand" "$link.tmp.$$" && mv -Tf "$link.tmp.$$" "$link"; } 2>/dev/null; then
+      rm -f "$link.tmp.$$"
+    fi
+  fi
+  ensure_state_dir >/dev/null 2>&1 && log_line "upgrade: $VERSION -> $cand_ver ($cand)"
+  ALFRED_WAKE_UPGRADED_FROM="$VERSION" exec "$cand" "$@"
+}
+
+cmd_wait() {
+  WAIT_MODE=true
+  cmd_run "$@"
+}
+
+cmd_install() {
+  local target_dir="${ALFRED_WAKE_BIN_DIR:-$HOME/.local/bin}"
+  local self
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+  if ! mkdir -p "$target_dir"; then
+    echo "alfred-wake: cannot create $target_dir" >&2
+    exit 1
+  fi
+  ln -sf "$self" "$target_dir/alfred-wake"
+  echo "installed: $target_dir/alfred-wake -> $self"
+  case ":$PATH:" in
+    *":$target_dir:"*) ;;
+    *) echo "note: $target_dir is not on PATH — arm with the full path instead" >&2 ;;
+  esac
+  exit 0
+}
+
+# cmd_unread [--direct]: print the current agent-messaging unread count (one
+# number), for the SessionStart check. One bounded request, no cursor change,
+# exit 1 and "?" when the server cannot be asked.
+# --direct counts only direct messages (source "direct"), not topic posts, for
+# the Stop-hook loop check (ccplugin#127). It reads one page of up to 100
+# unread messages; when the page does not hold every unread message and none
+# of them is direct, a direct message further back could be missed, so it
+# prints 0 and says "inbox scan partial" on stderr rather than pass silently.
+cmd_unread() {
+  local workdir n direct=false
+  [ "${1:-}" = "--direct" ] && direct=true
+  ensure_state_dir >/dev/null 2>&1 || true
+  workdir=$(new_curl_workdir) || { echo "?"; exit 1; }
+  AM_CFG="$workdir/curl.cfg"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$workdir'" EXIT
+  if ! am_write_auth_headers "$AM_CFG" || ! mcp_initialize "$AM_URL" "$AM_CFG" "$workdir" "alfred-wake"; then
+    echo "?"; exit 1
+  fi
+  if [ "$direct" = true ]; then
+    if am_call '{"unread_only":true,"limit":100,"include_body":false}'; then
+      n=$(printf '%s' "$AM_RESULT" | jq -r '[.messages[] | select(.source == "direct")] | length')
+      if [[ "$n" =~ ^[0-9]+$ ]]; then
+        if [ "$n" -eq 0 ] && printf '%s' "$AM_RESULT" | jq -e '(.has_more == true) or ((.total_unread // 0) > (.messages | length))' >/dev/null 2>&1; then
+          echo "alfred-wake: inbox scan partial: unread messages beyond the first page were not checked for direct messages" >&2
+        fi
+        echo "$n"; exit 0
+      fi
+    fi
+    echo "?"
+    exit 1
+  fi
+  if am_call '{"unread_only":true,"limit":0,"include_body":false}' || am_call '{"unread_only":true,"limit":1}'; then
+    n=$(printf '%s' "$AM_RESULT" | jq -r '.total_unread // empty')
+    if [[ "$n" =~ ^[0-9]+$ ]]; then echo "$n"; exit 0; fi
+  fi
+  echo "?"
+  exit 1
+}
+
+# cmd_notify <to> <subject> <body>: send one agent-messaging message as this
+# agent, for deterministic callers with something to report (the devbox boot
+# saying Remote Control is off, alfred-devbox#70). One bounded request; exit 0
+# when the server accepted it, 1 otherwise. Nothing is printed on success.
+cmd_notify() {
+  local to="${1:-}" subject="${2:-}" body="${3:-}" workdir args
+  if [ -z "$to" ] || [ -z "$subject" ] || [ -z "$body" ]; then
+    echo "usage: alfred-wake notify <to> <subject> <body>" >&2
+    exit 2
+  fi
+  workdir=$(new_curl_workdir) || exit 1
+  AM_CFG="$workdir/curl.cfg"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$workdir'" EXIT
+  if ! am_write_auth_headers "$AM_CFG" || ! mcp_initialize "$AM_URL" "$AM_CFG" "$workdir" "alfred-wake"; then
+    echo "alfred-wake notify: agent-messaging unreachable or no credential" >&2
+    exit 1
+  fi
+  args=$(jq -cn --arg t "$to" --arg s "$subject" --arg b "$body" '{to:$t,subject:$s,body:$b}')
+  if ! mcp_tool_call "$AM_URL" "$AM_CFG" "send_message" "$args" \
+     || printf '%s' "$MCP_BODY" | jq -e '.result.isError == true' >/dev/null 2>&1; then
+    echo "alfred-wake notify: send_message failed (http $MCP_HTTP_CODE)" >&2
+    exit 1
+  fi
+  exit 0
+}
+
+# status_json: the machine-readable state for probes. A lead between a wake
+# and its relaunch (handling the news, up to HANDLING_GRACE s) counts as armed
+# here, so a busy lead does not flap to "degraded". "News" is any wake line,
+# WAKE-ERROR included. Starting a new wait ends the window. "waiting" needs a
+# live wait AND a live owner (an orphan or an unknown owner is down); "handling"
+# does not look at the owner. The plain `status` exit
+# code stays strict (a live wait with a live owner only): the Stop and SessionStart hooks use it
+# to catch a turn that ends without the relaunch.
+#   {"armed": bool, "state": "waiting"|"handling"|"down", "pid": int|null,
+#    "lastWakeExitAt": "<ISO-8601 UTC>"|null, "lastWakeExitAgoSeconds": int|null,
+#    "graceSeconds": int, "version": "<x.y.z>"}
+# Exit 0 when armed, 1 when down.
+status_json() {
+  local pid live=false last="" ago="" state armed
+  pid=$(cat "$PID_FILE" 2>/dev/null || true)
+  if is_wake_pid "$pid"; then
+    owner_check
+    [ "$OWNER_STATE" = ok ] && live=true
+  fi
+  last=$(cat "$LAST_WAKE_FILE" 2>/dev/null || true)
+  [[ "$last" =~ ^[0-9]+$ ]] || last=""
+  if [ -n "$last" ]; then
+    ago=$(( $(now_epoch) - last ))
+    [ "$ago" -ge 0 ] || ago=0   # clock step or future stamp: never negative
+  fi
+  if [ "$live" = true ]; then state=waiting; armed=true
+  elif [ -n "$ago" ] && [ "$ago" -le "$HANDLING_GRACE" ]; then state=handling; armed=true
+  else state=down; armed=false; fi
+  [ "$live" = true ] || pid=""
+  jq -cn --argjson armed "$armed" --arg state "$state" --arg pid "$pid" --arg last "$last" \
+    --arg ago "$ago" --argjson grace "$HANDLING_GRACE" --arg v "$VERSION" '{
+      armed: $armed, state: $state,
+      pid: (if $pid == "" then null else ($pid | tonumber) end),
+      lastWakeExitAt: (if $last == "" then null else ($last | tonumber | todate) end),
+      lastWakeExitAgoSeconds: (if $ago == "" then null else ($ago | tonumber) end),
+      graceSeconds: $grace, version: $v }'
+  [ "$armed" = true ]
+}
+
+cmd_status() {
+  local age pid last ago
+  if [ "${1:-}" = "--json" ]; then
+    status_json
+    exit $?
+  fi
+  echo "alfred-wake $VERSION"
+  echo "state dir:  $STATE_DIR"
+  echo "am url:     $AM_URL"
+  echo "am auth:    $(am_auth_mode)"
+  echo "buzz mode:  $BUZZ_MODE (url $BUZZ_MCP_URL)"
+  # Armed means a live process, not a fresh marker: a marker stays fresh for
+  # minutes after the loop died, which is the window in which news is missed.
+  pid=$(cat "$PID_FILE" 2>/dev/null || true)
+  age="never"
+  if [ -f "$ARMED_MARKER" ]; then
+    age="$(( $(now_epoch) - $(stat -c %Y "$ARMED_MARKER" 2>/dev/null || echo 0) ))s ago"
+  fi
+  if is_wake_pid "$pid"; then
+    owner_check
+    case "$OWNER_STATE" in
+      ok)
+        echo "armed:      yes (pid $pid, last pass $age)"
+        exit 0 ;;
+      unknown)
+        echo "armed:      no (pid $pid is alive, but no owner could be found: the Claude Code process that started it is unknown; set ALFRED_WAKE_OWNER_COMM if your Claude Code binary's process name is not claude; last pass $age)" ;;
+      *)
+        echo "armed:      no (pid $pid is alive, but its owner Claude Code process $OWNER_PID is gone; last pass $age)" ;;
+    esac
+  elif [ -n "$pid" ]; then
+    echo "armed:      no (pid $pid is not running; last pass $age)"
+  else
+    echo "armed:      no"
+  fi
+  last=$(cat "$LAST_WAKE_FILE" 2>/dev/null || true)
+  if [[ "$last" =~ ^[0-9]+$ ]]; then
+    ago=$(( $(now_epoch) - last ))
+    if [ "$ago" -le "$HANDLING_GRACE" ]; then
+      echo "handling:   yes (woke ${ago}s ago; the session should relaunch wait)"
+    fi
+  fi
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+alfred-wake — deterministic inbox wake bridge for Alfred lead agents
+
+Usage:
+  alfred-wake wait [interval]    block until news, print it, exit (0; 2 on WAKE-ERROR)
+  alfred-wake run --until-wake   same as wait
+  alfred-wake run [interval]     legacy watch loop for a Monitor (default tick 20s)
+  alfred-wake check              one dry-run pass (no cursor writes); diagnostics on stderr
+  alfred-wake install            symlink into ~/.local/bin
+  alfred-wake status             show config; exit 0 only while a wait/run and its Claude Code owner are alive
+  alfred-wake status --json      armed/state for probes (a just-woken lead counts as armed)
+  alfred-wake unread [--direct]  print the agent-messaging unread count (--direct: direct messages only)
+  alfred-wake notify TO SUBJ BODY  send one agent-messaging message
+  alfred-wake --version          print the version
+
+Arm it from a lead session as a background Bash task, and start it again
+after handling each wake:
+  Bash(command: "alfred-wake wait", run_in_background: true)
+EOF
+}
+
+main() {
+  if ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+    echo "alfred-wake: requires curl and jq" >&2
+    exit 1
+  fi
+  case "${1:-}" in
+    check)   cmd_check ;;
+    wait)    self_upgrade "$@"; cmd_wait "${2:-}" ;;
+    run)
+      self_upgrade "$@"
+      if [ "${2:-}" = "--until-wake" ]; then cmd_wait "${3:-}"; else cmd_run "${2:-}"; fi
+      ;;
+    install) cmd_install ;;
+    status)  cmd_status "${2:-}" ;;
+    unread)  cmd_unread "${2:-}" ;;
+    notify)  shift; cmd_notify "$@" ;;
+    version|--version) echo "alfred-wake $VERSION"; exit 0 ;;
+    -h|--help|help|'') usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"

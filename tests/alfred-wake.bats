@@ -500,13 +500,13 @@ EOF
   ln -s "$(readlink -f "$WAKE")" "$ALFRED_WAKE_BIN_DIR/alfred-wake"
   run "$ALFRED_WAKE_BIN_DIR/alfred-wake" wait 5
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.10.0"* ]]
+  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.11.0"* ]]
   [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-wake")" = "$BATS_TEST_TMPDIR/cache/9.9.0/bin/alfred-wake" ]
-  grep -q "upgrade: 1.10.0 -> 9.9.0" "$STATE/alfred-wake.log"
+  grep -q "upgrade: 1.11.0 -> 9.9.0" "$STATE/alfred-wake.log"
 }
 
 @test "an older or equal installed alfred-wake is not used" {
-  for v in 1.0.0 1.10.0; do
+  for v in 1.0.0 1.11.0; do
     fake_install "$v"
     run timeout 3 "$WAKE" wait
     [[ "$output" != *"ran $v"* ]]
@@ -533,7 +533,244 @@ EOF
 @test "--version prints the version" {
   run "$WAKE" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "alfred-wake 1.10.0" ]
+  [ "$output" = "alfred-wake 1.11.0" ]
+}
+
+# --- CCW-224: sibling tools linked next to alfred-wake ----------------------
+
+# mkplug <dir> <version> [notool]: a plugin copy with the real bridge, a stub
+# alfred-test-run and a plugin.json.
+mkplug() {
+  mkdir -p "$1/bin" "$1/.claude-plugin"
+  cp "$WAKE" "$1/bin/alfred-wake"
+  if [ "${3:-}" != notool ]; then
+    printf '#!/bin/bash\necho stub\n' > "$1/bin/alfred-test-run"
+    chmod +x "$1/bin/alfred-test-run"
+  fi
+  printf '{"version":"%s"}' "$2" > "$1/.claude-plugin/plugin.json"
+}
+
+@test "AC1: install links alfred-test-run and announces it" {
+  mkplug "$BATS_TEST_TMPDIR/P" 2.0.0
+  P="$BATS_TEST_TMPDIR/P"
+  run "$P/bin/alfred-wake" install
+  [ "$status" -eq 0 ]
+  [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-test-run")" = "$P/bin/alfred-test-run" ]
+  [[ "$output" == *"installed: $ALFRED_WAKE_BIN_DIR/alfred-test-run -> "* ]]
+}
+
+@test "AC2: install without the tool in the plugin links nothing and prints one line" {
+  mkplug "$BATS_TEST_TMPDIR/P" 2.0.0 notool
+  run "$BATS_TEST_TMPDIR/P/bin/alfred-wake" install
+  [ "$status" -eq 0 ]
+  [ ! -e "$ALFRED_WAKE_BIN_DIR/alfred-test-run" ]
+  [ ! -L "$ALFRED_WAKE_BIN_DIR/alfred-test-run" ]
+  [ "$(printf '%s\n' "$output" | grep -c '^installed:')" -eq 1 ]
+}
+
+@test "AC3: wait links it quietly" {
+  P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
+  mkdir -p "$ALFRED_WAKE_BIN_DIR"
+  run timeout 3 "$P/bin/alfred-wake" wait
+  [ -L "$ALFRED_WAKE_BIN_DIR/alfred-test-run" ]
+  [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-test-run")" = "$P/bin/alfred-test-run" ]
+  [ -z "$output" ]
+}
+
+@test "AC4: stale and dangling plugin links are repointed, a foreign link is kept" {
+  P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
+  mkdir -p "$ALFRED_WAKE_BIN_DIR"
+  local L="$ALFRED_WAKE_BIN_DIR/alfred-test-run"
+  mkplug "$BATS_TEST_TMPDIR/old" 1.0.0
+  ln -s "$BATS_TEST_TMPDIR/old/bin/alfred-test-run" "$L"
+  run "$P/bin/alfred-wake" install
+  [ "$(readlink "$L")" = "$P/bin/alfred-test-run" ]
+  # dangling, parent dir pruned
+  rm -f "$L"; ln -s "$BATS_TEST_TMPDIR/gone/2.0.0/bin/alfred-test-run" "$L"
+  run timeout 3 "$P/bin/alfred-wake" wait
+  [ "$(readlink "$L")" = "$P/bin/alfred-test-run" ]
+  # dangling, dir exists, file missing
+  mkdir -p "$BATS_TEST_TMPDIR/half/bin"
+  rm -f "$L"; ln -s "$BATS_TEST_TMPDIR/half/bin/alfred-test-run" "$L"
+  run "$P/bin/alfred-wake" install
+  [ "$(readlink "$L")" = "$P/bin/alfred-test-run" ]
+  # foreign link
+  rm -f "$L"; ln -s "$BATS_TEST_TMPDIR/elsewhere/mytool" "$L"
+  run "$P/bin/alfred-wake" install
+  run timeout 3 "$P/bin/alfred-wake" wait
+  [ "$(readlink "$L")" = "$BATS_TEST_TMPDIR/elsewhere/mytool" ]
+}
+
+@test "AC4b: an existing target without plugin.json is left alone" {
+  P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
+  mkdir -p "$ALFRED_WAKE_BIN_DIR" "$BATS_TEST_TMPDIR/mine/bin"
+  printf '#!/bin/bash\n' > "$BATS_TEST_TMPDIR/mine/bin/alfred-test-run"
+  chmod +x "$BATS_TEST_TMPDIR/mine/bin/alfred-test-run"
+  local L="$ALFRED_WAKE_BIN_DIR/alfred-test-run"
+  ln -s "$BATS_TEST_TMPDIR/mine/bin/alfred-test-run" "$L"
+  run "$P/bin/alfred-wake" install
+  [ "$(readlink "$L")" = "$BATS_TEST_TMPDIR/mine/bin/alfred-test-run" ]
+  run timeout 3 "$P/bin/alfred-wake" wait
+  [ "$(readlink "$L")" = "$BATS_TEST_TMPDIR/mine/bin/alfred-test-run" ]
+}
+
+@test "AC5: a link into a newer plugin is left alone" {
+  P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
+  mkplug "$BATS_TEST_TMPDIR/newer" 3.0.0
+  mkdir -p "$ALFRED_WAKE_BIN_DIR"
+  local L="$ALFRED_WAKE_BIN_DIR/alfred-test-run"
+  ln -s "$BATS_TEST_TMPDIR/newer/bin/alfred-test-run" "$L"
+  run "$P/bin/alfred-wake" install
+  run timeout 3 "$P/bin/alfred-wake" wait
+  [ "$(readlink "$L")" = "$BATS_TEST_TMPDIR/newer/bin/alfred-test-run" ]
+}
+
+@test "AC6: a regular file and a directory are left alone" {
+  P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
+  mkdir -p "$ALFRED_WAKE_BIN_DIR"
+  local L="$ALFRED_WAKE_BIN_DIR/alfred-test-run" sum
+  echo mine > "$L"
+  sum=$(sha256sum "$L")
+  run "$P/bin/alfred-wake" install
+  run timeout 3 "$P/bin/alfred-wake" wait
+  [ ! -L "$L" ]
+  [ "$(sha256sum "$L")" = "$sum" ]
+  rm -f "$L"; mkdir "$L"; touch "$L/keep"
+  run "$P/bin/alfred-wake" install
+  run timeout 3 "$P/bin/alfred-wake" wait
+  [ "$(ls -A "$L")" = keep ]
+}
+
+@test "AC7: wait does not create the bin dir, install does" {
+  P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
+  run timeout 3 "$P/bin/alfred-wake" wait
+  [ ! -e "$ALFRED_WAKE_BIN_DIR" ]
+  run "$P/bin/alfred-wake" install
+  [ -d "$ALFRED_WAKE_BIN_DIR" ]
+}
+
+@test "AC8: an already current link is not touched and not logged" {
+  P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
+  mkdir -p "$ALFRED_WAKE_BIN_DIR" "$STATE"
+  ln -s "$P/bin/alfred-test-run" "$ALFRED_WAKE_BIN_DIR/alfred-test-run"
+  local before
+  before=$(stat -c '%i %Y' "$ALFRED_WAKE_BIN_DIR/alfred-test-run")
+  sleep 1
+  run timeout 3 "$P/bin/alfred-wake" wait
+  [ "$(stat -c '%i %Y' "$ALFRED_WAKE_BIN_DIR/alfred-test-run")" = "$before" ]
+  ! grep -q "link:" "$STATE/alfred-wake.log" 2>/dev/null
+}
+
+@test "AC9: a create and a repoint each log exactly one link line" {
+  P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
+  mkdir -p "$ALFRED_WAKE_BIN_DIR" "$STATE"
+  run timeout 3 "$P/bin/alfred-wake" wait
+  [ "$(grep -c "link: alfred-test-run -> $P/bin/alfred-test-run" "$STATE/alfred-wake.log")" -eq 1 ]
+  mkplug "$BATS_TEST_TMPDIR/old" 1.0.0
+  rm -f "$ALFRED_WAKE_BIN_DIR/alfred-test-run"
+  ln -s "$BATS_TEST_TMPDIR/old/bin/alfred-test-run" "$ALFRED_WAKE_BIN_DIR/alfred-test-run"
+  : > "$STATE/alfred-wake.log"
+  run timeout 3 "$P/bin/alfred-wake" wait
+  [ "$(grep -c '^.* link: ' "$STATE/alfred-wake.log")" -eq 1 ]
+  grep -q "link: alfred-test-run -> $P/bin/alfred-test-run" "$STATE/alfred-wake.log"
+}
+
+@test "AC10: a Windows shell links no sibling, install still links alfred-wake" {
+  P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
+  as_windows
+  mkdir -p "$ALFRED_WAKE_BIN_DIR"
+  PATH="$WIN_PATH" run "$P/bin/alfred-wake" install
+  [ "$status" -eq 0 ]
+  [ -L "$ALFRED_WAKE_BIN_DIR/alfred-wake" ]
+  [ ! -e "$ALFRED_WAKE_BIN_DIR/alfred-test-run" ]
+  PATH="$WIN_PATH" run timeout 3 "$P/bin/alfred-wake" wait
+  [ ! -e "$ALFRED_WAKE_BIN_DIR/alfred-test-run" ]
+}
+
+@test "AC11: ALFRED_WAKE_NO_SIBLINKS=1 links nothing" {
+  P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
+  ALFRED_WAKE_NO_SIBLINKS=1 run "$P/bin/alfred-wake" install
+  [ ! -e "$ALFRED_WAKE_BIN_DIR/alfred-test-run" ]
+  ALFRED_WAKE_NO_SIBLINKS=1 run timeout 3 "$P/bin/alfred-wake" wait
+  [ ! -e "$ALFRED_WAKE_BIN_DIR/alfred-test-run" ]
+}
+
+# shim_run <shim-name> <body> — a wait with a failing ln or mv first on PATH,
+# against a fresh bin dir and state dir each; sets rc, and leaves the two
+# captures in $BATS_TEST_TMPDIR/{plain,shimmed}.out.
+shim_wait_case() {
+  local name="$1" body="$2" real="$3" bin1 bin2
+  P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
+  mkdir -p "$BATS_TEST_TMPDIR/shim"
+  printf '#!/bin/bash\n%s\nexec %s "$@"\n' "$body" "$real" > "$BATS_TEST_TMPDIR/shim/$name"
+  chmod +x "$BATS_TEST_TMPDIR/shim/$name"
+  : > "$BATS_TEST_TMPDIR/shim.calls"
+  inbox 1:peer
+  # unshimmed run
+  bin1="$BATS_TEST_TMPDIR/bin1"; mkdir -p "$bin1"
+  ALFRED_WAKE_BIN_DIR="$bin1" ALFRED_WAKE_STATE_DIR="$BATS_TEST_TMPDIR/state1" \
+    timeout 5 "$P/bin/alfred-wake" wait > "$BATS_TEST_TMPDIR/plain.out" 2>&1
+  # shimmed run
+  bin2="$BATS_TEST_TMPDIR/bin2"; mkdir -p "$bin2"
+  rc=0
+  PATH="$BATS_TEST_TMPDIR/shim:$PATH" ALFRED_WAKE_BIN_DIR="$bin2" \
+    ALFRED_WAKE_STATE_DIR="$BATS_TEST_TMPDIR/state2" \
+    timeout 5 "$P/bin/alfred-wake" wait > "$BATS_TEST_TMPDIR/shimmed.out" 2>&1 || rc=$?
+  SHIM_BIN="$bin2"
+}
+
+@test "AC12a: a failing ln never blocks or taints a wake" {
+  shim_wait_case ln '
+for a in "$@"; do
+  case "$a" in *alfred-test-run|*.tmp.*)
+    echo shim-noise; echo shim-noise >&2
+    echo ln >> "$BATS_TEST_TMPDIR/shim.calls"; exit 1 ;;
+  esac
+done' /usr/bin/ln
+  [ "$rc" -eq 0 ]
+  [ -s "$BATS_TEST_TMPDIR/shim.calls" ]
+  ! compgen -G "$SHIM_BIN/alfred-test-run.tmp.*"
+  [ ! -e "$SHIM_BIN/alfred-test-run" ]
+  [ ! -L "$SHIM_BIN/alfred-test-run" ]
+  [ -s "$BATS_TEST_TMPDIR/plain.out" ]
+  cmp "$BATS_TEST_TMPDIR/plain.out" "$BATS_TEST_TMPDIR/shimmed.out"
+}
+
+@test "AC12b: a failing mv never blocks or taints a wake" {
+  shim_wait_case mv '
+for a in "$@"; do
+  case "$a" in -T|-[a-zA-Z]*T*|*alfred-test-run.tmp.*)
+    echo shim-noise; echo shim-noise >&2
+    echo mv >> "$BATS_TEST_TMPDIR/shim.calls"; exit 1 ;;
+  esac
+done' /usr/bin/mv
+  [ "$rc" -eq 0 ]
+  [ -s "$BATS_TEST_TMPDIR/shim.calls" ]
+  ! compgen -G "$SHIM_BIN/alfred-test-run.tmp.*"
+  [ ! -e "$SHIM_BIN/alfred-test-run" ]
+  [ ! -L "$SHIM_BIN/alfred-test-run" ]
+  cmp "$BATS_TEST_TMPDIR/plain.out" "$BATS_TEST_TMPDIR/shimmed.out"
+}
+
+@test "AC13: an old 1.10.0 session upgrades and gets the link in one launch" {
+  local P1="$BATS_TEST_TMPDIR/P1" P2="$BATS_TEST_TMPDIR/P2"
+  mkdir -p "$P1/bin"
+  cp "$BATS_TEST_DIRNAME/fixtures/alfred-wake-1.10.0" "$P1/bin/alfred-wake"
+  chmod +x "$P1/bin/alfred-wake"
+  grep -q '^VERSION="1.10.0"$' "$P1/bin/alfred-wake"
+  [ "$(grep -c link_siblings "$P1/bin/alfred-wake")" -eq 0 ]
+  [ ! -e "$P1/bin/alfred-test-run" ]
+  mkplug "$P2" 2.0.0
+  sed -i 's/^VERSION="[0-9.]*"/VERSION="9.9.0"/' "$P2/bin/alfred-wake"
+  jq -n --arg p "$P2" '{plugins: {"alfred-agent@alfred-cc-tools": [{scope: "user", installPath: $p}]}}' \
+    > "$ALFRED_WAKE_PLUGINS_JSON"
+  mkdir -p "$ALFRED_WAKE_BIN_DIR"
+  ln -s "$P1/bin/alfred-wake" "$ALFRED_WAKE_BIN_DIR/alfred-wake"
+  run timeout 3 "$ALFRED_WAKE_BIN_DIR/alfred-wake" wait
+  [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-test-run")" = "$P2/bin/alfred-test-run" ]
+  [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-wake")" = "$P2/bin/alfred-wake" ]
+  grep -q "upgrade: 1.10.0 -> 9.9.0" "$STATE/alfred-wake.log"
+  grep -q "link: alfred-test-run" "$STATE/alfred-wake.log"
 }
 
 # --- Stop hook: never end a turn with the bridge down -----------------------
