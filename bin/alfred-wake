@@ -68,7 +68,12 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.10.0"
+VERSION="1.11.0"
+
+# Tools beside this script that are also linked into the bin dir, so a running
+# session reaches a tool added after it started (CCW-224). A fixed list: a new
+# tool needs an edit here and a VERSION bump.
+SIBLING_TOOLS="alfred-test-run"
 
 # ---------------------------------------------------------------------------
 # State directory
@@ -1285,6 +1290,61 @@ self_upgrade() {
   ALFRED_WAKE_UPGRADED_FROM="$VERSION" exec "$cand" "$@"
 }
 
+# link_siblings [announce]: link each SIBLING_TOOLS tool from this script's own
+# directory into the bin dir, next to the alfred-wake link (CCW-224). Without
+# "announce" nothing reaches stdout or stderr: a stray stdout line on the wait
+# path is a wake. Never fails and never blocks. Not on a Windows shell, and
+# not with ALFRED_WAKE_NO_SIBLINKS=1.
+link_siblings_body() {
+  local announce="${1:-}" dir here tool src link tgt tpj tver our newest
+  is_windows_shell && return 0
+  [ "${ALFRED_WAKE_NO_SIBLINKS:-}" = "1" ] && return 0
+  dir="${ALFRED_WAKE_BIN_DIR:-$HOME/.local/bin}"
+  [ -d "$dir" ] || return 0
+  here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+  for tool in $SIBLING_TOOLS; do
+    src="$here/$tool"
+    link="$dir/$tool"
+    [ -x "$src" ] || continue
+    if [ -L "$link" ]; then
+      # -m: a dangling link whose old plugin dir was pruned still resolves.
+      tgt=$(readlink -m "$link")
+      case "$tgt" in */bin/"$tool") ;; *) continue ;; esac
+      if [ "$tgt" = "$(readlink -m "$src")" ]; then
+        [ "$announce" = announce ] && echo "installed: $link -> $src"
+        continue
+      fi
+      our=$(jq -r '.version // empty' "$here/../.claude-plugin/plugin.json" 2>/dev/null)
+      [ -n "$our" ] || continue
+      if [ -e "$tgt" ]; then
+        tpj="${tgt%/bin/"$tool"}/.claude-plugin/plugin.json"
+        tver=$(jq -r '.version // empty' "$tpj" 2>/dev/null)
+        [ -n "$tver" ] || continue
+        newest=$(printf '%s\n%s\n' "$our" "$tver" | sort -V | tail -1)
+        if [ "$newest" = "$tver" ] && [ "$tver" != "$our" ]; then continue; fi
+      fi
+    elif [ -e "$link" ]; then
+      continue
+    fi
+    if ln -s "$src" "$link.tmp.$$" && mv -Tf "$link.tmp.$$" "$link"; then
+      ensure_state_dir >/dev/null 2>&1 && log_line "link: $tool -> $src"
+      [ "$announce" = announce ] && echo "installed: $link -> $src"
+    else
+      rm -f "$link.tmp.$$"
+    fi
+  done
+  return 0
+}
+
+link_siblings() {
+  if [ "${1:-}" = announce ]; then
+    { link_siblings_body announce; } 2>/dev/null
+  else
+    { link_siblings_body; } >/dev/null 2>&1
+  fi
+  return 0
+}
+
 cmd_wait() {
   WAIT_MODE=true
   cmd_run "$@"
@@ -1300,6 +1360,7 @@ cmd_install() {
   fi
   ln -sf "$self" "$target_dir/alfred-wake"
   echo "installed: $target_dir/alfred-wake -> $self"
+  link_siblings announce
   case ":$PATH:" in
     *":$target_dir:"*) ;;
     *) echo "note: $target_dir is not on PATH — arm with the full path instead" >&2 ;;
@@ -1486,9 +1547,10 @@ main() {
   fi
   case "${1:-}" in
     check)   cmd_check ;;
-    wait)    self_upgrade "$@"; cmd_wait "${2:-}" ;;
+    wait)    self_upgrade "$@"; link_siblings; cmd_wait "${2:-}" ;;
     run)
       self_upgrade "$@"
+      link_siblings
       if [ "${2:-}" = "--until-wake" ]; then cmd_wait "${3:-}"; else cmd_run "${2:-}"; fi
       ;;
     install) cmd_install ;;

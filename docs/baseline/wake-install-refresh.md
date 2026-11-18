@@ -35,6 +35,33 @@ current (CCW-220). The code is the source of truth: `bin/alfred-wake`
    line naming both versions (`unknown` without a `VERSION`, `missing` when the
    link is gone) and the command to run.
 
+## Sibling tools (CCW-224)
+
+A session keeps the plugin `bin/` on PATH from the version it loaded, so a tool
+released later (`alfred-test-run`) is missing until a restart. `~/.local/bin`
+comes first on PATH and is repointed outside any session, so the bridge carries
+the link. `link_siblings` links each name in `SIBLING_TOOLS` from the running
+script's own directory into `${ALFRED_WAKE_BIN_DIR:-$HOME/.local/bin}`:
+
+- Called by `install` (announces `installed:`) and by `wait` and `run` right after
+  `self_upgrade`, so an old session that execs the new bridge gets the link in the
+  same launch. On the wait path its whole body runs with stdout and stderr to
+  `/dev/null` (a stray stdout line is a wake) and it never returns non-zero.
+- Skipped on a Windows shell, with `ALFRED_WAKE_NO_SIBLINKS=1`, when the bin dir
+  is missing (never created here) and when the tool is not beside the script.
+- Absent: atomic create (`ln -s` to a temp name, `mv -Tf`); a failure removes the
+  temp link. Regular file, directory, a symlink whose `readlink -m` target does
+  not end in `/bin/<tool>`, a target that exists without a `plugin.json`
+  version, and a link into a newer plugin: left alone.
+- A plugin link that is dangling (`readlink -m` still resolves it after the old
+  plugin dir was pruned) or not newer than ours is repointed. Logged as
+  `link: <tool> -> <src>`.
+
+The CCW-220 hook is unchanged; its `install` call now also links the tool. Not
+covered: tools not in `SIBLING_TOOLS`, other `bin/` tools, Windows, and a session
+whose bridge predates 1.11.0 until its next `wait` relaunch picks up 1.11.0 or
+higher.
+
 ## Not covered
 
 Other copies of `alfred-wake` on PATH, a `wait` already running (it keeps old
