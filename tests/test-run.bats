@@ -806,9 +806,9 @@ sig_run() {
 }
 
 # AC 15: version
-@test "AC15: plugin.json is 2.50.0 and nothing under tests or .claude-plugin carries main's version" {
-  [ "$(jq -r .version "$ROOT/.claude-plugin/plugin.json")" = 2.50.0 ]
-  run grep -rn "2\.4""9\.0" "$ROOT/tests" "$ROOT/.claude-plugin"
+@test "AC15: plugin.json is 2.51.0 and nothing under tests or .claude-plugin carries main's version" {
+  [ "$(jq -r .version "$ROOT/.claude-plugin/plugin.json")" = 2.51.0 ]
+  run grep -rn "2\.5""0\.0" "$ROOT/tests" "$ROOT/.claude-plugin"
   [ "$status" -eq 1 ]
 }
 

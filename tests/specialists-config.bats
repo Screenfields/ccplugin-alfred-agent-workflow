@@ -961,3 +961,16 @@ designer_note() {
   [ -n "$line" ]
   if grep -q ';' <<<"$line"; then echo "semicolon in the read-only paragraph"; return 1; fi
 }
+
+@test "builder has a Full suites paragraph between Evidence and Never" {
+  f="$AGENTS/builder.md"
+  for s in 'alfred-test-run' 'not verified' 'exit 0' 'exits 2, 3, 4 or 11' 'exit 124' \
+    'never present' 'commit not pushed' "after Order step 3's push" 'no polling' 'timeout 2100'; do
+    grep -qF -- "$s" "$f"
+  done
+  e=$(grep -n '^\*\*Evidence' "$f" | head -1 | cut -d: -f1)
+  p=$(grep -n '^\*\*Full suites\.\*\*' "$f" | head -1 | cut -d: -f1)
+  n=$(grep -n '^\*\*Never' "$f" | head -1 | cut -d: -f1)
+  [ -n "$e" ] && [ -n "$p" ] && [ -n "$n" ]
+  [ "$e" -lt "$p" ] && [ "$p" -lt "$n" ]
+}
