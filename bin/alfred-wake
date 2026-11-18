@@ -1317,7 +1317,7 @@ link_siblings_body() {
       our=$(jq -r '.version // empty' "$here/../.claude-plugin/plugin.json" 2>/dev/null)
       [ -n "$our" ] || continue
       if [ -e "$tgt" ]; then
-        tpj="${tgt%/bin/$tool}/.claude-plugin/plugin.json"
+        tpj="${tgt%/bin/"$tool"}/.claude-plugin/plugin.json"
         tver=$(jq -r '.version // empty' "$tpj" 2>/dev/null)
         [ -n "$tver" ] || continue
         newest=$(printf '%s\n%s\n' "$our" "$tver" | sort -V | tail -1)
