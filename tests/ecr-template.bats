@@ -372,8 +372,19 @@ teardown() {
   p1=$!
   env PATH="$BATS_TEST_TMPDIR/bin:$PATH" TMPDIR="$TMPDIR" bash "$BATS_TEST_TMPDIR/template.sh" > "$BATS_TEST_TMPDIR/o2" 2>&1 &
   p2=$!
-  wait "$p1" || true; wait "$p2" || true
-  [ "$(calls_count chat)" -eq 1 ]
+  r1=0; r2=0
+  wait "$p1" || r1=$?; wait "$p2" || r2=$?
+  n=$(calls_count chat)
+  if [ "$n" -ne 1 ]; then
+    {
+      echo "DIAG (CCW-209): chat lines n=$n, exit codes r1=$r1 r2=$r2"
+      echo "DIAG calls file:"; cat "$STUB_DIR/calls"
+      echo "DIAG o1:"; cat "$BATS_TEST_TMPDIR/o1"
+      echo "DIAG o2:"; cat "$BATS_TEST_TMPDIR/o2"
+      if [ -d "$PANEL_DIR/called.ecr-openai" ]; then echo "DIAG called.ecr-openai exists"; else echo "DIAG called.ecr-openai missing"; fi
+    } >&3
+  fi
+  [ "$n" -eq 1 ]
   cat "$BATS_TEST_TMPDIR/o1" "$BATS_TEST_TMPDIR/o2" | grep -q 'repeat call refused'
 }
 
