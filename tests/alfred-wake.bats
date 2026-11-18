@@ -571,10 +571,17 @@ mkplug() {
 @test "AC3: wait links it quietly" {
   P="$BATS_TEST_TMPDIR/P"; mkplug "$P" 2.0.0
   mkdir -p "$ALFRED_WAKE_BIN_DIR"
+  # A quiet wait killed by timeout prints the bridge's own one stop line
+  # (not empty, with or without links), so "quiet" is: the same output as a
+  # run with the siblings switched off, and no installed: line.
+  ALFRED_WAKE_NO_SIBLINKS=1 run timeout 3 "$P/bin/alfred-wake" wait
+  local baseline="$output"
+  [ ! -e "$ALFRED_WAKE_BIN_DIR/alfred-test-run" ]
   run timeout 3 "$P/bin/alfred-wake" wait
   [ -L "$ALFRED_WAKE_BIN_DIR/alfred-test-run" ]
   [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-test-run")" = "$P/bin/alfred-test-run" ]
-  [ -z "$output" ]
+  [ "$output" = "$baseline" ]
+  [[ "$output" != *installed:* ]]
 }
 
 @test "AC4: stale and dangling plugin links are repointed, a foreign link is kept" {

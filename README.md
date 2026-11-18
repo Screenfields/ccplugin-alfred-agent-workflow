@@ -181,7 +181,7 @@ it cannot swallow news that the running bridge should deliver.
 | `alfred-wake run --until-wake` | Same as `wait` |
 | `alfred-wake run [interval]` | Legacy watch loop for a `Monitor`. Default tick 20s (Buzz), agent-messaging every 60s with failure backoff to 600s |
 | `alfred-wake check` | One dry-run pass, diagnostics on stderr, exit 0 |
-| `alfred-wake install` | Symlink into `~/.local/bin` (override with `ALFRED_WAKE_BIN_DIR`) |
+| `alfred-wake install` | Symlink into `~/.local/bin` (override with `ALFRED_WAKE_BIN_DIR`); also links `alfred-test-run` (see Sibling tools) |
 | `alfred-wake status` | Print config; exit 0 only while a live `wait`/`run` process holds the pidfile and the Claude Code process that started it (the owner, recorded in `alfred-wake.owner`) is also alive. An orphaned wait (owner gone) or one with no discoverable owner (while `CLAUDE_CODE_SESSION_ID` is set) prints `armed:      no` and exits 1 |
 | `alfred-wake --version` | Print the version |
 | `alfred-wake status --json` | Machine-readable state for probes: `{"armed", "state": "waiting"\|"handling"\|"down", "pid", "lastWakeExitAt", "lastWakeExitAgoSeconds", "graceSeconds", "version"}`. A lead whose `wait` exited with news (any WAKE line, WAKE-ERROR included) less than `ALFRED_WAKE_HANDLING_GRACE` s ago (default 600; a non-integer value falls back to 600), with no wait started since, is `handling` and counts as armed, whatever happened to its owner. `waiting` requires a live wait with a live owner; an orphan or an unknown owner is `down`. Exit 0 when armed. The plain `status` exit code stays strict (a live wait with a live owner only), because the hooks rely on it |
@@ -210,6 +210,23 @@ and the command to run. Limits:
   regular file is replaced only when it has a `VERSION="x.y.z"` line and the word `alfred-wake`.
 - A link or copy with a newer `VERSION` than the plugin's is left alone.
 - A `wait` that is already running keeps its old code until its next launch.
+
+**Sibling tools.** A running session keeps the plugin `bin/` on its PATH from the version it loaded,
+so a tool added later is missing there until a restart. The bridge therefore also links the tools
+beside it (today `alfred-test-run`) into `${ALFRED_WAKE_BIN_DIR:-$HOME/.local/bin}`, which comes
+before the plugin `bin/` on PATH. It does this on `install` and on every `wait` or `run` launch, right
+after the self-upgrade, from the directory of the script that is running. Rules:
+
+- `wait` and `run` print nothing for it and never fail because of it; `install` prints
+  `installed: <dir>/alfred-test-run -> <src>`. Each create or repoint is logged as `link: <tool> -> <src>`.
+- It never creates the bin dir (`install` does), and does nothing on a Windows shell.
+- A missing link is created atomically. A symlink into an installed plugin (target ending in
+  `/bin/alfred-test-run`) is repointed when it is dangling (also when the old plugin dir is pruned) or
+  when its plugin's `.claude-plugin/plugin.json` version is not newer than ours.
+- Left alone: a link into a newer plugin, a link to a target outside a plugin install (no
+  `plugin.json`, or a path that does not end in `/bin/alfred-test-run`), a regular file and a directory.
+- `ALFRED_WAKE_NO_SIBLINKS=1` switches it off. The list is fixed (`SIBLING_TOOLS` in the bridge), so a
+  new tool needs a bridge edit and a `VERSION` bump.
 
 Set `ALFRED_WAKE_LINK_CHECK=0` to switch it off. See `docs/baseline/wake-install-refresh.md`.
 
@@ -257,6 +274,7 @@ Everything is env-driven; the defaults are correct for a standard devbox pod.
 | `ALFRED_WAKE_TZ` | `Europe/Amsterdam` | Timezone for `last=` timestamps |
 | `ALFRED_WAKE_BIN_DIR` | `$HOME/.local/bin` | Target of `alfred-wake install`, and the link self-upgrade repoints |
 | `ALFRED_WAKE_NO_UPGRADE` | — | `1` = never exec a newer installed alfred-wake |
+| `ALFRED_WAKE_NO_SIBLINKS` | — | `1` = never link sibling tools (`alfred-test-run`) next to `alfred-wake` |
 | `ALFRED_WAKE_LINK_CHECK` | — | `0` = the SessionStart hook never refreshes the installed `alfred-wake` link or copy |
 | `ALFRED_WAKE_PLUGINS_JSON` | `$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json` | Where self-upgrade looks up the installed plugin |
 
@@ -823,6 +841,10 @@ alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wai
 Defaults: the pipeline slug is the origin's repo name, lowercased with `_` replaced by `-`, plus
 `-tests`; the commit is `git rev-parse HEAD` (it must be pushed); the branch is the current branch (a
 detached HEAD needs `--branch`); the wait is 1800 s (at least 30).
+
+The bare name `alfred-test-run` resolves from `~/.local/bin`: the wake bridge links it there on
+`install` and at every `wait` launch, so it works in a session that loaded an older plugin, without a
+restart (see Sibling tools). `ALFRED_WAKE_NO_SIBLINKS=1` switches that off.
 
 **Inputs.** `BUILDKITE_API_TOKEN` and `BUILDKITE_ORGANIZATION_SLUG` (env on the devbox); the token file
 `/var/run/alfred/github-readonly-token` (refused when missing, empty or older than 20 min, so the token
