@@ -511,13 +511,13 @@ EOF
   ln -s "$(readlink -f "$WAKE")" "$ALFRED_WAKE_BIN_DIR/alfred-wake"
   run "$ALFRED_WAKE_BIN_DIR/alfred-wake" wait 5
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.11.0"* ]]
+  [[ "$output" == *"ran 9.9.0 args=wait 5 from=1.11.1"* ]]
   [ "$(readlink -f "$ALFRED_WAKE_BIN_DIR/alfred-wake")" = "$BATS_TEST_TMPDIR/cache/9.9.0/bin/alfred-wake" ]
-  grep -q "upgrade: 1.11.0 -> 9.9.0" "$STATE/alfred-wake.log"
+  grep -q "upgrade: 1.11.1 -> 9.9.0" "$STATE/alfred-wake.log"
 }
 
 @test "an older or equal installed alfred-wake is not used" {
-  for v in 1.0.0 1.11.0; do
+  for v in 1.0.0 1.11.1; do
     fake_install "$v"
     run timeout 3 "$WAKE" wait
     [[ "$output" != *"ran $v"* ]]
@@ -544,7 +544,7 @@ EOF
 @test "--version prints the version" {
   run "$WAKE" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "alfred-wake 1.11.0" ]
+  [ "$output" = "alfred-wake 1.11.1" ]
 }
 
 # --- CCW-224: sibling tools linked next to alfred-wake ----------------------

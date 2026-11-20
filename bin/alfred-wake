@@ -37,9 +37,22 @@
 #
 # Owner: `wait`/`run` records which Claude Code process started it, in
 # $STATE_DIR/alfred-wake.owner (one line, written in take_over before the
-# pidfile). The owner is the nearest ancestor of the wait whose command name
-# (/proc/<pid>/comm, 15 characters) equals ALFRED_WAKE_OWNER_COMM (default
-# `claude`; set it only when the harness binary has another name). The file
+# pidfile). The owner is the nearest ancestor of the wait that matches the
+# owner rule; the first match going up wins, by proximity and not by rule.
+# Default rule (ALFRED_WAKE_OWNER_COMM unset or empty), an ancestor matches when
+#   - its command name (/proc/<pid>/comm) is exactly `claude` (first 15
+#     characters), or
+#   - the daemon form: its comm is a version of exactly three numeric parts
+#     (x.y.z) AND `readlink /proc/<pid>/exe`, with one trailing ` (deleted)`
+#     removed, is `<dir>/claude/versions/<comm>` (the file name equals the comm).
+#     That is the ~/.local/share/claude layout, where Claude Code in daemon mode
+#     runs as the versioned binary. An ancestor with a version comm and another
+#     exe path is passed over. One whose exe cannot be read stops the search:
+#     no owner (`unknown`), never a higher process, so `status` fails closed.
+# ALFRED_WAKE_OWNER_COMM set and non-empty applies alone: only the exact comm
+# compare (first 15 characters), no daemon form and no exe check. A stale value
+# therefore gets no fallback; unset it. Another install layout fails closed too.
+# Why this rule: docs/baseline/wake-owner-discovery.md. The file
 # holds `<pid> <starttime>` (start time = field 22 of /proc/<pid>/stat), or
 # `unknown`. The parent pid (field 4) and the start time are read after the
 # LAST `)` of the stat line, because the command name may hold spaces and
@@ -68,7 +81,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.11.0"
+VERSION="1.11.1"
 
 # Tools beside this script that are also linked into the bin dir, so a running
 # session reaches a tool added after it started (CCW-224). A fixed list: a new
@@ -908,16 +921,40 @@ stat_rest() {
   [[ "$STAT_PPID" =~ ^[0-9]+$ ]] && [[ "$STAT_START" =~ ^[0-9]+$ ]]
 }
 
+# owner_versioned <pid> <comm> — the daemon form of the owner rule (see the
+# Owner paragraph in the header). Returns 0 for a match, 1 for no match, and 2
+# when the comm is a version but the exe cannot be read (the caller fails
+# closed). The builtin regex and the quoted pattern keep the exe path inert:
+# no glob or regex characters in it are interpreted.
+owner_versioned() {
+  local exe
+  [[ "$2" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  exe=$(readlink "/proc/$1/exe" 2>/dev/null) || return 2
+  exe=${exe% (deleted)}
+  [[ "$exe" == */claude/versions/"$2" ]]
+}
+
 # find_owner — print "<pid> <starttime>" of the nearest ancestor of this
-# process whose command name is OWNER_COMM; return 1 when there is none.
+# process that is the owner (header: Owner); return 1 when there is none. With
+# ALFRED_WAKE_OWNER_COMM set and non-empty only the exact comm compare runs.
 find_owner() {
-  local want="${OWNER_COMM:0:15}" p="$$" depth=0 comm
+  local want="${OWNER_COMM:0:15}" daemon=false p="$$" depth=0 comm hit rc
+  [ -n "${ALFRED_WAKE_OWNER_COMM:-}" ] || daemon=true
   while [ "$depth" -lt 64 ]; do
     stat_rest "$p" || return 1
     p="$STAT_PPID"
     [ "$p" -gt 1 ] || return 1
     comm=$(cat "/proc/$p/comm" 2>/dev/null) || return 1
+    hit=false
     if [ "$comm" = "$want" ]; then
+      hit=true
+    elif [ "$daemon" = true ]; then
+      owner_versioned "$p" "$comm"
+      rc=$?
+      [ "$rc" -ne 2 ] || return 1
+      [ "$rc" -ne 0 ] || hit=true
+    fi
+    if [ "$hit" = true ]; then
       stat_rest "$p" || return 1
       printf '%s %s' "$p" "$STAT_START"
       return 0
@@ -1499,7 +1536,7 @@ cmd_status() {
         echo "armed:      yes (pid $pid, last pass $age)"
         exit 0 ;;
       unknown)
-        echo "armed:      no (pid $pid is alive, but no owner could be found: the Claude Code process that started it is unknown; set ALFRED_WAKE_OWNER_COMM if your Claude Code binary's process name is not claude; last pass $age)" ;;
+        echo "armed:      no (pid $pid is alive, but no owner could be found: the Claude Code process that started it is unknown; set ALFRED_WAKE_OWNER_COMM only when your Claude Code binary's process name is neither claude nor a version number (a set value applies alone, so unset it when it is stale); last pass $age)" ;;
       *)
         echo "armed:      no (pid $pid is alive, but its owner Claude Code process $OWNER_PID is gone; last pass $age)" ;;
     esac
