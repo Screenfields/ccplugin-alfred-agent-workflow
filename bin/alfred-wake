@@ -52,8 +52,8 @@
 # ALFRED_WAKE_OWNER_COMM set and non-empty applies alone: only the exact comm
 # compare (first 15 characters), no daemon form and no exe check. A stale value
 # therefore gets no fallback; unset it. Another install layout fails closed too.
-# Why this rule: docs/baseline/wake-owner-discovery.md. The file
-# holds `<pid> <starttime>` (start time = field 22 of /proc/<pid>/stat), or
+# Why this rule: docs/baseline/wake-owner-discovery.md.
+# `alfred-wake.owner` holds `<pid> <starttime>` (start time = field 22 of /proc/<pid>/stat), or
 # `unknown`. The parent pid (field 4) and the start time are read after the
 # LAST `)` of the stat line, because the command name may hold spaces and
 # parentheses. `status` (and `status --json`) report a wait as running only
