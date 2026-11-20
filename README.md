@@ -352,7 +352,8 @@ The plugin ships a `SessionStart` hook (`hooks/hooks.json` →
 Europe/Amsterdam time line at the top of the first reply of a new set of actions
 (after an idle period), local time for anything shown to the owner, full-URL links for every
 GitHub record, and how to ask the owner a question without blocking the
-session on a menu (owner-join instead; alfred-platform#917). The
+session on a menu (owner-join instead; alfred-platform#917), and that a question is
+asked once and parked (`hooks/owner-communication.md`). The
 hook is deterministic (`jq` only, no model call). Edit the `.md` file to
 change the rules.
 
@@ -501,6 +502,8 @@ to the `model` and `effort` of a specialist as described under "Specialists (`ag
 A lead keeps working while it has actionable items or unread direct messages. At the end of a
 turn `bin/alfred-loop-check --hook` decides, with `gh` and one inbox call and no model call,
 whether to block the stop once. Items parked as waiting on the owner or on a peer never hold the loop open.
+The block reason tells the session not to restate a parked question
+(`hooks/owner-communication.md` holds the rule).
 
 - **Actionable set:** open issues in the lead's repos that carry a label in `workable-states` and
   no parked label: the `waiting-label` (`status:waiting-on-owner`) or a label of `parked-labels`

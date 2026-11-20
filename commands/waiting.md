@@ -221,7 +221,9 @@ This applies when something has to reach the owner outside this walkthrough, or 
 
 Inside the walkthrough, the item format of Step 3 governs. Outside it, the owner-communication text injected at SessionStart governs owner-joins and questions: the section "Asking the owner something" of `hooks/owner-communication.md`. An owner decision that blocks you goes as `[owner-join]` when a written question is not enough (the Escalate paragraph of `agreement/lead.md`). This command does not restate the format.
 
-Urgent requests (AP-ADR0031, decision three): urgent requests go by push notification through Remote Control, from the hub and Alfred only, for a security incident, a user-visible outage beyond the bounds, a risk of data loss or a decision that blocks recovery. Alerts stay on Telegram (AP-ADR0012). Until the owner answers, every reply of the sending session ends with the request, its reason and a link (AP#1140).
+This walkthrough is the one place a parked question is presented again.
+
+Urgent requests (AP-ADR0031, decision three): urgent requests go by push notification through Remote Control, from the hub and Alfred only, for a security incident, a user-visible outage beyond the bounds, a risk of data loss or a decision that blocks recovery. Alerts stay on Telegram (AP-ADR0012). Until the owner answers, every reply of the sending session ends with the request, its reason and a link (AP#1140). This is an exception to ask-once.
 
 ## Step 6: Closing summary
 

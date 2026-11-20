@@ -569,3 +569,73 @@ gate2_range() { sect "$README" "$GATE2"; }
   [ "$(grep -cF 'git -C <path> push -u origin feature/issue-{N}-{short-description}' <<<"$p")" -eq 2 ]
   [ "$(grep -cF 'gh pr create --head feature/issue-{N}-{short-description}' <<<"$p")" -eq 2 ]
 }
+
+# --- CCW-246: ask an owner question once, park it, never repeat it -------------------
+
+flat() { tr '\n' ' ' | tr -s ' '; }
+
+@test "CCW-246: the Asking section carries the park step and the ask-once rule" {
+  t=$(sect "$ROOT/hooks/owner-communication.md" '## Asking the owner something' | flat)
+  [ -n "$t" ]
+  for l in 'Park it at once on the item it blocks (file one first when none exists)' \
+    'a comment on the item plus the waiting label' 'alfred-config get waiting-label' 'Ask once' \
+    'Never repeat a pending question in a later reply' 'A changed question is stated once, as the change' \
+    'counts as asked' 'AP-ADR0031'; do
+    has "$t" "$l"
+  done
+  lacks "$t" 'status:waiting-on-owner'
+}
+
+@test "CCW-246: the steps are in order and numbered 1 to 4" {
+  f="$ROOT/hooks/owner-communication.md"
+  s=$(sect "$f" '## Asking the owner something')
+  [ "$(line_of 'Park it at once on the item it blocks' "$f")" -lt "$(line_of 'Write the question as plain text as your last output' "$f")" ]
+  grep -qE '^ *1\. Park it at once' <<<"$s"
+  grep -qE '^ *2\. Write the question as plain text' <<<"$s"
+  grep -qE '^ *3\. If it blocks you' <<<"$s"
+  grep -qE '^ *4\. Keep working' <<<"$s"
+}
+
+@test "CCW-246: open points run the gather step, from memory named once" {
+  t=$(sect "$ROOT/hooks/owner-communication.md" '## Asking the owner something' | flat)
+  has "$t" 'run the `/waiting` gather step'
+  [ "$(grep -oF 'from memory' <<<"$t" | wc -l)" -eq 1 ]
+  grep -qE 'gather step[^.]*from memory' <<<"$t"
+}
+
+@test "CCW-246: the forced-turn sentence sits between the wake bullet and the Asking section" {
+  t=$(flat < "$ROOT/hooks/owner-communication.md")
+  has "$t" 'exists only because a Stop hook or a wake required it'
+  has "$t" 'ends with no text, or a one-line status'
+  has "$t" 'never restates a parked question'
+  w=${t%%A wake with no news produces no reply at all*}
+  f=${t%%exists only because*}
+  h=${t%%## Asking the owner something*}
+  [ "${#w}" -lt "${#f}" ]
+  [ "${#f}" -lt "${#h}" ]
+  s=$(sect "$ROOT/hooks/owner-communication.md" '## Asking the owner something' | flat)
+  lacks "$s" 'exists only because'
+}
+
+@test "CCW-246: waiting names the one place and the exception, and keeps the urgent rule" {
+  s=$(sect "$WAITING" '## Owner-join, owner questions and urgent requests')
+  has "$s" 'the one place a parked question is presented again'
+  has "$s" 'an exception to ask-once'
+  has "$s" 'every reply of the sending session ends with the request, its reason and a link'
+  has "$s" 'Asking the owner something'
+  lacks "$(cat "$WAITING")" 'Never repeat a pending question'
+  [ -z "$(literals_in "$s")" ]
+  [ -z "$(semis_in "$s")" ]
+  has "$(cat "$WAITING")" '`alfred-config get waiting-label`'
+}
+
+@test "CCW-246: README points to owner-communication and the rule has one home" {
+  o=$(sect "$README" '## Owner communication (SessionStart hook)' | flat)
+  l=$(sect "$README" '## Loop check at the end of every turn (Stop hook)' | flat)
+  has "$o" 'asked once'
+  has "$l" 'not to restate a parked question'
+  grep -qE 'asked once[^.]*hooks/owner-communication\.md' <<<"$o"
+  grep -qE 'not to restate a parked question[^.]*hooks/owner-communication\.md' <<<"$l"
+  run grep -rlF 'Never repeat a pending question' "$ROOT/README.md" "$ROOT/commands" "$ROOT/hooks"
+  [ "$output" = "$ROOT/hooks/owner-communication.md" ]
+}
