@@ -180,11 +180,20 @@ fi
 ( umask 077; printf 'Authorization: Bearer %s\n' "$LITELLM_KEY" > "$tmp/hdr" ); chmod 600 "$tmp/hdr"
 
 # The prompt must not have grown since the cost check, and each voice is
-# called once per resolver run (mkdir is atomic and refuses a symlink).
+# called once per resolver run. The once-guard is bash's own exclusive create
+# (noclobber opens a missing file with O_CREAT|O_EXCL, so the kernel picks one
+# winner and no external binary is involved). The set is inside a subshell
+# with its redirect, so it cannot leak into later redirects. A symlink is
+# refused first, because noclobber alone lets a link to /dev/null through; that
+# pre-check relies on the run dir's ownership check and its mode 700 above.
+# Dismissed: ln (the same coreutils dependency, and it needs a source file);
+# the option set in the main shell (it leaks into later redirects); opening a
+# numbered descriptor with exec (gains nothing and leaks the descriptor).
 [ -f /tmp/ecr-prompt.txt ] && [ ! -L /tmp/ecr-prompt.txt ] || bad "prompt file"
 [ "$(wc -c < /tmp/ecr-prompt.txt)" -le "$PB" ] || { echo "ERROR (prompt is larger than the cost check covered)"; exit 1; }
 PROMPT=$(cat /tmp/ecr-prompt.txt)
-mkdir "$PDIR/called.$SLOT" 2>/dev/null || { echo "ERROR (repeat call refused: $SLOT was already called in this run; a re-run is a new resolver run)"; exit 1; }
+MARK="$PDIR/called.$SLOT"
+[ ! -L "$MARK" ] && ( set -o noclobber; : > "$MARK" ) 2>/dev/null || { echo "ERROR (repeat call refused: $SLOT was already called in this run; a re-run is a new resolver run)"; exit 1; }
 
 # The request sends the panel file's max_tokens and nothing else about
 # reasoning: no reasoning_effort field (the gateway route holds that default;

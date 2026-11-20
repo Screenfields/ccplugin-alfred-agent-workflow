@@ -397,7 +397,7 @@ panel_row() { sed -n '2,$p' "$1" | awk -F'\t' -v s="$2" '$1 == s'; }
   [ "$(dirname "$f1")" != "$(dirname "$f2")" ]
   [ "$(stat -c %a "$(dirname "$f1")")" = 700 ]
   [[ "$(basename "$(dirname "$f1")")" =~ ^ecr-panel\.[A-Za-z0-9]{6}$ ]]
-  mkdir "$(dirname "$f1")/called.ecr-openai"
+  : > "$(dirname "$f1")/called.ecr-openai"
   run "$RES" --clean "$f1"
   [ "$status" -eq 0 ]
   [ ! -e "$(dirname "$f1")" ]
