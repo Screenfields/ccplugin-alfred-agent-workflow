@@ -1,9 +1,11 @@
 #!/usr/bin/env bats
-# ECR skill (CCW-189, CCW-191, CCW-194, CCW-196, CCW-193): the output branch that
+# ECR skill (CCW-189, CCW-191, CCW-194, CCW-196, CCW-193, CCW-209): the output branch that
 # makes a length-truncated, contentless reply visible as TRUNCATED; the key
 # staying off curl's command line; and (CCW-193) the per-voice template reading
 # its model and settings from the panel file, one call per voice per run, the
-# served-model line, and a skill text that holds no model id.
+# served-model line, and a skill text that holds no model id. CCW-209: the
+# once-per-voice guard is bash's exclusive create, so it holds whatever mkdir
+# the host ships.
 
 load helpers/ecr-gateway
 
@@ -342,10 +344,10 @@ teardown() {
   save_prompt; mk_panel r1
   run_template "$PANEL_F" ecr-openai
   [ "$status" -eq 0 ]
-  [ -d "$PANEL_DIR/called.ecr-openai" ]
+  [ -f "$PANEL_DIR/called.ecr-openai" ]
   run_template "$PANEL_F" ecr-openai
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ERROR (repeat call refused: ecr-openai was already called in this run; a re-run is a new resolver run)"* ]]
+  [ "$output" = "ERROR (repeat call refused: ecr-openai was already called in this run; a re-run is a new resolver run)" ]
   [ "$(calls_count chat)" -eq 1 ]
   run_template "$PANEL_F" ecr-google
   [ "$status" -eq 0 ]
@@ -357,7 +359,7 @@ teardown() {
   printf 28 > "$STUB_DIR/chat.exit"
   run_template "$PANEL_F" ecr-openai
   [[ "$output" == *"TIMEOUT (>180s)"* ]]
-  [ -d "$PANEL_DIR/called.ecr-openai" ]
+  [ -f "$PANEL_DIR/called.ecr-openai" ]
   run_template "$PANEL_F" ecr-openai
   [ "$status" -eq 1 ]
   [[ "$output" == *"repeat call refused"* ]]
@@ -368,37 +370,60 @@ teardown() {
   save_prompt; mk_panel r1
   printf 1 > "$STUB_DIR/chat.sleep"
   make_template "$PANEL_F" ecr-openai
-  # CCW-209 diagnostics: a logging mkdir in front of the real one, installed
-  # after mk_panel so the fixture's own mkdir calls are not logged.
-  cat > "$BATS_TEST_TMPDIR/bin/mkdir" <<'WRAP'
-#!/bin/bash
-command -p mkdir "$@"; rc=$?
-last="${*: -1}"
-printf '%s ppid=%s args=%s rc=%s inode=%s\n' "$(date +%s.%N)" "$PPID" "$*" "$rc" "$(stat -c %i "$last" 2>/dev/null)" >> "$STUB_DIR/mkdir.log"
-exit "$rc"
-WRAP
-  chmod +x "$BATS_TEST_TMPDIR/bin/mkdir"
   env PATH="$BATS_TEST_TMPDIR/bin:$PATH" TMPDIR="$TMPDIR" bash "$BATS_TEST_TMPDIR/template.sh" > "$BATS_TEST_TMPDIR/o1" 2>&1 &
   p1=$!
   env PATH="$BATS_TEST_TMPDIR/bin:$PATH" TMPDIR="$TMPDIR" bash "$BATS_TEST_TMPDIR/template.sh" > "$BATS_TEST_TMPDIR/o2" 2>&1 &
   p2=$!
   r1=0; r2=0
   wait "$p1" || r1=$?; wait "$p2" || r2=$?
-  n=$(calls_count chat)
-  if [ "$n" -ne 1 ]; then
-    {
-      echo "DIAG (CCW-209): chat lines n=$n, exit codes r1=$r1 r2=$r2"
-      echo "DIAG calls file:"; cat "$STUB_DIR/calls"
-      echo "DIAG o1:"; cat "$BATS_TEST_TMPDIR/o1"
-      echo "DIAG o2:"; cat "$BATS_TEST_TMPDIR/o2"
-      if [ -d "$PANEL_DIR/called.ecr-openai" ]; then echo "DIAG called.ecr-openai exists"; else echo "DIAG called.ecr-openai missing"; fi
-      echo "DIAG mkdir.log:"; cat "$STUB_DIR/mkdir.log"
-      echo "DIAG bats: $(bats --version)  kernel: $(uname -r)  fstype: $(stat -f -c %T "$PANEL_DIR")"
-      echo "DIAG marker: $(ls -lid "$PANEL_DIR/called.ecr-openai" 2>&1)"
-    } >&3
-  fi
-  [ "$n" -eq 1 ]
-  cat "$BATS_TEST_TMPDIR/o1" "$BATS_TEST_TMPDIR/o2" | grep -q 'repeat call refused'
+  codes=$(printf '%s\n' "$r1" "$r2" | sort | tr '\n' ' ')
+  [ "$(calls_count chat)" -eq 1 ] && [ "$codes" = "0 1 " ] || { echo "chat=$(calls_count chat) codes=$codes"; return 1; }
+  [ "$(cat "$BATS_TEST_TMPDIR/o1" "$BATS_TEST_TMPDIR/o2" | grep -cxF 'ERROR (repeat call refused: ecr-openai was already called in this run; a re-run is a new resolver run)')" -eq 1 ]
+  [ -f "$PANEL_DIR/called.ecr-openai" ]
+}
+
+@test "CCW-209: a non-atomic mkdir on PATH cannot let a repeat call through" {
+  save_prompt; mk_panel r1
+  printf '#!/bin/bash\ncommand -p mkdir -p "$@"\n' > "$BATS_TEST_TMPDIR/bin/mkdir"
+  chmod +x "$BATS_TEST_TMPDIR/bin/mkdir"
+  run_template "$PANEL_F" ecr-openai
+  [ "$status" -eq 0 ]
+  [ "$(calls_count chat)" -eq 1 ]
+  run_template "$PANEL_F" ecr-openai
+  [ "$status" -eq 1 ]
+  [ "$output" = "ERROR (repeat call refused: ecr-openai was already called in this run; a re-run is a new resolver run)" ]
+  [ "$(calls_count chat)" -eq 1 ]
+}
+
+@test "CCW-209: the guard in the fence is exactly the decided text, in order, with no mkdir" {
+  awk '/^# LITELLM_URL:/{on=1} on&&/^```/{exit} on{print}' "$SKILL" > "$BATS_TEST_TMPDIR/g.sh"
+  [ "$(grep -c '^MARK=' "$BATS_TEST_TMPDIR/g.sh")" -eq 1 ]
+  [ "$(grep '^MARK=' "$BATS_TEST_TMPDIR/g.sh")" = 'MARK="$PDIR/called.$SLOT"' ]
+  expected=$(cat <<'GUARD'
+[ ! -L "$MARK" ] && ( set -o noclobber; : > "$MARK" ) 2>/dev/null || { echo "ERROR (repeat call refused: $SLOT was already called in this run; a re-run is a new resolver run)"; exit 1; }
+GUARD
+)
+  [ "$(grep -c '^\[ ! -L "\$MARK" \]' "$BATS_TEST_TMPDIR/g.sh")" -eq 1 ]
+  [ "$(grep '^\[ ! -L "\$MARK" \]' "$BATS_TEST_TMPDIR/g.sh")" = "$expected" ]
+  [ "$(grep -c 'MARK' "$BATS_TEST_TMPDIR/g.sh")" -eq 2 ]
+  [ "$(grep -c 'called\.' "$BATS_TEST_TMPDIR/g.sh")" -eq 1 ]
+  [ "$(grep -c 'mkdir' "$BATS_TEST_TMPDIR/g.sh")" -eq 0 ]
+  pr=$(grep -n '^PROMPT=\$(cat' "$BATS_TEST_TMPDIR/g.sh" | cut -d: -f1)
+  mk=$(grep -n '^MARK=' "$BATS_TEST_TMPDIR/g.sh" | cut -d: -f1)
+  gd=$(grep -n '^\[ ! -L "\$MARK" \]' "$BATS_TEST_TMPDIR/g.sh" | cut -d: -f1)
+  ec=$(grep -n '^echo "voice=' "$BATS_TEST_TMPDIR/g.sh" | cut -d: -f1)
+  [ "$pr" -lt "$mk" ] && [ "$mk" -lt "$gd" ] && [ "$gd" -lt "$ec" ]
+  ! grep -rn 'mkdir is atomic' "$BATS_TEST_DIRNAME/../skills"
+}
+
+@test "CCW-209: an existing regular file marker is kept byte for byte and refuses the call" {
+  save_prompt; mk_panel r1
+  printf KEEP > "$PANEL_DIR/called.ecr-openai"
+  run_template "$PANEL_F" ecr-openai
+  [ "$status" -eq 1 ]
+  [ "$output" = "ERROR (repeat call refused: ecr-openai was already called in this run; a re-run is a new resolver run)" ]
+  [ ! -e "$STUB_DIR/calls" ]
+  [ "$(cat "$PANEL_DIR/called.ecr-openai")" = KEEP ]
 }
 
 @test "24 the marker exists at the moment the chat call is made" {
@@ -409,19 +434,31 @@ WRAP
   p=$!
   for _ in $(seq 1 40); do [ -s "$STUB_DIR/calls" ] && break; sleep 0.1; done
   kill -0 "$p"
-  [ -d "$PANEL_DIR/called.ecr-openai" ]
+  [ -f "$PANEL_DIR/called.ecr-openai" ]
   wait "$p"
 }
 
-@test "24 a pre-existing marker (directory or symlink) refuses the call" {
-  save_prompt; mk_panel r1
-  mkdir "$PANEL_DIR/called.ecr-openai"
-  run_template "$PANEL_F" ecr-openai
-  [ "$status" -eq 1 ]; [[ "$output" == *"repeat call refused"* ]]
-  ln -s "$BATS_TEST_TMPDIR" "$PANEL_DIR/called.ecr-google"
-  run_template "$PANEL_F" ecr-google
-  [ "$status" -eq 1 ]; [[ "$output" == *"repeat call refused"* ]]
+@test "24 a pre-existing marker (directory or any symlink) refuses the call" {
+  save_prompt
+  mkdir "$BATS_TEST_TMPDIR/tdir"
+  printf KEEP > "$BATS_TEST_TMPDIR/treg"
+  for kind in dir lnkdir dangling lnkreg devnull; do
+    mk_panel "k-$kind"
+    M="$PANEL_DIR/called.ecr-openai"
+    case "$kind" in
+      dir) mkdir "$M" ;;
+      lnkdir) ln -s "$BATS_TEST_TMPDIR/tdir" "$M" ;;
+      dangling) ln -s "$BATS_TEST_TMPDIR/dangling" "$M" ;;
+      lnkreg) ln -s "$BATS_TEST_TMPDIR/treg" "$M" ;;
+      devnull) ln -s /dev/null "$M" ;;
+    esac
+    run_template "$PANEL_F" ecr-openai
+    [ "$status" -eq 1 ] || { echo "kind=$kind status=$status out=$output"; return 1; }
+    [ "$output" = "ERROR (repeat call refused: ecr-openai was already called in this run; a re-run is a new resolver run)" ] || { echo "kind=$kind out=$output"; return 1; }
+  done
   [ ! -e "$STUB_DIR/calls" ]
+  [ ! -e "$BATS_TEST_TMPDIR/dangling" ]
+  [ "$(cat "$BATS_TEST_TMPDIR/treg")" = KEEP ]
 }
 
 @test "24 ecr-panel-resolve --clean removes a run directory with its markers" {
@@ -430,7 +467,7 @@ WRAP
   [ "$status" -eq 0 ]
   f=$(panel_file)
   run_template "$f" ecr-openai
-  [ -d "$(dirname "$f")/called.ecr-openai" ]
+  [ -f "$(dirname "$f")/called.ecr-openai" ]
   run "$RES" --clean "$f"
   [ "$status" -eq 0 ]
   [ ! -e "$(dirname "$f")" ]
