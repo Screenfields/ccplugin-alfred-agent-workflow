@@ -34,7 +34,8 @@ artifacts or agent messages.
 - A wake with no news produces no reply at all.
 - A turn that exists only because a Stop hook or a wake required it ends with
   no text, or a one-line status, when nothing changed for the owner. The status
-  never restates a parked question.
+  never restates a parked question. A wake with no news stays silent, as
+  above. Urgent requests under AP-ADR0031 are excepted, see below.
 
 ## Asking the owner something
 
