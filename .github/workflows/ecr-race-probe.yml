@@ -1,0 +1,46 @@
+name: ecr-race-probe
+on:
+  pull_request:
+    paths: ['.github/workflows/ecr-race-probe.yml']
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Install bats
+        run: sudo apt-get update -q && sudo apt-get install -y -q bats age
+      - name: Probe
+        run: |
+          mkdir --version
+          readlink -f "$(command -v mkdir)"
+          git rev-parse HEAD
+          grep -c 'set -o noclobber' skills/ecr/SKILL.md
+          bats --version
+          uname -r
+          cat /etc/os-release
+          mkdir -p probe-out
+          hits=0
+          for i in $(seq 1 200); do
+            rc=0
+            bats -f 'two calls for the same voice started together' tests/ecr-template.bats > probe-out/run-$i.txt 2>&1 || rc=$?
+            echo "iter $i rc=$rc"
+            if [ "$rc" -ne 0 ]; then
+              hits=$((hits + 1))
+              if [ "$hits" -eq 1 ]; then cp probe-out/run-$i.txt probe-out/first-fail.txt; fi
+            else
+              rm -f probe-out/run-$i.txt
+            fi
+          done
+          echo "hits=$hits iterations=200"
+          if [ "$hits" -gt 0 ]; then exit 1; fi
+      - name: Upload probe-out
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-out
+          path: probe-out/
