@@ -488,6 +488,221 @@ holders_of() {
   [ "$(printf '%s' "$output" | jq -r .armed)" = "true" ]
 }
 
+# --- owner: Claude Code daemon mode, a versioned binary (CCW-239) -----------
+
+# vcopy <relative path> — a copy of bash at $BATS_TEST_TMPDIR/fake/<path>: its
+# comm is the file name and its exe is that path. Sets vf. (exec -a only changes
+# argv[0], and a script has exe /usr/bin/bash, so neither can fake it.)
+vcopy() {
+  vf="$BATS_TEST_TMPDIR/fake/$1"
+  mkdir -p "${vf%/*}"
+  cp "$(command -v bash)" "$vf"
+}
+# vlaunch <copy> <script> <args...> — run the copy with `-c <script> _ <args...>`
+# in the background. Sets fake_pid; teardown kills it by that pid. $VOUT is the
+# default output file of the scripts below.
+vlaunch() {
+  local f="$1" s="$2"
+  shift 2
+  "$f" -c "$s" _ "$@" 3>&- &
+  fake_pid=$!
+  FAKE_PIDS+=("$fake_pid")
+}
+VDEF='"$@" > "$VOUT" 2>&1 3>&- & wait'
+ppid_of() { sed 's/.*) //' "/proc/$1/stat" | awk '{print $2}'; }
+start_of() { sed 's/.*) //' "/proc/$1/stat" | awk '{print $20}'; }
+owner_pid() { cut -d' ' -f1 "$STATE/alfred-wake.owner"; }
+# daemon_setup — the shared harness of the CCW-239 cases.
+daemon_setup() {
+  unset ALFRED_WAKE_OWNER_COMM
+  export CLAUDE_CODE_SESSION_ID=sess-239
+  export VOUT="$BATS_TEST_TMPDIR/v.out"
+}
+# vwait <rel path> — a wait under a bash copy at that path; sets vf, fake_pid, wait_pid.
+vwait() {
+  vcopy "$1"
+  vlaunch "$vf" "$VDEF" "$WAKE" wait
+  until_true 50 pidfile_set || return 1
+  wait_pid=$(cat "$STATE/alfred-wake.pid")
+}
+
+@test "CCW-239: AC1 a versioned daemon ancestor is the owner" {
+  daemon_setup
+  vwait claude/versions/2.1.328
+  [ "$(wc -l < "$STATE/alfred-wake.owner")" -eq 1 ]
+  grep -qE '^[0-9]+ [0-9]+$' "$STATE/alfred-wake.owner"
+  [ "$(owner_pid)" = "$fake_pid" ]
+  [ "$(cut -d' ' -f2 "$STATE/alfred-wake.owner")" = "$(start_of "$fake_pid")" ]
+  run "$WAKE" status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"armed:      yes (pid $wait_pid"* ]] || { echo "$output"; return 1; }
+  run "$WAKE" status --json
+  [ "$(printf '%s' "$output" | jq -r .state)" = "waiting" ]
+}
+
+@test "CCW-239: AC2 the nearest of two versioned ancestors is the owner" {
+  daemon_setup
+  export IDFILE="$BATS_TEST_TMPDIR/inner.pid"
+  vcopy claude/versions/2.1.328
+  local inner="$vf" outer_pid inner_pid
+  vcopy claude/bg/claude/versions/2.1.328
+  vlaunch "$vf" '"$@" > "$VOUT" 2>&1 3>&- & wait; sleep 31.4159' \
+    "$inner" -c 'echo $$ > "$IDFILE"; "$@" > "$VOUT.w" 2>&1 3>&- & wait' _ "$WAKE" wait
+  outer_pid="$fake_pid"
+  until_true 50 pidfile_set
+  wait_pid=$(cat "$STATE/alfred-wake.pid")
+  inner_pid=$(cat "$IDFILE")
+  [ "$inner_pid" != "$outer_pid" ]
+  [ "$(owner_pid)" = "$inner_pid" ]
+  kill -KILL "$inner_pid"
+  until_true 50 gone "$inner_pid"
+  alive "$outer_pid"
+  alive "$wait_pid"
+  run "$WAKE" status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"process $inner_pid is gone"* ]] || { echo "$output"; return 1; }
+  run "$WAKE" status --json
+  [ "$(printf '%s' "$output" | jq -r .state)" = "down" ]
+}
+
+@test "CCW-239: AC3 the nearest wins across both rules" {
+  daemon_setup
+  vcopy d/claude/versions/2.1.328
+  fake_claude claude "$vf" -c "$VDEF" _ "$WAKE" wait
+  until_true 50 pidfile_set
+  [ "$(owner_pid)" != "$fake_pid" ]
+  [ "$(owner_pid)" = "$(ppid_of "$(cat "$STATE/alfred-wake.pid")")" ]
+  [ "$(ppid_of "$(owner_pid)")" = "$fake_pid" ]
+}
+
+# not_owner <rel path> [<launch path>] — a wait under a bash copy at <rel path>;
+# the owner file must not name the copy (it may hold `unknown`, or a real claude
+# above the runner). Stops the wait and the copy afterwards.
+not_owner() {
+  rm -rf "$STATE"
+  vcopy "$1"
+  vlaunch "${2:-$vf}" "$VDEF" "$WAKE" wait
+  until_true 50 pidfile_set
+  wait_pid=$(cat "$STATE/alfred-wake.pid")
+  [ "$(owner_pid)" != "$fake_pid" ] || { echo "$1: owner is the fake"; return 1; }
+  kill -KILL "$fake_pid" "$wait_pid" 2>/dev/null || true
+  until_true 50 gone "$wait_pid"
+}
+
+@test "CCW-239: AC4 loose matches are rejected" {
+  daemon_setup
+  not_owner claude/versions/1234
+  not_owner claude/versions/1.2
+  not_owner claude/versions/1.2.3.4
+  not_owner other/2.1.328
+  not_owner notclaude/versions/2.1.328
+  not_owner claude/versions/x/2.1.328
+  vcopy claude/versions/2.1.329
+  ln -s 2.1.329 "${vf%/*}/2.1.330"
+  not_owner claude/versions/2.1.329 "${vf%/*}/2.1.330"
+}
+
+@test "CCW-239: AC4h glob and regex characters in the path are inert" {
+  daemon_setup
+  vwait 'we[ir]d*dir/claude/versions/2.1.328'
+  [ "$(owner_pid)" = "$fake_pid" ]
+}
+
+@test "CCW-239: AC5 the claude name still works, nearest first" {
+  daemon_setup
+  fake_claude claude "$WAKE" wait
+  until_true 50 pidfile_set
+  [ "$(owner_pid)" = "$fake_pid" ]
+  run "$WAKE" status
+  [ "$status" -eq 0 ]
+  kill -KILL "$fake_pid" "$(cat "$STATE/alfred-wake.pid")"
+  rm -rf "$STATE"
+  local cs="$BATS_TEST_TMPDIR/fake/claude" cpid
+  vcopy d/claude/versions/2.1.328
+  vlaunch "$vf" "$VDEF" "$cs" "$WAKE" wait
+  until_true 50 pidfile_set
+  cpid=$(ppid_of "$(cat "$STATE/alfred-wake.pid")")
+  [ "$(owner_pid)" = "$cpid" ]
+  [ "$(ppid_of "$cpid")" = "$fake_pid" ]
+}
+
+@test "CCW-239: AC6a an override applies alone, over a nearer version" {
+  daemon_setup
+  export ALFRED_WAKE_OWNER_COMM=fake-owner-a
+  vcopy claude/versions/2.1.328
+  fake_claude fake-owner-a "$vf" -c "$VDEF" _ "$WAKE" wait
+  until_true 50 pidfile_set
+  [ "$(owner_pid)" = "$fake_pid" ]
+}
+
+@test "CCW-239: AC6b an override equal to a version needs no exe check" {
+  daemon_setup
+  export ALFRED_WAKE_OWNER_COMM=2.1.328
+  vwait other/2.1.328
+  [ "$(owner_pid)" = "$fake_pid" ]
+}
+
+@test "CCW-239: AC6c an override with no match gets no versioned fallback" {
+  daemon_setup
+  export ALFRED_WAKE_OWNER_COMM=no-real-owner-comm
+  vwait claude/versions/2.1.328
+  [ "$(cat "$STATE/alfred-wake.owner")" = "unknown" ]
+}
+
+@test "CCW-239: AC6d an empty override counts as unset" {
+  daemon_setup
+  export ALFRED_WAKE_OWNER_COMM=
+  vwait claude/versions/2.1.328
+  [ "$(owner_pid)" = "$fake_pid" ]
+}
+
+@test "CCW-239: AC7 a deleted binary still matches" {
+  daemon_setup
+  vcopy claude/versions/2.1.331
+  vlaunch "$vf" 'rm -f "$1"; shift; "$@" > "$VOUT" 2>&1 3>&- & wait' "$vf" "$WAKE" wait
+  until_true 50 pidfile_set
+  [[ "$(readlink "/proc/$fake_pid/exe")" == *" (deleted)" ]] || { readlink "/proc/$fake_pid/exe"; return 1; }
+  [ ! -e "$vf" ]
+  [ "$(owner_pid)" = "$fake_pid" ]
+}
+
+@test "CCW-239: AC8 an unreadable exe on a versioned ancestor fails closed" {
+  daemon_setup
+  command -v python3 > /dev/null || skip "no python3"
+  local py="$BATS_TEST_TMPDIR/fake/claude/versions/2.1.328" inner_pid outer_pid
+  mkdir -p "${py%/*}"
+  cp "$(command -v python3)" "$py"
+  "$py" -I -c 'import ctypes' 2> /dev/null || skip "the python copy cannot start"
+  vcopy claude/bg/claude/versions/2.1.328
+  vlaunch "$vf" '"$@" > "$VOUT" 2>&1 3>&- & wait; sleep 31.4159' \
+    "$py" -I -c 'import ctypes, os, subprocess, sys
+ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
+sys.exit(subprocess.call(sys.argv[1:], stdout=open(os.environ["VOUT"] + ".w", "w"), stderr=subprocess.STDOUT))' "$WAKE" wait
+  outer_pid="$fake_pid"
+  until_true 50 pidfile_set
+  wait_pid=$(cat "$STATE/alfred-wake.pid")
+  inner_pid=$(ppid_of "$wait_pid")
+  [ "$inner_pid" != "$outer_pid" ]
+  [ "$(cat "/proc/$inner_pid/comm")" = "2.1.328" ]
+  if readlink "/proc/$inner_pid/exe" > /dev/null 2>&1; then skip "exe is readable (CAP_SYS_PTRACE?)"; fi
+  [ "$(cat "$STATE/alfred-wake.owner")" = "unknown" ]
+  run "$WAKE" status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no owner could be found"* ]] || { echo "$output"; return 1; }
+}
+
+@test "CCW-239: AC9 the status hint names the stale override" {
+  export CLAUDE_CODE_SESSION_ID=sess-239
+  start a wait
+  until_true 30 pidfile_is "$a_pid"
+  [ "$(cat "$STATE/alfred-wake.owner")" = "unknown" ]
+  run "$WAKE" status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"set ALFRED_WAKE_OWNER_COMM"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"unset"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"applies alone"* ]] || { echo "$output"; return 1; }
+}
+
 # --- self-upgrade (ccplugin#107) ----------------------------------------------
 
 # fake_install <version>: an installed plugin whose alfred-wake reports itself.
