@@ -1,0 +1,43 @@
+name: ecr-race-probe
+
+# CCW-209 temporary probe: runs one race test in a loop. Never merged.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ecr-race-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats
+        run: sudo apt-get update -q && sudo apt-get install -y -q bats age jq
+
+      - name: Loop the race test (200 iterations, stop at first hit)
+        run: |
+          mkdir -p probe-out
+          for i in $(seq 200); do
+            echo "iteration $i" > probe-out/progress.txt
+            if ! bats -f 'two calls for the same voice started together' tests/ecr-template.bats > "probe-out/run-$i.txt" 2>&1; then
+              echo "HIT at iteration $i"
+              cp "probe-out/run-$i.txt" probe-out/hit.txt
+              cat "probe-out/run-$i.txt"
+              exit 1
+            fi
+            rm -f "probe-out/run-$i.txt"
+          done
+          echo "no hit in 200 (iterations reached: 200)"
+
+      - name: Upload probe output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-out
+          path: probe-out/
