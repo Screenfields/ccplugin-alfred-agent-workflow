@@ -270,7 +270,7 @@ Everything is env-driven; the defaults are correct for a standard devbox pod.
 | `ALFRED_WAKE_STOP_GRACE` | `5` | Seconds a new instance waits for the previous one to exit after SIGTERM before SIGKILL |
 | `ALFRED_WAKE_FAIL_THRESHOLD` | `5` | Consecutive failed passes before a source raises `WAKE-ERROR` |
 | `ALFRED_WAKE_STATE_DIR` | `/workspace/.alfred-wake`, else `$XDG_STATE_HOME/alfred-wake` | Where cursors live |
-| `ALFRED_WAKE_OWNER_COMM` | `claude` | The command name of the process that owns a wait (the nearest ancestor with this name, compared on its first 15 characters). Set it only when the harness binary has another name |
+| `ALFRED_WAKE_OWNER_COMM` | `claude` | The command name of the process that owns a wait. Unset or empty, the owner is the nearest ancestor that is named exactly `claude` (first 15 characters), or that is the Claude Code daemon form: a comm of three numeric parts (`x.y.z`) whose exe is `*/claude/versions/<comm>`. The daemon form covers the `~/.local/share/claude` layout only; another layout fails closed (`status` exits 1) and needs this variable. An ancestor with a version comm and an unreadable exe also fails closed. When set and non-empty, the value is exact and applies alone: no daemon form, no exe check. A stale value therefore gets no fallback, so unset it. Set it only when the process name is neither `claude` nor a version |
 | `ALFRED_WAKE_TZ` | `Europe/Amsterdam` | Timezone for `last=` timestamps |
 | `ALFRED_WAKE_BIN_DIR` | `$HOME/.local/bin` | Target of `alfred-wake install`, and the link self-upgrade repoints |
 | `ALFRED_WAKE_NO_UPGRADE` | — | `1` = never exec a newer installed alfred-wake |
@@ -293,7 +293,7 @@ Cursors on ephemeral storage mean a restarted lead replays its whole history as
 | `buzz_identity.json` | Own Buzz pubkey (used to filter out your own posts) |
 | `failures.json` | Per-source consecutive-failure count + last-reported timestamp |
 | `armed` | Touched every pass by `run`; `status` and `/alfred-agent:check-messages` read its mtime |
-| `alfred-wake.owner` | The Claude Code process that started the running wait: `<pid> <starttime>`, or `unknown`. Removed with the pidfile. `unknown` means owner discovery failed (no ancestor has the owner name), not that the owner died. The rules are in the header of `bin/alfred-wake` |
+| `alfred-wake.owner` | The Claude Code process that started the running wait: `<pid> <starttime>`, or `unknown`. Removed with the pidfile. `unknown` means owner discovery failed (no ancestor matches the owner rule), not that the owner died. The rules are in the header of `bin/alfred-wake` |
 | `.initialized` | Marker — its absence means "first run, seed only, don't replay" |
 | `alfred-wake.log` | One line per pass: timestamp + counts only, never bodies, never secrets. Rotated at ~1 MB |
 
@@ -1080,7 +1080,7 @@ In multi-agent project setups, only the project's lead agent typically gets a me
 | `MCP server failed to connect` | Required env var missing or empty | `/mcp` to see error; check env vars per step 1 |
 | Messages reach the service but you don't receive them | `X-Agent-ID` header mismatch | Verify your `AGENT_ID` env matches what senders address |
 | `no wake bridge running` from `/alfred-agent:check-messages` | No live `alfred-wake wait` process, with a live owner, for this state dir | Start one: `Bash(command: "alfred-wake wait", run_in_background: true)`; `alfred-wake status` shows the pidfile PID and last-pass age |
-| `alfred-wake status` prints `armed:      no … no owner could be found` while a wait is alive | `CLAUDE_CODE_SESSION_ID` is set but no ancestor of the wait has the owner name (`claude` by default), so `alfred-wake.owner` holds `unknown` | Set `ALFRED_WAKE_OWNER_COMM` to your Claude Code binary's process name (see `ps -o comm= -p <pid of the session>`). It must be in the environment of the process that runs `alfred-wake wait`, for example exported in the shell profile, not only set in an interactive shell. Then relaunch `alfred-wake wait` |
+| `alfred-wake status` prints `armed:      no … no owner could be found` while a wait is alive | `CLAUDE_CODE_SESSION_ID` is set but no ancestor of the wait matches the owner rule (`claude`, or a version comm with an exe in `claude/versions`), or the version ancestor's exe cannot be read, so `alfred-wake.owner` holds `unknown` | Check `ps -o comm= -p <pid of the session>` and `readlink /proc/<pid>/exe`. If the exe is not under `claude/versions/<comm>`, set `ALFRED_WAKE_OWNER_COMM` to the process name. It must be in the environment of the process that runs `alfred-wake wait`, for example exported in the shell profile. A set value applies alone, so a `stale` value (a version that no longer runs) also gives this error: unset it. Then relaunch `alfred-wake wait` |
 | Wake bridge silent while messages arrive | Wrong or missing `AGENT_MESSAGING_TOKEN` / `AGENT_ID` | `alfred-wake check` — it prints the resolved URL, auth mode and agent id, and any `WAKE-ERROR` reason |
 | Buzz never wakes you | No buzz-mcp sidecar in the pod, or no Buzz identity | `alfred-wake check` says `buzz: no sidecar …`. Expected for leads without a Buzz identity — it is not an error |
 
