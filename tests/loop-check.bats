@@ -112,6 +112,7 @@ twentyfive() {
   issues o/a "7:Fix the thing:status:ready,status:waiting-on-owner"
   lc
   silent
+  [ ! -f "$STATEDIR/s1.json" ] || [ "$(state_of '.pending_note // "none"')" = none ]
 }
 
 @test "no items is allowed, silently" {
@@ -2040,4 +2041,50 @@ seed_state() {
   run --separate-stderr bash -c 'printf "%s" "$1" | "$2" --level hub --hook --thresholds "$3"' _ "$(hook_json)" "$LC" "$THR"
   blocked
   [ "$(gql_calls)" = "1" ]
+}
+
+# CCW-246: a parked question is asked once and not restated by a forced turn.
+ASKONCE="A question already parked is not restated: when nothing changed for the owner, end the turn with no text or one status line."
+parked_fixture() { issues o/a "7:Fix the thing:status:ready" "8:Asked the owner:status:in-progress,status:waiting-on-owner"; }
+
+@test "CCW-246: the block reason carries the not-restated sentence, no parked item or question" {
+  parked_fixture
+  lc
+  [ "$status" -eq 0 ]
+  blocked
+  reason=$(jq -r .reason <<< "$output")
+  [[ "$reason" == *"$ASKONCE"* ]]
+  [[ "$reason" != *"o/a#8"* && "$reason" != *"Asked the owner"* ]]
+}
+
+@test "CCW-246: an unchanged queue stays silent and the stored note never names the parked item" {
+  parked_fixture
+  lc; blocked
+  at 1; lc true
+  silent
+  at 300; lc false
+  silent
+  [[ "$(state_of '.pending_note.text')" == *"o/a#7"* ]]
+  [[ "$(state_of '.pending_note.text')" != *"o/a#8"* && "$(state_of '.pending_note.text')" != *"Asked the owner"* ]]
+  note "next prompt"
+  [ "$status" -eq 0 ]
+  ctx=$(ctx_of)
+  [[ "$ctx" == *"o/a#7"* ]]
+  [[ "$ctx" != *"o/a#8"* && "$ctx" != *"Asked the owner"* ]]
+}
+
+@test "CCW-246: through stop.sh the sentence appears once, bridge down and bridge up" {
+  parked_fixture
+  bridge down
+  stop
+  [ "$status" -eq 0 ]; blocked
+  reason=$(jq -r .reason <<< "$output")
+  [ "$(grep -oF "$ASKONCE" <<< "$reason" | wc -l)" -eq 1 ]
+  [ "$(grep -oF "Write no text about it unless the relaunch fails" <<< "$reason" | wc -l)" -eq 1 ]
+  rm -rf "$STATEDIR"
+  bridge up
+  stop
+  [ "$status" -eq 0 ]; blocked
+  reason=$(jq -r .reason <<< "$output")
+  [ "$(grep -oF "$ASKONCE" <<< "$reason" | wc -l)" -eq 1 ]
 }

@@ -32,6 +32,10 @@ artifacts or agent messages.
     `[metis#122](https://github.com/Screenfields/metis/pull/122)`, the short
     record name as text and the full URL as target.
 - A wake with no news produces no reply at all.
+- A turn that exists only because a Stop hook or a wake required it ends with
+  no text, or a one-line status, when nothing changed for the owner. The status
+  never restates a parked question. A wake with no news stays silent, as
+  above. Urgent requests under AP-ADR0031 are excepted, see below.
 
 ## Asking the owner something
 
@@ -45,12 +49,30 @@ your inbox stalls, possibly for hours (alfred-platform#917).
   walkthroughs the owner started are fine.
 - Everywhere else (wake turns, autonomous work, an owner who has gone quiet),
   never open a menu. Instead:
-  1. Write the question as plain text as your last output: the decision, the
+  1. Park it at once on the item it blocks (file one first when none exists):
+     a comment on the item plus the waiting label, whose name you read with
+     `alfred-config get waiting-label`, so `/waiting` finds it. Parking takes
+     the whole item out of the actionable set, even when the question blocks
+     only part of it (the Escalate paragraph of `agreement/lead.md`). A
+     question that blocks nothing is a comment on the item, with no label. A
+     question relayed through `[owner-join]` is parked on the item the
+     owner-join names, and one that names no item gets one filed first.
+  2. Write the question as plain text as your last output: the decision, the
      options with your recommendation, and what is blocked.
-  2. If it blocks you and a written question is not enough, send
+  3. If it blocks you and a written question is not enough, send
      `hub` an `[owner-join] <project>: <decision>` message
      (Decision, Options, Blocked, Session). The hub brings it to the owner.
-  3. Keep working on everything that is not blocked, and keep relaunching the
+  4. Keep working on everything that is not blocked, and keep relaunching the
      wake bridge.
+- Ask once, in every turn, whoever started it:
+  - Never repeat a pending question in a later reply. A changed question is
+    stated once, as the change.
+  - A menu the owner dismisses without answering counts as asked: park it as in
+    the steps above.
+  - A parked question comes back only through `/waiting`, or when the owner asks
+    for the open points. On that request, run the `/waiting` gather step instead
+    of listing them from memory.
+  - Urgent requests under AP-ADR0031 are the one exception: they keep ending
+    every reply of the sending session, as `/waiting` describes.
 - Once the owner decides, record it on the issue or PR in English. If you
   sent an owner-join, also send the hub `[owner-join] resolved: <decision>`.
