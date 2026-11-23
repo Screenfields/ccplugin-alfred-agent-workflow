@@ -1,0 +1,1 @@
+{"content":"\u001b_bk;t=1700000000002\u0007boot ok\n\u001b_bk;t=1700000000002\u0007e2e \u001b[1msummary:\u001b[0m refused=3 total=40\nE2E summary: upper\na.c\nabc\n[x]\nx\nrun with -v flag\ne2e summary: crlf\r\ne2e summary: leaks ghs_LOGPLANTED0123456789 and bkPLANTEDBK0123\n"}

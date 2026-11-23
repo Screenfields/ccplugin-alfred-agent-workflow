@@ -838,12 +838,27 @@ age-encrypted envelope in the build env `ALFRED_GIT_ENVELOPE`. Only the worker's
 The tool prints the per-job states and the last 50 log lines of each failed job.
 
 ```bash
-alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>]
+alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>] [--print-lines <text>]
 ```
 
 Defaults: the pipeline slug is the origin's repo name, lowercased with `_` replaced by `-`, plus
 `-tests`; the commit is `git rev-parse HEAD` (it must be pushed); the branch is the current branch (a
 detached HEAD needs `--branch`); the wait is 1800 s (at least 30).
+
+**`--print-lines <text>`.** After the build ends, the tool prints the log lines that contain `<text>` for
+every script job that passed, failed, timed out or broke, each line prefixed with the job name
+(`<job name>: <line>`). The match is a fixed string (no regex) and case sensitive, on the cleaned log, the
+whole log and not only its tail. At most 20 lines per job are printed (the first 20), followed by
+`<job name>: print-lines cap of 20 reached, more lines match` when more match; at most 200 lines per run,
+then `print-lines: total cap of 200 reached, later jobs not matched`. A job with no match prints
+`<job name>: print-lines: no match`; a log that cannot be fetched prints
+`<job name>: print-lines: log unavailable`; a job in another state prints
+`<job name>: print-lines: not read (state <state>)`. Each matched line is scrubbed first and then cut to
+500 characters (a cut line ends with ` [cut]`). The value must be one non-empty line without control
+characters, at most 300 characters, given once; otherwise exit 2 before anything is sent. Each log is
+fetched once, inside the same 120 s report budget as the failed-job tails, and the exit code does not
+change. Matched lines are printed after the failed-job log tails and before `state:`. Design notes:
+`docs/baseline/test-run-print-lines.md`.
 
 The bare name `alfred-test-run` resolves from `~/.local/bin`: the wake bridge links it there on
 `install` and at every `wait` launch, so it works in a session that loaded an older plugin, without a
@@ -883,7 +898,8 @@ tool exits 2 and sends nothing, so a token cannot go to another repo's pipeline.
 | 129, 130, 143 | a signal (HUP, INT, TERM) |
 
 Output: `build: <url>` as the first line, one `job <state> <name>` line per script job, the log tail of
-each `failed`, `timed_out` or `broken` job (at most 5 jobs, 120 s in total), `state: <state>`, and
+each `failed`, `timed_out` or `broken` job (at most 5 jobs, 120 s in total), the `--print-lines` matches
+(only with that flag), `state: <state>`, and
 `build: <url>` again as the last line. Output is scrubbed of the tokens and of terminal escape
 sequences. The tool never cancels a build: on a bound, an error or a signal the build keeps running.
 

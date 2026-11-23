@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # alfred-test-run — start a Buildkite test run for a pushed commit (CCW-218, AP-1499).
 #
-#   alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>]
+#   alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>] [--print-lines <text>]
 #
 # The devbox's read-only GitHub token travels to the build as an age-encrypted
 # envelope in the build env ALFRED_GIT_ENVELOPE. Only the worker's private key
 # opens it. The tool waits for the build within a bound, then prints the per-job
 # states and the last 50 log lines of each failed job.
+#
+# --print-lines <text> (CCW-249): after the failed-job tails and before "state:", print the
+# cleaned log lines that contain <text> (fixed string, case sensitive) for every script job
+# that passed, failed, timed out or broke, each prefixed "<job name>: ". At most 20 lines per
+# job and 200 per run, each line scrubbed and then cut to 500 characters. Each log is fetched
+# once, inside the one report time cap. Exit codes and the default output do not change.
 #
 # Secret rules (acceptance criteria, not style): no token in argv, in the
 # environment of a child, in an env prefix, in a heredoc or here-string, or in
@@ -36,7 +42,8 @@ unset AGE API_DEFAULT BACKOFF BASE BK_TOKEN BLOCKED BODY BRANCH BUILD_LINE BUILD
   CODEF COMMIT CREATE_URL DEADLINE ENVF ENV_RC ERRF FAIL_IDS FAIL_NAMES FORCE GH_RC GH_SHA HDR JOBS \
   LIMIT_AT MAYEXIST MIN_WAIT MTIME NOT_AFTER NOT_AFTER_EPOCH NUM OHOST OPATH ORG ORIGIN OWNER PBASE \
   PIPELINE PIPE_REPO POLL PROTO RECIPIENTS REPORT_CAP REPORT_END REPO RESP R_CODE R_FAIL R_RC STATE \
-  TMPD TOKEN_FILE TOKVAL WAIT WEB content first last
+  TMPD TOKEN_FILE TOKVAL WAIT WEB content first last PL_TEXT PL_SET PL_TOTAL ALL_IDS ALL_NAMES ALL_STATES \
+  KEEP KSTAT FAIL_IDX MLINES raw mline have allow n k USAGE
 # The Buildkite token leaves the environment before any child process starts.
 BK_TOKEN=${BUILDKITE_API_TOKEN-}
 unset BUILDKITE_API_TOKEN
@@ -91,12 +98,18 @@ if [ "$(stat -c %a "$TMPD" 2>/dev/null)" != 700 ]; then rmdir "$TMPD" 2>/dev/nul
 CFG="$TMPD/curl.cfg"; HDR="$TMPD/headers"; RESP="$TMPD/resp"; CODEF="$TMPD/code"; ERRF="$TMPD/stderr"
 
 # --- arguments ------------------------------------------------------------------
-PIPELINE=""; COMMIT=""; BRANCH=""; WAIT=1800
+PIPELINE=""; COMMIT=""; BRANCH=""; WAIT=1800; PL_TEXT=""; PL_SET=0
+USAGE='alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>] [--print-lines <text>]'
 while [ $# -gt 0 ]; do
   case $1 in
-    --pipeline|--commit|--branch|--wait-timeout)
+    --pipeline|--commit|--branch|--wait-timeout|--print-lines)
       [ $# -ge 2 ] || die 2 "$1 needs a value"
       case $1 in
+        --print-lines)
+          [ "$PL_SET" = 0 ] || die 2 "--print-lines given twice"
+          if [ -z "$2" ] || [[ $2 =~ [[:cntrl:]] ]]; then die 2 "--print-lines needs a non-empty single-line value"; fi
+          [ "${#2}" -le 300 ] || die 2 "--print-lines value too long"
+          PL_SET=1; PL_TEXT=$2 ;;
         --pipeline) PIPELINE=$2 ;;
         --commit) COMMIT=$2 ;;
         --branch) BRANCH=$2 ;;
@@ -104,9 +117,9 @@ while [ $# -gt 0 ]; do
       esac
       shift 2 ;;
     -h|--help)
-      echo "usage: alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>]"
+      echo "usage: $USAGE"
       exit 0 ;;
-    *) die 2 "unknown argument (usage: alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>])" ;;
+    *) die 2 "unknown argument (usage: $USAGE)" ;;
   esac
 done
 
@@ -427,38 +440,92 @@ JOBS="$TMPD/jobs.tsv"
 jq -r '(.jobs | arrays | .[]) | select(.type == "script")
        | [((.id | strings) // "-"), ((.state | strings) // "-"), ((.name | strings) // "-")] | @tsv' \
   "$RESP" >"$JOBS" 2>/dev/null || : >"$JOBS"
-FAIL_IDS=(); FAIL_NAMES=()
+FAIL_IDS=(); FAIL_NAMES=(); FAIL_IDX=()
+ALL_IDS=(); ALL_NAMES=(); ALL_STATES=()
 while IFS=$'\t' read -r jid jstate jname; do
   jstate=$(safe "$jstate"); jname=$(safe "$jname")
   say "job $jstate $jname"
-  case $jstate in failed|timed_out|broken) FAIL_IDS+=("$jid"); FAIL_NAMES+=("$jname") ;; esac
+  ALL_IDS+=("$jid"); ALL_NAMES+=("$jname"); ALL_STATES+=("$jstate")
+  case $jstate in failed|timed_out|broken) FAIL_IDS+=("$jid"); FAIL_NAMES+=("$jname"); FAIL_IDX+=("$((${#ALL_IDS[@]} - 1))") ;; esac
 done < "$JOBS"
 
+# clean_log: the cleaning only; the failed-job tail adds "| tail -n 50"
 clean_log() {
   sed -E -e 's/\r+$//' -e 's/^.*\r//' \
     -e 's/\x1b_[^\x07\x1b]*(\x07|\x1b\\)//g' \
     -e 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' \
-  | tr -d '\000-\011\013-\037\177' | tail -n 50
+  | tr -d '\000-\011\013-\037\177'
 }
 
 REPORT_END=$((SECONDS + REPORT_CAP))
 LIMIT_AT=$REPORT_END
 re_uuid='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 shown=0
+declare -A KEEP KSTAT   # --print-lines only: raw logs kept in variables, and unavailable marks, by job index
 for i in "${!FAIL_IDS[@]}"; do
   if [ "$shown" -ge 5 ]; then say "more failed jobs not shown"; break; fi
   shown=$((shown + 1))
   say "log of job ${FAIL_NAMES[$i]}:"
   jid=${FAIL_IDS[$i]}
-  if ! [[ $jid =~ $re_uuid ]] || [ "$SECONDS" -ge "$REPORT_END" ]; then say "log unavailable"; continue; fi
+  if ! [[ $jid =~ $re_uuid ]] || [ "$SECONDS" -ge "$REPORT_END" ]; then KSTAT[${FAIL_IDX[$i]}]=1; say "log unavailable"; continue; fi
   if ! call GET "$BUILD_URL/jobs/$jid/log" \
      || ! jq -e '.content | type == "string"' "$RESP" >/dev/null 2>&1; then
-    say "log unavailable"; continue
+    KSTAT[${FAIL_IDX[$i]}]=1; say "log unavailable"; continue
   fi
   content=$(jq -r '.content' "$RESP" 2>/dev/null) || content=""
-  content=$(printf '%s\n' "$content" | clean_log)
+  if [ "$PL_SET" = 1 ]; then KEEP[${FAIL_IDX[$i]}]=$content; fi
+  content=$(printf '%s\n' "$content" | clean_log | tail -n 50)
   say "$content"
 done
+
+# --print-lines: every job in build order, each log fetched once (a failed job's tail fetch is reused)
+PL_TOTAL=0
+if [ "$PL_SET" = 1 ]; then
+  for k in "${!ALL_IDS[@]}"; do
+    jname=${ALL_NAMES[$k]}; jstate=${ALL_STATES[$k]}
+    case $jstate in
+      passed|failed|timed_out|broken) ;;
+      *) say "$jname: print-lines: not read (state $jstate)"; continue ;;
+    esac
+    if [ "$PL_TOTAL" -ge 200 ]; then
+      say "print-lines: total cap of 200 reached, later jobs not matched"; break
+    fi
+    raw=""; have=0
+    if [ -n "${KSTAT[$k]+x}" ]; then
+      :
+    elif [ -n "${KEEP[$k]+x}" ]; then
+      raw=${KEEP[$k]}; have=1; unset 'KEEP[$k]'
+    else
+      jid=${ALL_IDS[$k]}
+      if [[ $jid =~ $re_uuid ]] && [ "$SECONDS" -lt "$REPORT_END" ] \
+         && call GET "$BUILD_URL/jobs/$jid/log" \
+         && jq -e '.content | type == "string"' "$RESP" >/dev/null 2>&1; then
+        raw=$(jq -r '.content' "$RESP" 2>/dev/null) && have=1
+      fi
+    fi
+    if [ "$have" = 0 ]; then say "$jname: print-lines: log unavailable"; continue; fi
+    allow=$((200 - PL_TOTAL)); [ "$allow" -le 20 ] || allow=20
+    mapfile -t MLINES < <(printf '%s\n' "$raw" | clean_log | grep -aF -e "$PL_TEXT" | head -n "$((allow + 1))")
+    raw=""
+    if [ "${#MLINES[@]}" -eq 0 ]; then say "$jname: print-lines: no match"; continue; fi
+    n=0
+    for mline in "${MLINES[@]}"; do
+      [ "$n" -lt "$allow" ] || break
+      mline=$(scrub "$mline")
+      if [ "${#mline}" -gt 500 ]; then mline="${mline:0:500} [cut]"; fi
+      say "$jname: $mline"
+      n=$((n + 1))
+    done
+    PL_TOTAL=$((PL_TOTAL + n))
+    if [ "${#MLINES[@]}" -gt "$allow" ]; then
+      if [ "$allow" -lt 20 ]; then
+        say "print-lines: total cap of 200 reached, later jobs not matched"; break
+      fi
+      say "$jname: print-lines cap of 20 reached, more lines match"
+    fi
+  done
+  MLINES=()
+fi
 
 say "state: $STATE"
 [ "$STATE" = passed ] && exit 0
