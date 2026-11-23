@@ -880,3 +880,232 @@ $BUILD42"
   [[ "$stderr" != *"unknown argument"* ]]
   [[ "$(errlines)" == *"--print-lines needs a value"* ]]
 }
+
+# uid <n>: the job id 0000000n-0000-0000-0000-000000000000 (hex n) used by the generated builds
+uid() { printf '%08x-0000-0000-0000-000000000000' "$1"; }
+# genlog <uuid> <jq program producing the content string>
+genlog() { jq -n "{content: ($2)}" > "$STUB_DIR/log-$1.json"; }
+# genbuild <state> <n> <job state>: n passed-through script jobs job1..jobn
+genbuild() {
+  local i first=1 out='{"state":"'"$1"'","jobs":['
+  for ((i = 1; i <= $2; i++)); do
+    [ "$first" = 1 ] || out="$out,"; first=0
+    out="$out{\"id\":\"$(uid "$i")\",\"type\":\"script\",\"name\":\"job$i\",\"state\":\"$3\"}"
+  done
+  printf '%s]}\n' "$out" > "$STUB_DIR/build.1.json"
+}
+unitlines() { printf '%s\n' "$output" | grep '^unit: '; }
+
+@test "PL2: fixed string, case sensitive, a leading dash is not an option" {
+  plog 1 log-e2e-summary.json; plog 2 log-no-marker.json
+  go --print-lines 'a.c';    [ "$status" -eq 0 ]; [ "$(unitlines)" = "unit: a.c" ]
+  go --print-lines '[x]';    [ "$(unitlines)" = "unit: [x]" ]
+  go --print-lines 'E2E summary:'; [ "$(unitlines)" = "unit: E2E summary: upper" ]
+  go --print-lines '-v';     [ "$(unitlines)" = "unit: run with -v flag" ]
+  go --print-lines '--wait-timeout'; [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qx 'unit: print-lines: no match'
+}
+
+@test "PL3: matches beyond the last 50 lines and in a log of about 1 MB, in time" {
+  plog 1 log-120-lines.json; plog 2 log-no-marker.json
+  go --print-lines 'LOGLINE-004'
+  [ "$status" -eq 0 ]
+  [ "$(unitlines)" = "unit: LOGLINE-004 leaks [redacted] and [redacted]" ]
+  genlog 11111111-1111-1111-1111-111111111111 \
+    '["e2e summary: first"] + [range(0;11998) | "filler line \(.) " + ("x" * 60)] + ["e2e summary: last"] | join("\n")'
+  local t0=$SECONDS
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 0 ]
+  [ $((SECONDS - t0)) -le 20 ]
+  [ "$(unitlines)" = "unit: e2e summary: first
+unit: e2e summary: last" ]
+  [ "$(wc -c < "$STUB_DIR/log-11111111-1111-1111-1111-111111111111.json")" -gt 900000 ]
+}
+
+@test "PL4: at most 20 lines per job, the first 20, then the note; 21 and 20 and a second job" {
+  local u2=22222222-2222-2222-2222-222222222222
+  genlog 11111111-1111-1111-1111-111111111111 '[range(1;26) | "e2e summary: n=\(. | if . < 10 then "0\(.)" else "\(.)" end)"] | join("\n")'
+  genlog $u2 '["e2e summary: s=1","e2e summary: s=2","e2e summary: s=3"] | join("\n")'
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 0 ]
+  [ "$(unitlines | grep -c '^unit: e2e summary: n=')" -eq 20 ]
+  [ "$(unitlines | head -1)" = "unit: e2e summary: n=01" ]
+  [ "$(unitlines | sed -n 20p)" = "unit: e2e summary: n=20" ]
+  [ "$(unitlines | sed -n 21p)" = "unit: print-lines cap of 20 reached, more lines match" ]
+  [ "$(printf '%s\n' "$output" | grep -c '^lint: e2e summary: s=')" -eq 3 ]
+  ! printf '%s\n' "$output" | grep -q '^lint: print-lines cap'
+  genlog 11111111-1111-1111-1111-111111111111 '[range(1;22) | "e2e summary: n=\(.)"] | join("\n")'
+  go --print-lines 'e2e summary:'
+  [ "$(unitlines | grep -c 'e2e summary: n=')" -eq 20 ]
+  printf '%s\n' "$output" | grep -qx 'unit: print-lines cap of 20 reached, more lines match'
+  genlog 11111111-1111-1111-1111-111111111111 '[range(1;21) | "e2e summary: n=\(.)"] | join("\n")'
+  go --print-lines 'e2e summary:'
+  [ "$(unitlines | grep -c 'e2e summary: n=')" -eq 20 ]
+  ! printf '%s\n' "$output" | grep -q 'cap of 20'
+}
+
+@test "PL5: failed job: tail unchanged, one fetch, matches after the tail and before state" {
+  setbuild 1 job-failed
+  plog 1 log-120-lines.json; plog 2 log-no-marker.json
+  go --print-lines 'LOGLINE-004'
+  [ "$status" -eq 10 ]
+  [ "$(ncalls '/log$')" -eq 2 ]
+  local a b c
+  a=$(printf '%s\n' "$output" | grep -nx 'log of job unit:' | cut -d: -f1)
+  b=$(printf '%s\n' "$output" | grep -n '^unit: LOGLINE-004 ' | cut -d: -f1)
+  c=$(printf '%s\n' "$output" | grep -nx 'state: failed' | cut -d: -f1)
+  [ "$((b - a - 1))" -eq 50 ]
+  [[ "$(printf '%s\n' "$output" | sed -n "$((a + 1))p")" == LOGLINE-071* ]]
+  [[ "$(printf '%s\n' "$output" | sed -n "$((b - 1))p")" == LOGLINE-120* ]]
+  [ "$b" -lt "$c" ]
+  [ "$(printf '%s\n' "$output" | grep -c 'LOGLINE-')" -eq 51 ]
+  printf '%s\n' "$output" | grep -qx 'job failed unit'
+  printf '%s\n' "$output" | grep -qx 'lint: print-lines: no match'
+}
+
+@test "PL6: unavailable logs keep the exit code and are labelled with the job" {
+  echo 500 > "$STUB_DIR/fail-log"
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -qx 'unit: print-lines: log unavailable'
+  printf '%s\n' "$output" | grep -qx 'lint: print-lines: log unavailable'
+  ! printf '%s\n' "$output" | grep -x 'log unavailable'
+  reset_calls; setbuild 1 job-failed
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 10 ]
+  [ "$(printf '%s\n' "$output" | grep -cx 'log unavailable')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -cx 'unit: print-lines: log unavailable')" -eq 1 ]
+  [ "$(ncalls '/log$')" -eq 8 ]
+  reset_calls; rm -f "$STUB_DIR/fail-log"
+  cp "$FX/build-passed-bad-job-id.json" "$STUB_DIR/build.1.json"
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 0 ]
+  [ "$(ncalls '/log$')" -eq 0 ]
+  printf '%s\n' "$output" | grep -qx 'bad: print-lines: log unavailable'
+}
+
+@test "PL8: no log is read while the build is still running" {
+  setbuild 1 running
+  export ALFRED_TEST_RUN_MIN_WAIT=1
+  go --wait-timeout 3 --print-lines 'e2e summary:'
+  [ "$status" -eq 11 ]
+  [ "$(ncalls '/log$')" -eq 0 ]
+  ! printf '%s\n' "$output" | grep -q '^unit:'
+}
+
+@test "PL9: six jobs share one budget; a used-up cap leaves the next job unread" {
+  setbuild 1 six-failed
+  local i
+  for i in 1 2 3 4 5 6; do cp "$FX/log-e2e-summary.json" "$STUB_DIR/log-0000000$i-0000-0000-0000-000000000000.json"; done
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 10 ]
+  for i in 1 2 3 4 5 6; do printf '%s\n' "$output" | grep -qx "job$i: e2e summary: refused=3 total=40"; done
+  [ "$(printf '%s\n' "$output" | grep -c '^more failed jobs not shown$')" -eq 1 ]
+  [ "$(ncalls '/log$')" -eq 6 ]
+  ! printf '%s\n' "$output" | grep -qx 'log of job job6:'
+  reset_calls; setbuild 1 passed
+  echo hang > "$STUB_DIR/fail-log"
+  unset SHIM_FAKE_SLEEP
+  export ALFRED_TEST_RUN_REPORT_CAP=2
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 0 ]
+  [ "$(ncalls '/log$')" -eq 1 ]
+  printf '%s\n' "$output" | grep -qx 'lint: print-lines: log unavailable'
+}
+
+@test "PL10: help, unknown-argument message, README and header name the flag" {
+  go --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[--print-lines <text>]" ]]
+  go --nope
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"[--print-lines <text>])"* ]]
+  local s
+  for s in '[--print-lines <text>]' 'fixed string' 'at most 20' 'print-lines cap of 20 reached, more lines match' \
+    'print-lines: no match' 'print-lines: log unavailable' \
+    'Matched lines are printed after the failed-job log tails and before `state:`.' \
+    'alfred-test-run [--pipeline <slug>] [--commit <40-hex>] [--branch <name>] [--wait-timeout <seconds>] [--print-lines <text>]'; do
+    grep -qF -- "$s" "$ROOT/README.md" || { echo "README lacks: $s" >&3; return 1; }
+  done
+  [ "$(head -n 20 "$TR" | grep -c -- '--print-lines')" -ge 1 ]
+}
+
+@test "PL11 (D1): a job in another state is named and gets no log GET" {
+  cp "$FX/build-mixed-canceled.json" "$STUB_DIR/build.1.json"
+  plog 2 log-e2e-summary.json
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 10 ]
+  printf '%s\n' "$output" | grep -qx 'unit: print-lines: not read (state canceled)'
+  [ "$(ncalls '/log$')" -eq 1 ]
+  ! grep -q '11111111-1111-1111-1111-111111111111/log' "$STUB_DIR/calls.log"
+}
+
+@test "PL12 (D2): a long matching line is cut to 500 characters after the scrub" {
+  genlog 11111111-1111-1111-1111-111111111111 '["e2e summary: " + ("a" * 600)] | join("\n")'
+  go --print-lines 'e2e summary:'
+  local l; l=$(unitlines)
+  [ "${#l}" -eq 512 ]
+  [[ "$l" == *" [cut]" ]]
+  genlog 11111111-1111-1111-1111-111111111111 '["e2e summary: " + ("a" * 480) + "ghs_LOGPLANTED0123456789" + ("b" * 200), "e2e summary: " + ("c" * 482) + "bkPLANTEDBK0123" + ("d" * 200)] | join("\n")'
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 0 ]
+  local t i
+  for t in ghs_LOGPLANTED0123456789 bkPLANTEDBK0123; do
+    for ((i = 0; i + 4 <= ${#t}; i++)); do
+      [[ "$output" != *"${t:i:4}"* ]] || { echo "fragment ${t:i:4} of $t in output" >&3; return 1; }
+    done
+  done
+  [ "$(unitlines | grep -c ' \[cut\]$')" -eq 2 ]
+}
+
+@test "PL13 (D3): 200 matched lines per run, then one note, later jobs not matched" {
+  genbuild passed 11 passed
+  local i
+  for i in $(seq 1 11); do
+    genlog "$(uid "$i")" '[range(1;21) | "e2e summary: n=\(.)"] | join("\n")'
+  done
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^job[0-9]*: e2e summary: n=')" -eq 200 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^job[0-9]*: print-lines cap of 20')" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -cx 'print-lines: total cap of 200 reached, later jobs not matched')" -eq 1 ]
+  [ "$(ncalls '/log$')" -eq 10 ]
+}
+
+@test "PL14 (D4): --print-lines twice or longer than 300 characters is exit 2 before any call" {
+  go --print-lines a --print-lines b
+  [ "$status" -eq 2 ]; one_err; [ ! -s "$STUB_DIR/calls.log" ]
+  [[ "$(errlines)" == *"--print-lines given twice"* ]]; [[ "$stderr" != *"unknown argument"* ]]
+  local long; long=$(printf 'x%.0s' $(seq 1 301))
+  go --print-lines "$long"
+  [ "$status" -eq 2 ]; one_err; [ ! -s "$STUB_DIR/calls.log" ]
+  [[ "$(errlines)" == *"--print-lines value too long"* ]]; [[ "$stderr" != *"unknown argument"* ]]
+  long=$(printf 'x%.0s' $(seq 1 300))
+  go --print-lines "$long"
+  [ "$status" -eq 0 ]
+}
+
+@test "PL15 (D5): the baseline doc exists and carries each required literal" {
+  local f="$ROOT/docs/baseline/test-run-print-lines.md" s
+  [ -f "$f" ]
+  for s in '--print-lines' 'fetched once' 'REPORT_CAP' 'fixed string' 'at most 20' '500' ' [cut]' \
+    '200' 'total cap of 200 reached' 'not read (state' 'passed' 'timed_out' 'broken'; do
+    grep -qF -- "$s" "$f" || { echo "baseline doc lacks: $s" >&3; return 1; }
+  done
+}
+
+@test "PL16 (D7): two failed jobs and a passed one: tails, then match lines in job order, then state" {
+  cp "$FX/build-two-failed-one-passed.json" "$STUB_DIR/build.1.json"
+  plog 1 log-120-lines.json; plog 2 log-120-lines.json; plog 3 log-e2e-summary.json
+  go --print-lines 'LOGLINE-004'
+  [ "$status" -eq 10 ]
+  [ "$(ncalls '/log$')" -eq 3 ]
+  local seq
+  seq=$(printf '%s\n' "$output" | grep -E '^(log of job |unit: LOGLINE|lint: LOGLINE|pkg: print-lines|state:)' | tr '\n' '|')
+  [ "$seq" = "log of job unit:|log of job lint:|unit: LOGLINE-004 leaks [redacted] and [redacted]|lint: LOGLINE-004 leaks [redacted] and [redacted]|pkg: print-lines: no match|state: failed|" ]
+}
+
+@test "PL17 (D6): the script has no heredoc and no here-string" {
+  [ "$(grep -c '<<' "$TR")" -eq 1 ]
+  grep '<<' "$TR" | grep -qF 'BACKOFF * (1 << tries)'
+}
