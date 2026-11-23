@@ -817,3 +817,66 @@ sig_run() {
   go --wait-timeout 08
   [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# CCW-249: --print-lines <text>
+# plog <1|2|3|...> <fixture>: serve a log fixture for the job with the uuid of that digit
+plog() { local d=$1; cp "$FX/$2" "$STUB_DIR/log-${d}${d}${d}${d}${d}${d}${d}${d}-${d}${d}${d}${d}-${d}${d}${d}${d}-${d}${d}${d}${d}-${d}${d}${d}${d}${d}${d}${d}${d}${d}${d}${d}${d}.json"; }
+BUILD42='build: https://buildkite.com/acme/motion-tests/builds/42'
+
+@test "PL1: passed build prints the matched lines, scrubbed, prefixed, in the job frame" {
+  plog 1 log-e2e-summary.json; plog 2 log-no-marker.json
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 0 ]
+  local want
+  want="$BUILD42
+job passed unit
+job passed lint
+unit: e2e summary: refused=3 total=40
+unit: e2e summary: crlf
+unit: e2e summary: leaks [redacted] and [redacted]
+lint: print-lines: no match
+state: passed
+$BUILD42"
+  [ "$output" = "$want" ]
+  ! printf '%s' "$output" | grep -q 'bk;t='
+  ! printf '%s' "$output" | grep -q $'\033'
+  ! printf '%s' "$output" | grep -q $'\r'
+  [[ "$stderr" != *ghs_LOGPLANTED* ]]
+  [[ "$stderr" != *bkPLANTEDBK* ]]
+  local l
+  while IFS= read -r l; do
+    [[ "$l" =~ ^GET\ https://api.buildkite.com/v2/organizations/acme/pipelines/motion-tests$ ]] \
+      || [[ "$l" =~ ^POST\ https://api.buildkite.com/v2/organizations/acme/pipelines/motion-tests/builds$ ]] \
+      || [[ "$l" =~ ^GET\ https://api.buildkite.com/v2/organizations/acme/pipelines/motion-tests/builds/42$ ]] \
+      || [[ "$l" =~ ^GET\ https://api.buildkite.com/v2/organizations/acme/pipelines/motion-tests/builds/42/jobs/[0-9a-f-]{36}/log$ ]] \
+      || { echo "unexpected call: $l" >&3; return 1; }
+  done < "$STUB_DIR/calls.log"
+  [ "$(ncalls '/log$')" -eq 2 ]
+  while IFS= read -r l; do
+    [[ "$l" == *"--connect-timeout 10"* ]] && [[ "$l" == *"--proto =https"* ]] || { echo "argv: $l" >&3; return 1; }
+    [[ "$l" != *" -L "* ]]
+    [[ "$l" =~ --max-time\ ([0-9]+) ]] && [ "${BASH_REMATCH[1]}" -le 30 ]
+  done < "$STUB_DIR/argv.log"
+}
+
+@test "PL7: a bad --print-lines value is exit 2 with the named message, before any call" {
+  local v
+  for v in '' $'a\nb' $'a\tb' $'a\033[0m'; do
+    reset_calls
+    go --print-lines "$v"
+    [ "$status" -eq 2 ]
+    one_err
+    [ ! -s "$STUB_DIR/calls.log" ]
+    [[ "$(errlines)" != *[[:cntrl:]]* ]]
+    [[ "$stderr" != *"unknown argument"* ]]
+    [[ "$(errlines)" == *"--print-lines needs a non-empty single-line value"* ]]
+  done
+  reset_calls
+  go --print-lines
+  [ "$status" -eq 2 ]
+  one_err
+  [ ! -s "$STUB_DIR/calls.log" ]
+  [[ "$stderr" != *"unknown argument"* ]]
+  [[ "$(errlines)" == *"--print-lines needs a value"* ]]
+}
