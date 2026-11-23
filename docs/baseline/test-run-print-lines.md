@@ -13,7 +13,7 @@ the token, scope and endpoint for it.
 - States: matching runs for script jobs in `passed`, `failed`, `timed_out` or `broken`. A script job in
   any other state prints `<job name>: print-lines: not read (state <state>)` and gets no log request.
 - A job with no match prints `<job name>: print-lines: no match`; a log that cannot be fetched prints
-  `<job name>: print-lines: log unavailable`. No job is silent, and the exit code never changes.
+  `<job name>: print-lines: log unavailable`. No job is silent, except the jobs after the total cap below (the one note covers them), and the exit code never changes.
 - Cap: at most 20 lines per job (the first 20), then the note
   `<job name>: print-lines cap of 20 reached, more lines match`. At most 200 matched lines per run; at
   that point the line `print-lines: total cap of 200 reached, later jobs not matched` is printed once

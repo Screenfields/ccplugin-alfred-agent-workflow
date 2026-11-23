@@ -1109,3 +1109,11 @@ unit: e2e summary: last" ]
   [ "$(grep -c '<<' "$TR")" -eq 1 ]
   grep '<<' "$TR" | grep -qF 'BACKOFF * (1 << tries)'
 }
+
+@test "PL18: exported caller names raw, mline, have, allow, n, k, USAGE do not reach a child environment" {
+  plog 1 log-e2e-summary.json; plog 2 log-no-marker.json
+  export raw=x mline=y have=1 allow=5 n=3 k=2 USAGE=z
+  go --print-lines 'e2e summary:'
+  [ "$status" -eq 0 ]
+  if grep -E 'declare -x (raw|mline|have|allow|n|k|USAGE)=' "$STUB_DIR/shim.log.env" "$STUB_DIR/env.log" "$STUB_DIR/age.env" "$STUB_DIR/gh.env"; then return 1; fi
+}
