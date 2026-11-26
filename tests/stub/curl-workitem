@@ -2,7 +2,7 @@
 # Test double for curl, used by tests/workitem.bats (installed as `curl` in a
 # private bin dir). Records every call under $STUB_DIR and answers like the
 # agent-run store:
-#   calls.log      one line per call: "<METHOD> <url>"
+#   calls.log      one line per call: "<METHOD> <url>", then "max-time <n>" when given
 #   posts.jsonl    the compacted JSON body of every POST, one per line
 #   headers.log    the -K config (the request headers) of every call, then "--"
 #   workitems.json served for GET .../workitems?...  (HTTP 200)
@@ -26,6 +26,7 @@ body=""
 if [ "$method" = POST ]; then body=$(cat); fi
 
 echo "$method $url" >> "$STUB_DIR/calls.log"
+[ -z "$maxtime" ] || echo "max-time $maxtime" >> "$STUB_DIR/calls.log"
 { [ -z "$cfg" ] || cat "$cfg"; echo "--"; } >> "$STUB_DIR/headers.log"
 if [ -n "$body" ]; then printf '%s' "$body" | jq -c . >> "$STUB_DIR/posts.jsonl"; fi
 
