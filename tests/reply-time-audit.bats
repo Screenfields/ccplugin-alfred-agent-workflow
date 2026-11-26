@@ -559,10 +559,10 @@ FAKE
   . "$ROOT/lib/reply-time.sh"
   [ "$(reply_time_stamp_head 'Time now _[2026-10-30 08:20 CET]_ hi')" = "2026 10 30 08 20 CET" ]
   [ "$(reply_time_stamp_head $'  \n_[2026-07-01 12:00 CEST]_')" = "2026 07 01 12 00 CEST" ]
-  ! reply_time_stamp_head 'x _[2026-10-30 08:20 CET]_'
+  ! reply_time_stamp_head 'x _[2026-10-30 08:20 CET]_' || false
   [ "$(reply_time_stamp_epoch 2026 10 25 02 30 CEST)" = 1792888200 ]
   [ "$(reply_time_stamp_epoch 2026 10 25 02 30 CET)" = 1792891800 ]
-  ! reply_time_stamp_epoch 2026 13 30 07 24 CET
+  ! reply_time_stamp_epoch 2026 13 30 07 24 CET || false
   [ "$(reply_time_verdict 1792884600 1792884600 2)" = ok ]
   [ "$(reply_time_verdict 1792884720 1792884600 2)" = future ]
   [ "$(reply_time_verdict 1792884000 1792884600 2)" = stale ]

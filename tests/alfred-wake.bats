@@ -962,7 +962,7 @@ for a in "$@"; do
 done' /usr/bin/ln
   [ "$rc" -eq 0 ]
   [ -s "$BATS_TEST_TMPDIR/shim.calls" ]
-  ! compgen -G "$SHIM_BIN/alfred-test-run.tmp.*"
+  ! compgen -G "$SHIM_BIN/alfred-test-run.tmp.*" || false
   [ ! -e "$SHIM_BIN/alfred-test-run" ]
   [ ! -L "$SHIM_BIN/alfred-test-run" ]
   [ -s "$BATS_TEST_TMPDIR/plain.out" ]
@@ -979,7 +979,7 @@ for a in "$@"; do
 done' /usr/bin/mv
   [ "$rc" -eq 0 ]
   [ -s "$BATS_TEST_TMPDIR/shim.calls" ]
-  ! compgen -G "$SHIM_BIN/alfred-test-run.tmp.*"
+  ! compgen -G "$SHIM_BIN/alfred-test-run.tmp.*" || false
   [ ! -e "$SHIM_BIN/alfred-test-run" ]
   [ ! -L "$SHIM_BIN/alfred-test-run" ]
   cmp "$BATS_TEST_TMPDIR/plain.out" "$BATS_TEST_TMPDIR/shimmed.out"
