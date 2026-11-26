@@ -1,0 +1,4 @@
+@test "then bang then command" {
+  if a; then ! grep -q x f; fi
+  true
+}

@@ -1,0 +1,12 @@
+@test "bang last in a for loop" {
+  for f in a b; do
+    ! grep -q x "$f"
+  done
+  true
+}
+@test "bang last in a while loop" {
+  while read -r l; do
+    ! grep -q x "$l"
+  done < f
+  true
+}

@@ -1,0 +1,14 @@
+@test "multi-line valid" {
+  ! grep -q x \
+    f || false
+  ! grep -q x f ||
+    false
+  ! cat f |
+    grep -q x || false
+  true
+}
+@test "multi-line bare last" {
+  true
+  ! grep -q x \
+    f
+}

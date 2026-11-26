@@ -1,0 +1,4 @@
+@test "unterminated quote" {
+  echo "never closed
+  true
+}

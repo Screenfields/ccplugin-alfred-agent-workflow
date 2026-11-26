@@ -1,0 +1,4 @@
+@test "unterminated heredoc" {
+  cat <<EOF2
+body
+}

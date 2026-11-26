@@ -76,6 +76,12 @@ jobs:
           done
           exit $status
 
+      # A bare `! cmd` that is not the last command of a bats test or helper
+      # never fails (errexit ignores negation), so the assertion is decoration.
+      # Rule and accepted forms: header of tests/lint/bats-negation.py. CCW-148.
+      - name: Bats lint (no bare mid-test `!`)
+        run: python3 -I tests/lint/bats-negation.py
+
       - name: Plugin JSON parses (manifest, hooks, themes)
         run: |
           status=0
@@ -114,6 +120,9 @@ jobs:
 
       - name: Install bats
         run: sudo apt-get update -q && sudo apt-get install -y -q bats age
+
+      - name: bats version
+        run: bats --version
 
       - name: Behaviour tests (stubbed agent-messaging, no network)
         run: bats tests/

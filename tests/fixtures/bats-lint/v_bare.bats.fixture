@@ -1,0 +1,5 @@
+@test "bare bang then command" {
+  true
+  ! grep -q x f
+  true
+}

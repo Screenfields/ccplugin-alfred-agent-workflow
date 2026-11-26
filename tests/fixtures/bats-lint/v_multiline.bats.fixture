@@ -1,0 +1,5 @@
+@test "multi-line bang then command" {
+  ! grep -q x \
+    f
+  true
+}
