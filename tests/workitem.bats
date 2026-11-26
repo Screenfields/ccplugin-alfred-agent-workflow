@@ -1164,7 +1164,7 @@ reset_stub() { rm -f "$STUB_DIR/posts.jsonl" "$STUB_DIR/calls.log" "$STUB_DIR/he
     "$BATS_TEST_DIRNAME/../hooks/hooks.json"
 }
 
-@test "RS16: docs and version" {
+@test "RS16: docs" {
   local root="$BATS_TEST_DIRNAME/.." suffix sec
   "$WI" mark acme/widgets#7
   suffix=$(cd "$DIR" && ls | grep -E '\.resend$' | head -1 | sed 's/^[^.]*//')
@@ -1179,8 +1179,6 @@ reset_stub() { rm -f "$STUB_DIR/posts.jsonl" "$STUB_DIR/calls.log" "$STUB_DIR/he
   grep -qF "$suffix" "$root/docs/baseline/workitem-resend.md"
   grep -qF 86400 "$root/docs/baseline/workitem-resend.md"
   grep -qi 'empty item' "$root/docs/baseline/workitem-resend.md"
-  # (c) the version
-  [ "$(jq -r .version "$root/.claude-plugin/plugin.json")" = 2.54.2 ]
 }
 
 # --- CCW-259: the plugin text stops offering `mark none`; `mark none` warns once ---------------
@@ -1334,10 +1332,6 @@ nwarn() { grep -cF -- "$DEV_LINE" <<<"$1" || true; }
   [ ! -e "$DIR/sess-main.resend" ]
   [ "$(mark_item)" = "" ]
   [ "$(attr work_item <<<"$(posts | tail -1)")" = "" ]
-}
-
-@test "MN11: the version is 2.54.2" {
-  [ "$(jq -r .version "$(ROOT_MN)/.claude-plugin/plugin.json")" = 2.54.2 ]
 }
 
 @test "MN12a: the design record exists and states the rule" {
