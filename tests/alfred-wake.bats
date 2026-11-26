@@ -86,7 +86,7 @@ until_true() {
   done
 }
 
-gone() { [ -z "$(tr -d '\0' < "/proc/$1/cmdline" 2>/dev/null)" ]; }
+gone() { [ -z "$({ tr -d '\0' < "/proc/$1/cmdline"; } 2>/dev/null)" ]; }
 # A plain `! cmd` never fails a bats test (errexit ignores it), hence alive().
 alive() { ! gone "$1"; }
 # reap <pid> — bounded wait for a background start to exit; sets $rc. (`run
@@ -575,18 +575,30 @@ vwait() {
   [ "$(ppid_of "$(owner_pid)")" = "$fake_pid" ]
 }
 
+# group_gone <pgid> — true when no live (non-zombie) process has that group id.
+group_gone() { [ -z "$(ps -e -o pgid=,stat= | awk -v g="$1" '$1 == g && $2 !~ /^Z/')" ]; }
+# stop_group <leader pid> — SIGKILL the whole process group (setup runs set -m, so
+# each background job leads its own group) and wait until it is empty. A SIGKILLed
+# wait cannot clean up, so its pass (curl stub, jq) would otherwise keep writing
+# into $STATE while the test removes it (CCW-257).
+stop_group() {
+  kill -KILL -- "-$1" 2>/dev/null || true
+  until_true 50 group_gone "$1"
+}
+
 # not_owner <rel path> [<launch path>] — a wait under a bash copy at <rel path>;
 # the owner file must not name the copy (it may hold `unknown`, or a real claude
 # above the runner). Stops the wait and the copy afterwards.
 not_owner() {
   rm -rf "$STATE"
+  echo 3 > "$STUB_DIR/slow"
   vcopy "$1"
   vlaunch "${2:-$vf}" "$VDEF" "$WAKE" wait
   until_true 50 pidfile_set
   wait_pid=$(cat "$STATE/alfred-wake.pid")
   [ "$(owner_pid)" != "$fake_pid" ] || { echo "$1: owner is the fake"; return 1; }
-  kill -KILL "$fake_pid" "$wait_pid" 2>/dev/null || true
-  until_true 50 gone "$wait_pid"
+  stop_group "$fake_pid"
+  group_gone "$fake_pid"
 }
 
 @test "CCW-239: AC4 loose matches are rejected" {
@@ -610,12 +622,14 @@ not_owner() {
 
 @test "CCW-239: AC5 the claude name still works, nearest first" {
   daemon_setup
+  echo 3 > "$STUB_DIR/slow"
   fake_claude claude "$WAKE" wait
   until_true 50 pidfile_set
   [ "$(owner_pid)" = "$fake_pid" ]
   run "$WAKE" status
   [ "$status" -eq 0 ]
-  kill -KILL "$fake_pid" "$(cat "$STATE/alfred-wake.pid")"
+  stop_group "$fake_pid"
+  group_gone "$fake_pid"
   rm -rf "$STATE"
   local cs="$BATS_TEST_TMPDIR/fake/claude" cpid
   vcopy d/claude/versions/2.1.328
@@ -624,6 +638,26 @@ not_owner() {
   cpid=$(ppid_of "$(cat "$STATE/alfred-wake.pid")")
   [ "$(owner_pid)" = "$cpid" ]
   [ "$(ppid_of "$cpid")" = "$fake_pid" ]
+}
+
+@test "CCW-257: stopping a wait leaves no process of its group" {
+  daemon_setup
+  echo 3 > "$STUB_DIR/slow"
+  vwait claude/versions/2.1.328
+  stop_group "$fake_pid"
+  group_gone "$fake_pid"
+  rm -rf "$STATE"
+  [ ! -e "$STATE" ]
+}
+
+@test "CCW-257: gone is silent for a pid that has exited" {
+  local p out
+  true &
+  p=$!
+  wait "$p"
+  out=$(gone "$p" 2>&1)
+  [ -z "$out" ]
+  gone "$p"
 }
 
 @test "CCW-239: AC6a an override applies alone, over a nearer version" {
