@@ -320,8 +320,10 @@ last_is_build() { [ "$(printf '%s\n' "$output" | tail -1)" = "build: https://bui
   [ -z "$(ls -A "$TMPDIR")" ]
 }
 @test "AC7: static greps over the script" {
-  ! grep -nE 'set +-[a-z]*x' "$TR"
-  ! grep -n '<<' "$TR"
+  ! grep -nE 'set +-[a-z]*x' "$TR" || false
+  # heredocs and here-strings only; the arithmetic shift (1 << tries) is not one
+  hits=$(grep -nE '<<<|<<[-~]?[[:space:]]*["'"'"'\\]?[A-Za-z_]' "$TR" | grep -vF 'BACKOFF * (1 << tries)' || true)
+  [ -z "$hits" ] || { echo "heredoc or here-string: $hits" >&3; false; }
   # an assignment to a variable named TOKEN, KEY or SECRET followed by a command on the same line
   ! grep -nE '(^|[;&|(]|then|do)[[:space:]]*[A-Za-z_]*(TOKEN|KEY|SECRET)[A-Za-z_]*=[^[:space:]]*[[:space:]]+[A-Za-z_./$"]' "$TR"
 }
@@ -353,14 +355,14 @@ last_is_build() { [ "$(printf '%s\n' "$output" | tail -1)" = "build: https://bui
     [ "$status" -eq 10 ]
     [ "$(printf '%s\n' "$output" | grep -c 'LOGLINE-')" -eq 50 ]
     printf '%s\n' "$output" | grep -q 'LOGLINE-120'
-    ! printf '%s\n' "$output" | grep -q 'LOGLINE-070'
+    ! printf '%s\n' "$output" | grep -q 'LOGLINE-070' || false
     printf '%s\n' "$output" | grep -qx "job $s unit"
     printf '%s\n' "$output" | grep -qx 'job passed lint'
     printf '%s\n' "$output" | grep -qx 'state: failed'
-    ! printf '%s' "$output" | grep -q $'\033'
-    ! printf '%s' "$output" | grep -q $'\r'
-    ! printf '%s' "$output" | grep -q 'bk;t='
-    ! printf '%s' "$output" | grep -q 'progress 10%'
+    ! printf '%s' "$output" | grep -q $'\033' || false
+    ! printf '%s' "$output" | grep -q $'\r' || false
+    ! printf '%s' "$output" | grep -q 'bk;t=' || false
+    ! printf '%s' "$output" | grep -q 'progress 10%' || false
     printf '%s\n' "$output" | grep -q 'leaks \[redacted\] and \[redacted\]'
     [ "$(ncalls '/log$')" -eq 1 ]
   done
@@ -395,7 +397,7 @@ last_is_build() { [ "$(printf '%s\n' "$output" | tail -1)" = "build: https://bui
   logfx
   go
   [ "$status" -eq 10 ]
-  ! printf '%s' "$output" | grep -q $'\033'
+  ! printf '%s' "$output" | grep -q $'\033' || false
   [ "$(printf '%s\n' "$output" | grep -c '^job failed red')" -eq 1 ]
 }
 @test "AC9: a 500 character API message with control characters is cut to 300 and cleaned" {
@@ -403,7 +405,7 @@ last_is_build() { [ "$(printf '%s\n' "$output" | tail -1)" = "build: https://bui
   echo 422 > "$STUB_DIR/fail-create"
   go
   [ "$status" -eq 4 ]
-  ! printf '%s' "$stderr" | grep -q $'[\001-\010\013-\037]'
+  ! printf '%s' "$stderr" | grep -q $'[\001-\010\013-\037]' || false
   [ "$(printf '%s' "$stderr" | tr -cd 'xy' | wc -c)" -le 300 ]
   [[ "$stderr" == *"HTTP 422"* ]]
 }
@@ -511,7 +513,7 @@ sig_run() {
   echo '{"web_url":"http://evil.test/x"}' > "$STUB_DIR/body-create"
   go
   [ "$status" -eq 4 ]
-  ! printf '%s\n%s' "$output" "$stderr" | grep -q 'evil.test'
+  ! printf '%s\n%s' "$output" "$stderr" | grep -q 'evil.test' || false
   printf '{"web_url":"https://buildkite.com/x\\u0007y"}' > "$STUB_DIR/body-create"
   go
   [ "$status" -eq 4 ]
@@ -672,7 +674,7 @@ sig_run() {
   BUILDKITE_API_URL=https://api.example/ go
   [ "$status" -eq 0 ]
   grep -q '^GET https://api.example/v2/' "$STUB_DIR/calls.log"
-  ! grep -q 'example//v2' "$STUB_DIR/calls.log"
+  ! grep -q 'example//v2' "$STUB_DIR/calls.log" || false
   reset_calls
   BUILDKITE_API_URL=https://user:pw@api.example fails 2
   [[ "$stderr" != *pw* && "$stderr" != *user* ]]
@@ -690,7 +692,7 @@ sig_run() {
       create) [ "$(posts)" -eq 1 ] ;;
       build) [ "$(ncalls '/builds/42$')" -eq 1 ] ;;
     esac
-    ! grep -q evil.test "$STUB_DIR/calls.log"
+    ! grep -q evil.test "$STUB_DIR/calls.log" || false
   done
   # a log GET: "log unavailable" and exit 10 (AC 18 and the Change section), one call
   rm -f "$STUB_DIR"/fail-*; echo 302 > "$STUB_DIR/fail-log"; setbuild 1 job-failed; reset_calls
@@ -705,7 +707,7 @@ sig_run() {
   setbuild 1 running; setbuild 2 job-failed
   go
   [ "$status" -eq 10 ]
-  ! grep -q evil.test "$STUB_DIR/calls.log"
+  ! grep -q evil.test "$STUB_DIR/calls.log" || false
   [[ "$output" != *evil.test* ]]
   [ "$(printf '%s\n' "$output" | head -1)" = 'build: acme/motion-tests #42' ]
 }
@@ -839,9 +841,9 @@ lint: print-lines: no match
 state: passed
 $BUILD42"
   [ "$output" = "$want" ]
-  ! printf '%s' "$output" | grep -q 'bk;t='
-  ! printf '%s' "$output" | grep -q $'\033'
-  ! printf '%s' "$output" | grep -q $'\r'
+  ! printf '%s' "$output" | grep -q 'bk;t=' || false
+  ! printf '%s' "$output" | grep -q $'\033' || false
+  ! printf '%s' "$output" | grep -q $'\r' || false
   [[ "$stderr" != *ghs_LOGPLANTED* ]]
   [[ "$stderr" != *bkPLANTEDBK* ]]
   local l
@@ -933,7 +935,7 @@ unit: e2e summary: last" ]
   [ "$(unitlines | sed -n 20p)" = "unit: e2e summary: n=20" ]
   [ "$(unitlines | sed -n 21p)" = "unit: print-lines cap of 20 reached, more lines match" ]
   [ "$(printf '%s\n' "$output" | grep -c '^lint: e2e summary: s=')" -eq 3 ]
-  ! printf '%s\n' "$output" | grep -q '^lint: print-lines cap'
+  ! printf '%s\n' "$output" | grep -q '^lint: print-lines cap' || false
   genlog 11111111-1111-1111-1111-111111111111 '[range(1;22) | "e2e summary: n=\(.)"] | join("\n")'
   go --print-lines 'e2e summary:'
   [ "$(unitlines | grep -c 'e2e summary: n=')" -eq 20 ]
@@ -969,7 +971,7 @@ unit: e2e summary: last" ]
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -qx 'unit: print-lines: log unavailable'
   printf '%s\n' "$output" | grep -qx 'lint: print-lines: log unavailable'
-  ! printf '%s\n' "$output" | grep -x 'log unavailable'
+  ! printf '%s\n' "$output" | grep -x 'log unavailable' || false
   reset_calls; setbuild 1 job-failed
   go --print-lines 'e2e summary:'
   [ "$status" -eq 10 ]
@@ -1002,7 +1004,7 @@ unit: e2e summary: last" ]
   for i in 1 2 3 4 5 6; do printf '%s\n' "$output" | grep -qx "job$i: e2e summary: refused=3 total=40"; done
   [ "$(printf '%s\n' "$output" | grep -c '^more failed jobs not shown$')" -eq 1 ]
   [ "$(ncalls '/log$')" -eq 6 ]
-  ! printf '%s\n' "$output" | grep -qx 'log of job job6:'
+  ! printf '%s\n' "$output" | grep -qx 'log of job job6:' || false
   reset_calls; setbuild 1 passed
   echo hang > "$STUB_DIR/fail-log"
   unset SHIM_FAKE_SLEEP
