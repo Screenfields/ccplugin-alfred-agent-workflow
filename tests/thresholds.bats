@@ -26,6 +26,7 @@ names_in() {
 }
 
 @test "the appendix C names all resolve, with their start values" {
+  ! false
   [ "$("$CFG" get overrun-pct)" = "50" ]
   [ "$("$CFG" get wip-limit)" = "2" ]
   [ "$("$CFG" get worker-limit)" = "4" ]
