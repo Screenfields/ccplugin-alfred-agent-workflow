@@ -682,17 +682,17 @@ alfred-workitem deviations                # unmarked sessions: local record, plu
   flag on `alfred-wake` lines ask for the mark; the `Stop` hook records the session in
   `deviations.jsonl`; the detached run at `SessionEnd` sends the hub one `[deviation] <session_id>`
   notice (`alfred-wake notify hub`). A resumed session is re-marked at `SessionStart`.
+  The reminder is skipped for non-interactive sessions and for `ALFRED_ROLE=worker` (they cannot mark).
+  No notice is sent (the deviation is still recorded in `deviations.jsonl` with `notified: suppressed:<reason>`)
+  when the unmarked window is under `deviation-min-seconds` (60), the session is non-interactive
+  (`CLAUDE_CODE_ENTRYPOINT` not `cli`, `claude-vscode` or `claude-desktop`, or unset), or there are no store
+  amounts and the transcript shows no tool calls.
 - **24 h re-send.** The store attributes requests with a 7-day marker lookback. A `UserPromptSubmit`
   hook re-sends a session's non-empty mark when the last acknowledged send (the `.resend` stamp) is
   more than 24 h (86400 s) old, so a long-running session stays attributed without a resume. It rides
   on a prompt that already happens: no model call, no output, one POST of at most 2 s per session per
   24 h. A failed send is retried after one hour; a cleared mark (`mark none`) is never re-sent, since
   an empty marker clears on the store. Design: `docs/baseline/workitem-resend.md`.
-  The reminder is skipped for non-interactive sessions and for `ALFRED_ROLE=worker` (they cannot mark).
-  No notice is sent (the deviation is still recorded in `deviations.jsonl` with `notified: suppressed:<reason>`)
-  when the unmarked window is under `deviation-min-seconds` (60), the session is non-interactive
-  (`CLAUDE_CODE_ENTRYPOINT` not `cli`, `claude-vscode` or `claude-desktop`, or unset), or there are no store
-  amounts and the transcript shows no tool calls.
 - **Operational work** without its own item goes on the standing item of objective 1 (AP-ADR0028).
   The hub names its number; it is not recorded here yet.
 - **Store env** (set by the hub in gitops): `AGENT_RUNS_OTLP_LOGS_ENDPOINT`, `AGENT_RUNS_OTLP_HEADERS`

@@ -981,9 +981,13 @@ reset_stub() { rm -f "$STUB_DIR/posts.jsonl" "$STUB_DIR/calls.log" "$STUB_DIR/he
 
 @test "RS7: a corrupt stamp counts as due and never breaks the hook" {
   rs_pin; setmark acme/widgets#7
-  local c nines thirteen
+  local c nines thirteen wrap
   nines=$(printf '9%.0s' $(seq 300)); thirteen=9999999999999
-  for c in '' abc 12x -5 1e9 '1 2' "$nines" "$thirteen" 09 0000000000012 $((S + 864000)); do
+  # 2**64 + S - 100 as a 20-digit value: under a bare ^[0-9]+$ guard bash arithmetic
+  # wraps it to S-100 (not due, 0 POSTs); the 1-12 digit guard reads it as corrupt.
+  wrap=$(python3 -c "print(2**64 + $S - 100)")
+  [ "${#wrap}" -eq 20 ]
+  for c in '' abc 12x -5 1e9 '1 2' "$nines" "$thirteen" 09 0000000000012 "$wrap" $((S + 864000)); do
     reset_stub
     mkdir -p "$DIR"; printf '%s' "$c" > "$DIR/sess-main.resend"
     run --separate-stderr ups
@@ -994,6 +998,8 @@ reset_stub() { rm -f "$STUB_DIR/posts.jsonl" "$STUB_DIR/calls.log" "$STUB_DIR/he
     [[ "$stderr" != *"syntax error"* ]]
     ups
     [ "$(nposts)" -le 1 ]
+    # a corrupt stamp is due: exactly one POST on that prompt
+    [ "$(nposts)" -eq 1 ] || { echo "stamp '$c' sent $(nposts) times"; false; }
   done
 }
 
@@ -1106,6 +1112,20 @@ reset_stub() { rm -f "$STUB_DIR/posts.jsonl" "$STUB_DIR/calls.log" "$STUB_DIR/he
   [ "$(nposts)" -eq 0 ]
 }
 
+@test "RS12: a read-only state dir sends nothing" {
+  rs_pin; setmark acme/widgets#7
+  chmod 555 "$DIR"
+  local i
+  for i in 1 2 3; do
+    run --separate-stderr ups
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+  chmod 755 "$DIR"
+  [ "$(nposts)" -eq 0 ]
+  [ ! -e "$DIR/sess-main.resend" ]
+}
+
 @test "RS13: no entrypoint or role gate on the re-send" {
   rs_pin; setmark acme/widgets#7
   local ep
@@ -1134,6 +1154,9 @@ reset_stub() { rm -f "$STUB_DIR/posts.jsonl" "$STUB_DIR/calls.log" "$STUB_DIR/he
   [ ! -e "$DIR/old-sess.resend.tmp.123" ]
   [ -e "$DIR/fresh-sess.resend" ]
   [ -e "$DIR/sess-main.resend" ]
+  # Excluding the current session from the cleanup is defence in depth and not
+  # observable black-box: the successful mark rewrites its stamp afterwards.
+  [ "$(stamp_get)" = "$S" ]
 }
 
 @test "RS15: the UserPromptSubmit hook timeout stays 5" {
