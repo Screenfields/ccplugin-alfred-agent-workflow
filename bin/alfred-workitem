@@ -13,7 +13,8 @@
 # is chosen, and the `Estimate-tokens:` line is shown exactly as written.
 #
 # Subcommands:
-#   mark <owner>/<repo>#<n>|none   mark the current session ($CLAUDE_CODE_SESSION_ID)
+#   mark <owner>/<repo>#<n>|none   mark the current session ($CLAUDE_CODE_SESSION_ID);
+#                                  `none` clears it, for a session with no further requests
 #   guard                          PreToolUse (Bash) hook: deny `mark` inside a subagent
 #   hook                           SessionStart(resume)/UserPromptSubmit/Stop/
 #                                  SubagentStop/SessionEnd hook (event from stdin JSON)
@@ -408,6 +409,7 @@ cmd_mark() {
     echo "marked session $sid -> $item (estimate: ${est:-none})"
   else
     echo "marked session $sid -> none (cleared)"
+    warn "warning: requests made under mark none count as a deviation (unattributed); mark the standing item of objective 1 if more requests follow"
   fi
   exit 0
 }
@@ -427,7 +429,7 @@ cmd_guard() {
 
 # --- hook events -----------------------------------------------------------
 
-REMINDER='No work item is marked for this session, so its token usage is recorded as an unmarked deviation. Mark it: alfred-workitem mark <owner>/<repo>#<n> (operational work without its own item goes on the standing item of objective 1; see the alfred-agent README), or alfred-workitem mark none.'
+REMINDER='No work item is marked for this session, so its token usage is recorded as an unmarked deviation. Mark it: alfred-workitem mark <owner>/<repo>#<n> (operational work without its own item goes on the standing item of objective 1; see the alfred-agent README).'
 
 # with_dev_lock <cmd...>: run under an flock on deviations.jsonl (2 s); on a
 # timeout or an unusable lock file, warn and skip: failing open.

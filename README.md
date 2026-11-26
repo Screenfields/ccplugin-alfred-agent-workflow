@@ -664,7 +664,7 @@ on and reads the totals back. It is **tracked, not gated**: nothing here stops o
 nothing notifies on an overrun.
 
 ```bash
-alfred-workitem mark <owner>/<repo>#<n>   # mark this session ($CLAUDE_CODE_SESSION_ID); `mark none` clears it
+alfred-workitem mark <owner>/<repo>#<n>   # mark this session ($CLAUDE_CODE_SESSION_ID); `mark none` clears it (rule: see Operational work below)
 alfred-workitem check <item> [--estimate <text>] [--from D] [--to D]   # report: actual against estimate, always exit 0
 alfred-workitem report <item>             # markdown table for the closing comment, one row per role x model
 alfred-workitem line <item>               # one line for the review record
@@ -693,8 +693,11 @@ alfred-workitem deviations                # unmarked sessions: local record, plu
   on a prompt that already happens: no model call, no output, one POST of at most 2 s per session per
   24 h. A failed send is retried after one hour; a cleared mark (`mark none`) is never re-sent, since
   an empty marker clears on the store. Design: `docs/baseline/workitem-resend.md`.
-- **Operational work** without its own item goes on the standing item of objective 1 (AP-ADR0028).
-  The hub names its number; it is not recorded here yet.
+- **Operational work** (wakes, triage, waiting) without its own item goes on the standing item of
+  objective 1 (AP-ADR0028). The hub names its number; it is not recorded here yet. `mark none` is
+  only for a session that makes no further model requests: requests after it count as a deviation
+  (the store counts them as unattributed; no local record), and `mark none` prints a warning saying so.
+  Design: `docs/baseline/workitem-mark-none.md`.
 - **Store env** (set by the hub in gitops): `AGENT_RUNS_OTLP_LOGS_ENDPOINT`, `AGENT_RUNS_OTLP_HEADERS`
   (comma-separated, each `Name: value` or the OTLP form `key=value`), `AGENT_RUNS_READER_URL`, `AGENT_RUNS_TOKEN`. Hooks cannot see
   `OTEL_*` (Claude Code strips it). **Every command fails open**: a missing env, an unreachable store

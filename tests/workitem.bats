@@ -1180,7 +1180,7 @@ reset_stub() { rm -f "$STUB_DIR/posts.jsonl" "$STUB_DIR/calls.log" "$STUB_DIR/he
   grep -qF 86400 "$root/docs/baseline/workitem-resend.md"
   grep -qi 'empty item' "$root/docs/baseline/workitem-resend.md"
   # (c) the version
-  [ "$(jq -r .version "$root/.claude-plugin/plugin.json")" = 2.54.1 ]
+  [ "$(jq -r .version "$root/.claude-plugin/plugin.json")" = 2.54.2 ]
 }
 
 # --- CCW-259: the plugin text stops offering `mark none`; `mark none` warns once ---------------
