@@ -29,6 +29,7 @@ Exit: 0 clean, 1 findings, 2 parse, usage or no-file error (fails closed).
 """
 import bisect
 import glob
+import os
 import re
 import sys
 
@@ -314,7 +315,7 @@ def main(argv):
         files = sorted(set(glob.glob('tests/*.bats') + glob.glob('tests/*/*.bats')))
         if not files:
             print('bats-negation: no tests/*.bats or tests/*/*.bats files found '
-                  'under %s (run from the repo root)' % glob.os.getcwd(), file=sys.stderr)
+                  'under %s (run from the repo root)' % os.getcwd(), file=sys.stderr)
             return 2
     rc = 0
     count = 0
