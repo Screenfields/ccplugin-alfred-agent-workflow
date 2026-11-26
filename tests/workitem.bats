@@ -1180,5 +1180,187 @@ reset_stub() { rm -f "$STUB_DIR/posts.jsonl" "$STUB_DIR/calls.log" "$STUB_DIR/he
   grep -qF 86400 "$root/docs/baseline/workitem-resend.md"
   grep -qi 'empty item' "$root/docs/baseline/workitem-resend.md"
   # (c) the version
-  [ "$(jq -r .version "$root/.claude-plugin/plugin.json")" = 2.54.1 ]
+  [ "$(jq -r .version "$root/.claude-plugin/plugin.json")" = 2.54.2 ]
+}
+
+# --- CCW-259: the plugin text stops offering `mark none`; `mark none` warns once ---------------
+
+ROOT_MN() { echo "$BATS_TEST_DIRNAME/.."; }
+DEV_LINE='count as a deviation'
+# nwarn <text>: how many lines of the text contain the deviation phrase.
+nwarn() { grep -cF -- "$DEV_LINE" <<<"$1" || true; }
+
+@test "MN1: the no-mark row sends operational work to the standing item and does not offer none" {
+  row=$(grep -F '| `… no-mark`' "$(ROOT_MN)/commands/check-messages.md")
+  [ "$(grep -c . <<<"$row")" -eq 1 ]
+  [[ "$row" == *'alfred-workitem mark <owner>/<repo>#<n>'* ]]
+  [[ "$row" == *'standing item of objective 1'* ]]
+  [[ "$row" == *'then handle the wake as usual with the row above'* ]]
+  [ "$(tr -cd '|' <<<"$row" | wc -c)" -eq 4 ]
+  cell=$(awk -F'|' '{print $3}' <<<"$row")
+  [ -n "$cell" ]
+  ! [[ "$cell" == *none* ]] || false
+  [ "$(awk -F'|' '{gsub(/ /,"",$4); print $4}' <<<"$row")" = None ]
+}
+
+@test "MN2: the reminder does not offer none and is not longer than 287 chars" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  run hook_in "$(ev UserPromptSubmit sess-main '{"prompt":"hi"}')"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.hookSpecificOutput.hookEventName' <<<"$output")" = UserPromptSubmit ]
+  [ "$(jq -r '.hookSpecificOutput | keys | join(",")' <<<"$output")" = "additionalContext,hookEventName" ]
+  [ "$(jq -r 'has("decision")' <<<"$output")" = false ]
+  ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$output")
+  [[ "$ctx" == *'alfred-workitem mark <owner>/<repo>#<n>'* ]]
+  [[ "$ctx" == *'standing item of objective 1'* ]]
+  ! [[ "$ctx" == *none* ]] || false
+  [ "${#ctx}" -le 287 ]
+}
+
+@test "MN3: README and the header comment state the rule once and point to it" {
+  root=$(ROOT_MN)
+  sec=$(awk '/^## Tokens per work item/{f=1;next} /^## /{f=0} f' "$root/README.md")
+  bullet=$(awk '/^- \*\*Operational work\*\*/{f=1;print;next} /^- \*\*/{f=0} /^## /{f=0} f' <<<"$sec")
+  [ -n "$bullet" ]
+  [[ "$bullet" == *wakes* && "$bullet" == *triage* && "$bullet" == *waiting* ]]
+  [[ "$bullet" == *'mark none'*'no further model requests'* ]]
+  [[ "$bullet" == *'count as a deviation'* ]]
+  [[ "$bullet" == *unattributed* ]]
+  line=$(grep -F 'alfred-workitem mark <owner>/<repo>#<n>   # mark this session' <<<"$sec")
+  [[ "$line" == *'`mark none` clears it'* ]]
+  [[ "$line" == *'Operational work'* ]]
+  # header comment: every non-empty line before `set -u` starts with `#`
+  hdr=$(sed -n '1,/^set -u/p' "$root/bin/alfred-workitem" | sed '$d')
+  ! grep -vE '^(#|$)' <<<"$hdr" || false
+  mk=$(grep -A1 -F 'mark <owner>/<repo>#<n>|none' <<<"$hdr")
+  [[ "$mk" == *'no further'* ]]
+  # usage string at the malformed-argument exit is unchanged
+  [ "$(grep -cF 'echo "usage: alfred-workitem mark <owner>/<repo>#<n>|none" >&2' "$root/bin/alfred-workitem")" -eq 1 ]
+}
+
+@test "MN4: no agent-read text offers mark none" {
+  root=$(ROOT_MN)
+  dirs=()
+  for d in commands skills agents rules hooks agreement doctrines templates lib config; do
+    [ -d "$root/$d" ] && dirs+=("$root/$d")
+  done
+  run grep -rlF 'mark none' "${dirs[@]}"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+  rem=$(grep -F "REMINDER='" "$root/bin/alfred-workitem")
+  [ -n "$rem" ]
+  ! [[ "$rem" == *none* ]] || false
+}
+
+@test "MN5: mark none prints the deviation warning once on stderr, stdout unchanged" {
+  run --separate-stderr "$WI" mark none
+  [ "$status" -eq 0 ]
+  [ "$output" = "marked session sess-main -> none (cleared)" ]
+  [ "$(wc -l <<<"$stderr")" -eq 1 ]
+  [[ "$stderr" == *"$DEV_LINE"* ]]
+  [ "${#stderr}" -le 200 ]
+  [[ "$stderr" == alfred-workitem:* ]]
+  [ "$(nposts)" -eq 1 ]
+  [ "$(attr work_item <<<"$(posts)")" = "" ]
+  [ "$(mark_item)" = "" ]
+}
+
+@test "MN6: other mark calls print no deviation warning" {
+  run --separate-stderr "$WI" mark acme/widgets#7
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+  run --separate-stderr "$WI" mark widgets-7
+  [ "$status" -eq 2 ]
+  [ "$stderr" = "usage: alfred-workitem mark <owner>/<repo>#<n>|none" ]
+  run --separate-stderr "$WI" mark
+  [ "$status" -eq 2 ]
+  [ "$(nwarn "$stderr")" -eq 0 ]
+}
+
+@test "MN7: no clear, no warning" {
+  unset CLAUDE_CODE_SESSION_ID
+  run --separate-stderr "$WI" mark none
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"nothing marked"* ]]
+  [ "$(nwarn "$stderr")" -eq 0 ]
+  export CLAUDE_CODE_SESSION_ID=sess-main
+  mkdir -p "$CLAUDE_CONFIG_DIR"; : > "$CLAUDE_CONFIG_DIR/alfred-workitem"
+  run --separate-stderr "$WI" mark none
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"cannot create"* ]]
+  [ "$(nwarn "$stderr")" -eq 0 ]
+}
+
+@test "MN8: a store refusal still warns, once" {
+  touch "$STUB_DIR/fail"
+  run --separate-stderr "$WI" mark none
+  [ "$status" -eq 0 ]
+  [ "$output" = "marked session sess-main -> none (cleared)" ]
+  [[ "$stderr" == *"did not take the marker"* ]]
+  [ "$(nwarn "$stderr")" -eq 1 ]
+}
+
+@test "MN9: no hook path carries the warning" {
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  "$WI" mark none 2>/dev/null
+  mkdir -p "$DIR"; printf '%s\n' 1 > "$DIR/sess-main.resend"
+  inputs=(
+    "$(ev SessionStart sess-main '{"source":"resume"}')"
+    "$(ev SessionStart sess-main '{"source":"startup"}')"
+    "$(ev UserPromptSubmit sess-main '{"prompt":"a"}')"
+    "$(ev UserPromptSubmit sess-main '{"prompt":"b"}')"
+    "$(ev UserPromptSubmit sess-main '{"prompt":"c"}')"
+    "$(ev Stop sess-main)"
+    "$(ev SubagentStop sess-main '{"agent_id":"a1"}')"
+    "$(ev SessionEnd sess-main)"
+  )
+  for i in "${inputs[@]}"; do
+    run --separate-stderr hook_in "$i"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(nwarn "$output$stderr")" -eq 0 ]
+  done
+  # an unmarked session gets only the reminder JSON
+  run --separate-stderr hook_in "$(ev UserPromptSubmit sess-new '{"prompt":"hi"}')"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.hookSpecificOutput | keys | join(",")' <<<"$output")" = "additionalContext,hookEventName" ]
+  [ "$(nwarn "$output$stderr")" -eq 0 ]
+}
+
+@test "MN10: mark none still clears and removes the resend stamp" {
+  "$WI" mark acme/widgets#7
+  [ -e "$DIR/sess-main.resend" ]
+  "$WI" mark none 2>/dev/null
+  [ ! -e "$DIR/sess-main.resend" ]
+  [ "$(mark_item)" = "" ]
+  [ "$(attr work_item <<<"$(posts | tail -1)")" = "" ]
+}
+
+@test "MN11: the version is 2.54.2" {
+  [ "$(jq -r .version "$(ROOT_MN)/.claude-plugin/plugin.json")" = 2.54.2 ]
+}
+
+@test "MN12a: the design record exists and states the rule" {
+  f="$(ROOT_MN)/docs/baseline/workitem-mark-none.md"
+  [ -f "$f" ]
+  grep -qF 'no further model requests' "$f"
+  grep -qi 'unattributed' "$f"
+  grep -qF 'cmd_mark' "$f"
+  grep -qi 'never in a hook' "$f"
+}
+
+@test "MN12b: the cannot-write path warns once" {
+  [ "$(id -u)" -ne 0 ] || skip "root ignores directory permissions"
+  mkdir -p "$DIR"
+  chmod a-w "$DIR"
+  run --separate-stderr "$WI" mark none
+  chmod u+w "$DIR"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"cannot write"* ]]
+  [ "$(nwarn "$stderr")" -eq 1 ]
+}
+
+@test "MN12: hooks.json is unchanged against origin/main" {
+  git -C "$(ROOT_MN)" rev-parse -q --verify origin/main >/dev/null || skip "no origin/main"
+  git -C "$(ROOT_MN)" diff --quiet origin/main -- hooks/hooks.json
 }
