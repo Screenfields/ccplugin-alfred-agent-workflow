@@ -874,3 +874,288 @@ ts_transcript() {
   # SubagentStop: one POST is capped at POST_TIMEOUT per chunk of CHUNK ids
   jq -e '.hooks.SubagentStop[].hooks[].timeout >= 30' "$h"
 }
+
+# --- CCW-255: re-send the session mark once per 24 h on UserPromptSubmit -------------------------------
+
+# RS helpers. The clock is pinned with ALFRED_WORKITEM_NOW; S is its epoch.
+rs_pin() { # [epoch] — pin "now" (default: 2026-06-01T12:00:00Z)
+  S=$(date -u -d 2026-06-01T12:00:00Z +%s)
+  export ALFRED_WORKITEM_NOW
+  ALFRED_WORKITEM_NOW=$(date -u -d "@${1:-$S}" +%Y-%m-%dT%H:%M:%SZ)
+}
+ups() { hook_in "$(ev UserPromptSubmit "${1:-sess-main}" '{"prompt":"hi"}')"; }
+stamp() { mkdir -p "$DIR"; printf '%s\n' "$1" > "$DIR/${2:-sess-main}.resend"; }
+stamp_get() { cat "$DIR/${1:-sess-main}.resend"; }
+setmark() { # <item> [sid] — a mark file written by hand (no send, no stamp)
+  mkdir -p "$DIR"
+  jq -n --arg i "$1" '{item: $i, marked_at: "2026-01-01T00:00:00Z", estimate: null}' > "$DIR/${2:-sess-main}.json"
+}
+ncurl() { grep -cE '^(GET|POST) ' "$STUB_DIR/calls.log" 2>/dev/null || true; }
+reset_stub() { rm -f "$STUB_DIR/posts.jsonl" "$STUB_DIR/calls.log" "$STUB_DIR/headers.log"; }
+
+@test "RS1: a due mark is re-sent once on UserPromptSubmit, silently" {
+  rs_pin; setmark acme/widgets#7; stamp $((S - 86401))
+  run --separate-stderr ups
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(nposts)" -eq 1 ]
+  [ "$(posts | attr work_item)" = "acme/widgets#7" ]
+  [ "$(posts | attr session.id)" = "sess-main" ]
+  [ "$(posts | attr event.timestamp)" = "$ALFRED_WORKITEM_NOW" ]
+  [ "$(stamp_get)" = "$S" ]
+}
+
+@test "RS2: the 24 h boundary is exact" {
+  rs_pin; setmark acme/widgets#7
+  local pair age want
+  for pair in 86400:0 86401:1 3600:0 604800:1; do
+    age="${pair%%:*}"; want="${pair##*:}"
+    reset_stub; stamp $((S - age))
+    ups
+    [ "$(nposts)" -eq "$want" ] || { echo "age $age: $(nposts) posts, want $want"; false; }
+  done
+}
+
+@test "RS3: not on every prompt, and per session" {
+  rs_pin; setmark acme/widgets#7; setmark acme/widgets#9 sess-other
+  stamp $((S - 86401)); stamp $((S - 86401)) sess-other
+  ups
+  [ "$(nposts)" -eq 1 ]
+  ups; ups; ups
+  [ "$(nposts)" -eq 1 ]
+  [ "$(stamp_get)" = "$S" ]
+  stamp $((S - 100))
+  ups sess-other
+  [ "$(nposts)" -eq 2 ]
+  [ "$(posts | tail -1 | attr session.id)" = "sess-other" ]
+  [ "$(posts | tail -1 | attr work_item)" = "acme/widgets#9" ]
+  [ "$(stamp_get sess-other)" = "$S" ]
+  [ "$(stamp_get)" = "$((S - 100))" ]
+}
+
+@test "RS4: mark and SessionStart resume write the stamp" {
+  rs_pin
+  "$WI" mark acme/widgets#7
+  [ "$(nposts)" -eq 1 ]
+  ups
+  [ "$(nposts)" -eq 1 ]
+  reset_stub; rm -f "$DIR/sess-main.resend"
+  setmark acme/widgets#7
+  hook_in "$(ev SessionStart sess-main '{"source":"resume"}')"
+  ups
+  [ "$(nposts)" -eq 1 ]
+}
+
+@test "RS5: a failed mark leaves the kept mark due at the next prompt" {
+  rs_pin
+  # (a) the store refuses the first mark
+  touch "$STUB_DIR/fail"
+  run "$WI" mark acme/widgets#7
+  [ ! -e "$DIR/sess-main.resend" ]
+  rm -f "$STUB_DIR/fail"; reset_stub
+  ups
+  [ "$(nposts)" -eq 1 ]
+  [ "$(posts | attr work_item)" = "acme/widgets#7" ]
+  # (b) a fresh stamp, then a refused change of item
+  rm -f "$DIR/sess-main.resend"; reset_stub
+  "$WI" mark acme/widgets#7
+  [ -e "$DIR/sess-main.resend" ]
+  touch "$STUB_DIR/fail"
+  run "$WI" mark acme/widgets#8
+  [ ! -e "$DIR/sess-main.resend" ]
+  [ "$(mark_item)" = "acme/widgets#8" ]
+  rm -f "$STUB_DIR/fail"; reset_stub
+  ups
+  [ "$(nposts)" -eq 1 ]
+  [ "$(posts | attr work_item)" = "acme/widgets#8" ]
+}
+
+@test "RS6: a missing stamp counts as due, once" {
+  rs_pin; setmark acme/widgets#7
+  ups
+  [ "$(nposts)" -eq 1 ]
+  [ "$(stamp_get)" = "$S" ]
+  ups
+  [ "$(nposts)" -eq 1 ]
+}
+
+@test "RS7: a corrupt stamp counts as due and never breaks the hook" {
+  rs_pin; setmark acme/widgets#7
+  local c nines thirteen
+  nines=$(printf '9%.0s' $(seq 300)); thirteen=9999999999999
+  for c in '' abc 12x -5 1e9 '1 2' "$nines" "$thirteen" 09 0000000000012 $((S + 864000)); do
+    reset_stub
+    mkdir -p "$DIR"; printf '%s' "$c" > "$DIR/sess-main.resend"
+    run --separate-stderr ups
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(nposts)" -le 1 ]
+    [ "$(stamp_get)" = "$S" ] || { echo "stamp '$c' -> '$(stamp_get)'"; false; }
+    [[ "$stderr" != *"syntax error"* ]]
+    ups
+    [ "$(nposts)" -le 1 ]
+  done
+}
+
+@test "RS8: nothing is sent without a usable non-empty mark" {
+  rs_pin
+  # no mark file: nothing sent, no stamp, the reminder still works
+  export CLAUDE_CODE_ENTRYPOINT=cli
+  run --separate-stderr ups
+  [ "$(nposts)" -eq 0 ]
+  [ ! -e "$DIR/sess-main.resend" ]
+  [[ "$output" == *additionalContext* ]]
+  unset CLAUDE_CODE_ENTRYPOINT
+  # corrupt mark files, each with a due stamp
+  mkdir -p "$DIR"
+  local body
+  for body in '{not json' '{}' '{"item": 7}' '{"item": "acme/widgets#07"}' ''; do
+    printf '%s' "$body" > "$DIR/sess-main.json"; stamp $((S - 90000))
+    run --separate-stderr ups
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [[ "$stderr" == *unreadable* ]]
+    [ "$(nposts)" -eq 0 ]
+    [ "$(stamp_get)" = "$((S - 90000))" ]
+  done
+  # an empty item (by hand, and by mark none) is never re-sent
+  setmark ""; stamp $((S - 90000))
+  ups; ups; ups
+  [ "$(nposts)" -eq 0 ]
+  [ "$(stamp_get)" = "$((S - 90000))" ]
+  stamp $((S - 90000))
+  "$WI" mark none
+  [ ! -e "$DIR/sess-main.resend" ]
+  reset_stub; stamp $((S - 90000))
+  ups; ups; ups
+  [ "$(nposts)" -eq 0 ]
+  [ "$(stamp_get)" = "$((S - 90000))" ]
+}
+
+@test "RS9: a failed send neither blocks, loops nor spends tokens; retry after one hour" {
+  rs_pin; setmark acme/widgets#7; stamp $((S - 90000))
+  cp "$DIR/sess-main.json" "$BATS_TEST_TMPDIR/mark.before"
+  touch "$STUB_DIR/fail"
+  run --separate-stderr ups
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"marker POST failed"* ]]
+  cmp "$DIR/sess-main.json" "$BATS_TEST_TMPDIR/mark.before"
+  [ "$(ncurl)" -eq 1 ]
+  [ "$(stamp_get)" = "$((S - 82800))" ]
+  ups
+  [ "$(ncurl)" -eq 1 ]
+  rs_pin $((S + 3600)); ups
+  [ "$(ncurl)" -eq 1 ]
+  rs_pin $((S + 3601)); ups
+  [ "$(ncurl)" -eq 2 ]
+}
+
+@test "RS9: a missing endpoint makes no curl call and sets the retry stamp" {
+  rs_pin; setmark acme/widgets#7; stamp $((S - 90000))
+  unset AGENT_RUNS_OTLP_LOGS_ENDPOINT
+  run --separate-stderr ups
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *AGENT_RUNS_OTLP_LOGS_ENDPOINT* ]]
+  [ ! -e "$STUB_DIR/calls.log" ]
+  [ "$(stamp_get)" = "$((S - 82800))" ]
+}
+
+@test "RS10: only UserPromptSubmit re-sends" {
+  rs_pin; setmark acme/widgets#7; stamp $((S - 90000))
+  local e
+  for e in Stop SubagentStop SessionEnd; do
+    hook_in "$(ev "$e" sess-main)"
+  done
+  hook_in "$(ev SessionStart sess-main '{"source":"startup"}')"
+  sleep 0.3
+  [ "$(nposts)" -eq 0 ]
+  [ "$(stamp_get)" = "$((S - 90000))" ]
+}
+
+@test "RS11: latency of the re-send path" {
+  rs_pin; setmark acme/widgets#7
+  export TMPDIR="$BATS_TEST_TMPDIR/tmp"; mkdir -p "$TMPDIR"
+  # (a) not due: no curl call, no config file left behind
+  stamp $((S - 100))
+  ups
+  [ ! -e "$STUB_DIR/calls.log" ]
+  [ -z "$(ls -A "$TMPDIR")" ]
+  # (b) store hanging, due: bounded by POST_TIMEOUT, inside the hook's 5 s budget
+  echo 6 > "$STUB_DIR/slow"; stamp $((S - 90000))
+  local t0 t1
+  t0=$(date +%s%N); run ups; t1=$(date +%s%N)
+  [ "$status" -eq 0 ]
+  [ $(((t1 - t0) / 1000000)) -lt 4000 ]
+  grep -qx 'max-time 2' "$STUB_DIR/calls.log"
+  # (c) the throttle keeps the next prompt fast
+  t0=$(date +%s%N); ups; t1=$(date +%s%N)
+  [ $(((t1 - t0) / 1000000)) -lt 1000 ]
+}
+
+@test "RS12: a stamp that cannot be recorded sends nothing" {
+  rs_pin; setmark acme/widgets#7
+  mkdir -p "$DIR/sess-main.resend"
+  local i
+  for i in 1 2 3; do
+    run --separate-stderr ups
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+  [ "$(nposts)" -eq 0 ]
+}
+
+@test "RS13: no entrypoint or role gate on the re-send" {
+  rs_pin; setmark acme/widgets#7
+  local ep
+  for ep in sdk-cli cli UNSET; do
+    reset_stub; stamp $((S - 90000))
+    if [ "$ep" = UNSET ]; then unset CLAUDE_CODE_ENTRYPOINT; else export CLAUDE_CODE_ENTRYPOINT="$ep"; fi
+    ups
+    [ "$(nposts)" -eq 1 ] || { echo "entrypoint $ep"; false; }
+  done
+  reset_stub; stamp $((S - 90000))
+  ALFRED_ROLE=worker ups
+  [ "$(nposts)" -eq 1 ]
+}
+
+@test "RS14: cleanup removes stale stamps, never the current session's" {
+  rs_pin
+  mkdir -p "$DIR"
+  echo "$S" > "$DIR/old-sess.resend"
+  echo "$S" > "$DIR/sess-main.resend"
+  echo "$S" > "$DIR/old-sess.resend.tmp.123"
+  echo "$S" > "$DIR/fresh-sess.resend"
+  touch -d '100 days ago' "$DIR/old-sess.resend" "$DIR/sess-main.resend"
+  touch -d '2 days ago' "$DIR/old-sess.resend.tmp.123"
+  "$WI" mark acme/widgets#7
+  [ ! -e "$DIR/old-sess.resend" ]
+  [ ! -e "$DIR/old-sess.resend.tmp.123" ]
+  [ -e "$DIR/fresh-sess.resend" ]
+  [ -e "$DIR/sess-main.resend" ]
+}
+
+@test "RS15: the UserPromptSubmit hook timeout stays 5" {
+  jq -e '[.hooks.UserPromptSubmit[].hooks[] | select(.command | endswith("alfred-workitem\" hook")) | .timeout] == [5]' \
+    "$BATS_TEST_DIRNAME/../hooks/hooks.json"
+}
+
+@test "RS16: docs and version" {
+  local root="$BATS_TEST_DIRNAME/.." suffix sec
+  "$WI" mark acme/widgets#7
+  suffix=$(cd "$DIR" && ls | grep -E '\.resend$' | head -1 | sed 's/^[^.]*//')
+  [ "$suffix" = .resend ]
+  # (a) script header "Local state" block and the README bullet
+  sed -n '/^# Local state/,/^# Nothing is ever written/p' "$root/bin/alfred-workitem" | grep -qF "<session_id>$suffix"
+  grep -F -- '- **Local state**' -A6 "$root/README.md" | grep -qF "$suffix"
+  # (b) the section "Tokens per work item"
+  sec=$(awk '/^## Tokens per work item/{f=1;next} /^## /{f=0} f' "$root/README.md")
+  [[ "$sec" == *"24 h"* || "$sec" == *86400* ]]
+  # (d) the baseline doc
+  grep -qF "$suffix" "$root/docs/baseline/workitem-resend.md"
+  grep -qF 86400 "$root/docs/baseline/workitem-resend.md"
+  grep -qi 'empty item' "$root/docs/baseline/workitem-resend.md"
+  # (c) the version
+  [ "$(jq -r .version "$root/.claude-plugin/plugin.json")" = 2.54.1 ]
+}
