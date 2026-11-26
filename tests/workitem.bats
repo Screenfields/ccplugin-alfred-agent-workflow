@@ -1148,7 +1148,7 @@ reset_stub() { rm -f "$STUB_DIR/posts.jsonl" "$STUB_DIR/calls.log" "$STUB_DIR/he
   [ "$suffix" = .resend ]
   # (a) script header "Local state" block and the README bullet
   sed -n '/^# Local state/,/^# Nothing is ever written/p' "$root/bin/alfred-workitem" | grep -qF "<session_id>$suffix"
-  grep -F -- '- **Local state**' -A6 "$root/README.md" | grep -qF "$suffix"
+  grep -A6 -F -- '- **Local state**' "$root/README.md" | grep -qF "$suffix"
   # (b) the section "Tokens per work item"
   sec=$(awk '/^## Tokens per work item/{f=1;next} /^## /{f=0} f' "$root/README.md")
   [[ "$sec" == *"24 h"* || "$sec" == *86400* ]]

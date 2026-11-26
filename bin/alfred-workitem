@@ -35,6 +35,9 @@
 #   <session_id>.json        mark file {item, marked_at, estimate}
 #   <session_id>.state.json  sent-override counts per briefed subagent
 #   <session_id>.prompts     prompt counter that throttles the unmarked reminder
+#   <session_id>.resend      epoch seconds of the last acknowledged send of a non-empty
+#                            session marker; UserPromptSubmit re-sends it once per 24 h
+#                            (86400 s) so a long session stays in the store's 7-day lookback
 #   <session_id>.check.lock  dir held while the detached SessionEnd run is live
 #   deviations.jsonl         one record per session that had unmarked time (last 500)
 # Nothing is ever written into a repository.
@@ -53,6 +56,8 @@ READ_TIMEOUT=5
 NOTIFY_TIMEOUT=10
 GH_TIMEOUT=5
 STALE_DAYS=90
+RESEND_EVERY=86400    # re-send a non-empty session marker when the last send is older
+RESEND_RETRY=3600     # after a failed re-send: the next try comes after this many seconds
 REMIND_EVERY=5        # unmarked reminder: once per this many prompts, per session
 DEV_KEEP=500          # lines of deviations.jsonl kept
 CHECK_TIMEOUT=30      # the detached SessionEnd run
@@ -66,11 +71,35 @@ trap 'exit 130' INT HUP
 # ALFRED_WORKITEM_NOW (RFC 3339 UTC) pins the clock; the tests use it for exact bodies.
 now_iso() { if [ -n "${ALFRED_WORKITEM_NOW:-}" ]; then echo "$ALFRED_WORKITEM_NOW"; else date -u +%Y-%m-%dT%H:%M:%SZ; fi; }
 now_nano() { if [ -n "${ALFRED_WORKITEM_NOW:-}" ]; then echo "$(date -u -d "$ALFRED_WORKITEM_NOW" +%s)000000000"; else date +%s%N; fi; }
+# set_now: NOW = epoch seconds; honours ALFRED_WORKITEM_NOW, else a builtin (no process).
+set_now() { if [ -n "${ALFRED_WORKITEM_NOW:-}" ]; then NOW=$(date -u -d "$ALFRED_WORKITEM_NOW" +%s); else printf -v NOW '%(%s)T' -1; fi; }
 ensure_dir() { mkdir -p "$STATE_DIR" 2>/dev/null; }
 mark_file() { printf '%s/%s.json' "$STATE_DIR" "$1"; }
 state_file() { printf '%s/%s.state.json' "$STATE_DIR" "$1"; }
 valid_sid() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
 valid_item() { [[ "$1" =~ ^${ITEM_RE}$ ]]; }
+
+# stamp_due <sid>: 0 when the session marker is due for a re-send. The stamp holds
+# one integer, the epoch seconds of the last acknowledged send. A missing, corrupt
+# or future stamp counts as due. Only 1 to 12 digits are read, forced to base 10,
+# so no arithmetic ever sees a long or octal-looking string.
+stamp_due() {
+  local v=""
+  set_now
+  { IFS= read -r v < "$STATE_DIR/$1.resend"; } 2>/dev/null
+  [[ "$v" =~ ^[0-9]{1,12}$ ]] || return 0
+  v=$((10#$v))
+  [ "$v" -le "$NOW" ] || return 0
+  [ $((NOW - v)) -gt "$RESEND_EVERY" ]
+}
+
+# stamp_write <sid> <epoch>: temp file, then move; 1 when it cannot be recorded.
+stamp_write() {
+  local tmp="$STATE_DIR/$1.resend.tmp.$$"
+  if printf '%s\n' "$2" > "$tmp" 2>/dev/null && mv -fT "$tmp" "$STATE_DIR/$1.resend" 2>/dev/null; then return 0; fi
+  rm -f "$tmp"
+  return 1
+}
 
 # touch_session <sid>: last use, for the 90-day cleanup.
 touch_session() {
@@ -364,9 +393,17 @@ cmd_mark() {
     rm -f "$tmp"; warn "cannot write $mf"
   fi
   # Cleanup: files not used for STALE_DAYS, never the current session's.
-  find "$STATE_DIR" -maxdepth 1 -type f \( -name '*.json' -o -name '*.prompts' \) -mtime "+$STALE_DAYS" \
-    ! -name "$sid.json" ! -name "$sid.state.json" ! -name "$sid.prompts" -delete 2>/dev/null
-  if send_marker "$sid" "$item"; then :; else warn "the store did not take the marker; mark file kept"; fi
+  find "$STATE_DIR" -maxdepth 1 -type f \( -name '*.json' -o -name '*.prompts' -o -name '*.resend' \) -mtime "+$STALE_DAYS" \
+    ! -name "$sid.json" ! -name "$sid.state.json" ! -name "$sid.prompts" ! -name "$sid.resend" -delete 2>/dev/null
+  find "$STATE_DIR" -maxdepth 1 -type f -name '*.resend.tmp.*' -mtime +1 -delete 2>/dev/null
+  # The stamp records an acknowledged send of a non-empty marker. A refused send
+  # removes it, so the kept mark is due at the next prompt; `none` removes it too.
+  rm -f "$STATE_DIR/$sid.resend" 2>/dev/null
+  if send_marker "$sid" "$item"; then
+    if [ -n "$item" ]; then set_now; stamp_write "$sid" "$NOW" || true; fi
+  else
+    warn "the store did not take the marker; mark file kept"
+  fi
   if [ -n "$item" ]; then
     echo "marked session $sid -> $item (estimate: ${est:-none})"
   else
@@ -450,17 +487,47 @@ hook_subagent_stop() { # <input> <sid>
   fi
 }
 
-# resend_session_mark <sid>: re-send the stored mark. A mark file that does not
-# parse, or holds an item the store would reject, sends nothing: an empty
-# work_item would clear the mark on the store.
+# read_mark_item <sid>: prints the mark file's item (possibly empty) and returns 0.
+# A mark file that does not parse, or holds an item the store would reject, warns
+# and returns 1: an empty work_item sent for it would clear the mark on the store.
+read_mark_item() {
+  local item
+  if ! item=$(jq -ser '.[0].item | strings' "$(mark_file "$1")" 2>/dev/null) \
+     || { [ -n "$item" ] && ! valid_item "$item"; }; then
+    warn "mark file for $1 is unreadable; marker not re-sent"
+    return 1
+  fi
+  printf '%s' "$item"
+}
+
+# resend_session_mark <sid>: SessionStart resume. Re-send the stored mark, an empty
+# item included (the cleared state). The code is ignored by the caller.
 resend_session_mark() {
   local sid="$1" item
-  if ! item=$(jq -ser '.[0].item | strings' "$(mark_file "$sid")" 2>/dev/null) \
-     || { [ -n "$item" ] && ! valid_item "$item"; }; then
-    warn "mark file for $sid is unreadable; marker not re-sent"
-    return 0
+  item=$(read_mark_item "$sid") || return 0
+  if send_marker "$sid" "$item" && [ -n "$item" ]; then set_now; stamp_write "$sid" "$NOW" || true; fi
+  return 0
+}
+
+# resend_due <sid>: UserPromptSubmit. Re-send a non-empty mark when the last send is
+# more than RESEND_EVERY old. Cheapest checks first: a not-due prompt starts no
+# process. Never prints to stdout; the result is not used by the hook. An empty
+# item is never re-sent (the store takes it as a clear). A stamp that cannot be
+# recorded sends nothing: it could not be throttled. A failed send sets the stamp
+# to NOW-RESEND_EVERY+RESEND_RETRY, so the next try comes after RESEND_RETRY.
+resend_due() {
+  local sid="$1" st="$STATE_DIR/$1.resend" item tmp="$STATE_DIR/$1.resend.tmp.$$"
+  stamp_due "$sid" || return 0
+  if [ -e "$st" ] && [ ! -f "$st" ]; then return 1; fi
+  item=$(read_mark_item "$sid") || return 1
+  [ -n "$item" ] || return 1
+  : > "$tmp" 2>/dev/null || return 1
+  rm -f "$tmp"
+  if send_marker "$sid" "$item"; then
+    stamp_write "$sid" "$NOW"
+  else
+    stamp_write "$sid" $((NOW - RESEND_EVERY + RESEND_RETRY))
   fi
-  send_marker "$sid" "$item" || true
 }
 
 # interactive_entrypoint <entrypoint>: same allow-list as bin/alfred-loop-check.
@@ -494,6 +561,8 @@ cmd_hook() {
         resend_session_mark "$sid"
       fi ;;
     UserPromptSubmit)
+      # The session mark is re-sent once per 24 h (any entrypoint, any role).
+      if [ -e "$STATE_DIR/$sid.json" ]; then resend_due "$sid" || true; fi
       # Rides on a prompt that is already happening: forces no extra turn.
       # Not for non-interactive sessions (same allow-list as alfred-loop-check)
       # or read-only workers: they cannot mark a work item.

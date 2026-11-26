@@ -682,6 +682,12 @@ alfred-workitem deviations                # unmarked sessions: local record, plu
   flag on `alfred-wake` lines ask for the mark; the `Stop` hook records the session in
   `deviations.jsonl`; the detached run at `SessionEnd` sends the hub one `[deviation] <session_id>`
   notice (`alfred-wake notify hub`). A resumed session is re-marked at `SessionStart`.
+- **24 h re-send.** The store attributes requests with a 7-day marker lookback. A `UserPromptSubmit`
+  hook re-sends a session's non-empty mark when the last acknowledged send (the `.resend` stamp) is
+  more than 24 h (86400 s) old, so a long-running session stays attributed without a resume. It rides
+  on a prompt that already happens: no model call, no output, one POST of at most 2 s per session per
+  24 h. A failed send is retried after one hour; a cleared mark (`mark none`) is never re-sent, since
+  an empty marker clears on the store. Design: `docs/baseline/workitem-resend.md`.
   The reminder is skipped for non-interactive sessions and for `ALFRED_ROLE=worker` (they cannot mark).
   No notice is sent (the deviation is still recorded in `deviations.jsonl` with `notified: suppressed:<reason>`)
   when the unmarked window is under `deviation-min-seconds` (60), the session is non-interactive
@@ -694,7 +700,8 @@ alfred-workitem deviations                # unmarked sessions: local record, plu
   `OTEL_*` (Claude Code strips it). **Every command fails open**: a missing env, an unreachable store
   or bad JSON gives a stderr warning, exit 0 and "unknown" in the output.
 - **Local state** is under `${CLAUDE_CONFIG_DIR:-~/.claude}/alfred-workitem/`: one mark file per
-  session (removed after 90 days unused), a sent-count state file, and `deviations.jsonl`. Nothing is
+  session (removed after 90 days unused), a sent-count state file, a `<session_id>.resend` stamp (the
+  epoch seconds of the last acknowledged send of the session mark), and `deviations.jsonl`. Nothing is
   written into a repository.
 - Marker and read formats: `tests/fixtures/workitem/` (`marker-*.json`, `workitems*.json`).
 
