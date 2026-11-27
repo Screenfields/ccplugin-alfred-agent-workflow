@@ -2,6 +2,7 @@
 # (tests/stub/curl-gateway) and a fake key. Source from setup().
 
 gw_setup() {
+  # shellcheck disable=SC2034  # read by the bats file that sources this helper
   RES="$BATS_TEST_DIRNAME/../bin/ecr-panel-resolve"
   export STUB_DIR="$BATS_TEST_TMPDIR/stub"
   export TMPDIR="$BATS_TEST_TMPDIR/t"
@@ -11,6 +12,7 @@ gw_setup() {
   export LITELLM_URL="http://litellm.invalid"
   export LITELLM_API_KEY="FAKEKEY-ccw193-Zq7"
   unset ALFRED_THRESHOLDS
+  # shellcheck disable=SC2034  # read by the bats file that sources this helper
   OUTF="$BATS_TEST_TMPDIR/out/panel.tsv"
   mkdir -p "$BATS_TEST_TMPDIR/out"
   gw_fixture1
@@ -58,6 +60,7 @@ mkprompt() {
 }
 
 # panel_file : the panel-file= value from $output
+# shellcheck disable=SC2154  # $output is set by bats `run` in the sourcing file
 panel_file() { printf '%s\n' "$output" | sed -n 's/^panel-file=//p' | head -n1; }
 
 # no_leftovers : the temp directory holds nothing
