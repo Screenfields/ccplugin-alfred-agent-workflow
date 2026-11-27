@@ -1,0 +1,24 @@
+  @test "indented head, indented close" {
+    ! true
+    true
+  }
+	@test "tab head, close at column 0" {
+	! true
+	true
+}
+@test "column-0 head after them" {
+  ! true
+  true
+}
+  @test "indented head, brace group before the bang" {
+    {
+      true
+    }
+    ! true
+    true
+  }
+  @test "indented one-line test" { ! true; true; }
+  @test "two-space head, tab close" {
+    ! true
+    true
+	}

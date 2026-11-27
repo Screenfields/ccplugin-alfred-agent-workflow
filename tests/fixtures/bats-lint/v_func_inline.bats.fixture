@@ -1,0 +1,19 @@
+@test "one-line function, bang then true" {
+  f() { ! true; true; }
+  f
+}
+@test "function keyword, bang then true" {
+  function f { ! true; true; }
+  f
+}
+@test "subshell-body function, bang then true" {
+  f() ( ! true; true )
+  f
+}
+@test "multi-line function, bang then true" {
+  f() {
+    ! true
+    true
+  }
+  f
+}

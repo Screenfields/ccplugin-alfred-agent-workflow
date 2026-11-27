@@ -1,0 +1,22 @@
+@test "case arm bang then true, case last, redirect" {
+  v=a
+  case $v in
+    a) ! true; true ;;
+  esac >/dev/null
+}
+@test "case arm bang mid, redirect, then more" {
+  v=a
+  case $v in
+    a) ! true ;;
+  esac >/dev/null
+  true
+}
+@test "brace group bang then true, redirect" {
+  { ! true; true; } >/dev/null
+}
+@test "subshell bang then true, redirect" {
+  (! true; true) >/dev/null
+}
+@test "if branch bang then true, redirect" {
+  if true; then ! true; true; fi >/dev/null
+}

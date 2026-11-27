@@ -1,0 +1,14 @@
+@test "fallthrough, bang last in the final arm" {
+  v=a
+  case $v in
+    a) true ;&
+    b) ! true ;;
+  esac
+}
+@test "fallthrough, bang with || false before it" {
+  v=a
+  case $v in
+    a) ! true || false ;&
+    b) true ;;
+  esac
+}

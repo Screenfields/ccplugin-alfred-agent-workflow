@@ -1,0 +1,7 @@
+@test "continue-testing, no later arm matches" {
+  v=a
+  case $v in
+    a) ! true ;;&
+    b) true ;;
+  esac
+}

@@ -1,0 +1,16 @@
+  helper_a() {
+    ! true
+    true
+  }
+	function helper_b {
+	! true
+	true
+}
+  setup() {
+    ! true
+    true
+  }
+@test "calls the helpers" {
+  helper_a
+  helper_b
+}

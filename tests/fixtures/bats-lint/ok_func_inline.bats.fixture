@@ -1,0 +1,24 @@
+@test "function with bang last, called last" {
+  f() { true; ! true; }
+  f
+}
+@test "function with bang last, called mid" {
+  f() { true; ! true; }
+  f
+  true
+}
+@test "multi-line function with bang last, called last" {
+  f() {
+    true
+    ! true
+  }
+  f
+}
+@test "function keyword with bang last, called last" {
+  function f { true; ! true; }
+  f
+}
+@test "subshell-body function with bang last, called last" {
+  f() ( true; ! true )
+  f
+}

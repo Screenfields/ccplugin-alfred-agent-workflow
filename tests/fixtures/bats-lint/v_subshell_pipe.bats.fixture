@@ -1,0 +1,16 @@
+@test "subshell bang first stage, mid" {
+  (! true) | cat
+  true
+}
+@test "subshell bang first stage, last" {
+  (! true) | cat
+}
+@test "subshell bang middle stage, last" {
+  echo x | (! true) | cat
+}
+@test "subshell bang first stage, and-list" {
+  (! true) | cat && true
+}
+@test "brace group bang first stage, last" {
+  { ! true; } | cat
+}

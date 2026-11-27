@@ -1,0 +1,44 @@
+SNIPPET='
+  f() {
+    ! true
+    true
+  }
+  function f {
+    ! true
+    true
+  }
+'
+cat >/dev/null <<EOF2
+  f() {
+    ! true
+    true
+  }
+  function f {
+    ! true
+    true
+  }
+EOF2
+@test "indented heads in a quoted string and a heredoc are data" {
+  s='
+  f() {
+    ! true
+    true
+  }
+  function f {
+    ! true
+    true
+  }
+'
+  cat >/dev/null <<EOF3
+  f() {
+    ! true
+    true
+  }
+  function f {
+    ! true
+    true
+  }
+EOF3
+  [ -n "$s" ]
+  [ -n "$SNIPPET" ]
+}

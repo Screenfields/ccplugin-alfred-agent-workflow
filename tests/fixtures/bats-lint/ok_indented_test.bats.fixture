@@ -1,0 +1,15 @@
+  @test "indented head, bang last" {
+    true
+    ! true
+  }
+	@test "tab head, run ! mid, close at column 0" {
+	run ! true
+	! true || false
+	true
+}
+  @test "indented head, group at test level then bang last" {
+    {
+      true
+    }
+    ! true
+  }
