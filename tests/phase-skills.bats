@@ -14,6 +14,7 @@ setup() {
   WAITING="$ROOT/commands/waiting.md"
   TROUBLE="$ROOT/skills/troubleshoot/SKILL.md"
   MERGE="$ROOT/skills/merge/SKILL.md"
+  RELEASE="$ROOT/skills/release/SKILL.md"
 }
 
 # sect <file> <heading line> — the heading line (exact) up to, not including, the next
@@ -638,4 +639,63 @@ flat() { tr '\n' ' ' | tr -s ' '; }
   grep -qE 'not to restate a parked question[^.]*hooks/owner-communication\.md' <<<"$l"
   run grep -rlF 'Never repeat a pending question' "$ROOT/README.md" "$ROOT/commands" "$ROOT/hooks"
   [ "$output" = "$ROOT/hooks/owner-communication.md" ]
+}
+
+# CCW-284: the release skill's Step 7 cut. Not sect: Step 6 holds a code block with # lines.
+release_step7() {
+  awk '/^## Step 7/{on=1} /^## Step 8/{on=0} on' "$RELEASE"
+}
+
+CCW284_POLL=('Poll' 'poll' 're-poll' 'wait and' 'prematurely')
+CCW284_RULE=('--watch' 'timeout' 'background' 'foreground' 'Bash task' '124')
+
+@test "CCW-284: release Step 7 points at the CI-wait rule once, in order, with no poll wording" {
+  s7=$(release_step7)
+  [ -n "$s7" ]
+  has "$s7" 'Do NOT merge on red CI. No exceptions.'
+  has "$s7" 'Wait for CI as `ci-wait-is-one-bounded-call` says.'
+  [ "$(grep -cF ci-wait-is-one-bounded-call "$RELEASE")" -eq 1 ]
+  for lit in "${CCW284_POLL[@]}"; do lacks "$s7" "$lit"; done
+  lacks "$(cat "$RELEASE")" 'Poll CI status'
+  lacks "$(cat "$RELEASE")" 're-poll'
+  for lit in "${CCW284_RULE[@]}"; do lacks "$s7" "$lit"; done
+  has "$s7" 'An exit 0 of the watch is not the pass.'
+  q='gh pr checks "$PR_NUMBER" --repo Screenfields/alfred-cc-tools'
+  has "$s7" "$q"
+  p=$(grep -nF 'ci-wait-is-one-bounded-call' <<<"$s7" | head -1 | cut -d: -f1)
+  e=$(grep -nF 'An exit 0 of the watch is not the pass.' <<<"$s7" | head -1 | cut -d: -f1)
+  d=$(grep -nF "$q" <<<"$s7" | head -1 | cut -d: -f1)
+  [ "$p" -lt "$e" ]
+  [ "$e" -lt "$d" ]
+}
+
+@test "CCW-284: release Step 7 reports pending and stops, and keeps the red-CI gate and hand-off" {
+  s7=$(release_step7)
+  [ -n "$s7" ]
+  has "$s7" 'If any check is `IN_PROGRESS` or `QUEUED` → CI outlasted the wait. Report the PR as pending, keep `$CATALOG_DIR` for the merge, and stop. Do not merge.'
+  has "$s7" 'ERROR: CI failed on PR #{PR_NUMBER}. Merge blocked.'
+  has "$s7" 'TIMED_OUT'
+  has "$s7" 'Do NOT merge on red CI. No exceptions.'
+  has "$s7" '/alfred-agent:merge {PR_NUMBER}'
+  has "$s7" 'Never run `gh pr merge` directly here.'
+  has "$s7" 'alfred-review post'
+  has "$s7" 'rm -rf "$CATALOG_DIR"'
+}
+
+@test "CCW-284: the Step 7 lacks checks can fail and their literals can match" {
+  for lit in "${CCW284_POLL[@]}" "${CCW284_RULE[@]}"; do
+    run lacks "clean line"$'\n'"$lit" "$lit"
+    [ "$status" -ne 0 ]
+  done
+  old='Poll CI status:
+- If any check is `IN_PROGRESS` or `QUEUED` → wait and re-poll. Do not merge prematurely.'
+  for lit in "${CCW284_POLL[@]}"; do
+    run lacks "$old" "$lit"
+    [ "$status" -ne 0 ]
+  done
+  fixture='timeout 600 gh pr checks 7 --watch, started in the background or the foreground as a Bash task, exit 124'
+  for lit in "${CCW284_RULE[@]}"; do
+    run lacks "$fixture" "$lit"
+    [ "$status" -ne 0 ]
+  done
 }
