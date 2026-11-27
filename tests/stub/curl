@@ -8,6 +8,9 @@
 #   slow        present → sleep <its content> seconds first (a hung request)
 #   legacy      present → get_messages rejects `since`/`include_body` like an
 #               agent-messaging deploy without the cursor API
+#   needs-agent present → get_messages answers an isError result ("X-Agent-ID
+#               header is required", HTTP 200) when the -K config file has no
+#               X-Agent-ID header; err-text replaces that error text
 #
 # get_messages follows the cursor contract agreed for alfred-platform#849:
 # without `since` it returns up to `limit` unread messages, newest first,
@@ -15,12 +18,13 @@
 # `since` it returns unread messages that arrived after the cursor, oldest
 # first, `has_more` when `limit` cut them off, and `cursor_reset` with a fresh
 # cursor when the cursor is not one it issued. Cursors are "c<arrival index>".
-hdr="" body=""
+hdr="" body="" cfg=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -D) hdr="$2"; shift 2 ;;
     -d) body="$2"; shift 2 ;;
-    -K|-w|-X) shift 2 ;;
+    -K) cfg="$2"; shift 2 ;;
+    -w|-X) shift 2 ;;
     *) shift ;;
   esac
 done
@@ -33,6 +37,13 @@ reply() { printf '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":%s}}\n20
 
 get_messages() {
   local args="$1" stream="$STUB_DIR/stream.json"
+  if [ -f "$STUB_DIR/needs-agent" ] && ! grep -qi '^header = "X-Agent-ID:' "$cfg" 2>/dev/null; then
+    local text="Error calling tool 'get_messages': X-Agent-ID header is required"
+    if [ -f "$STUB_DIR/err-text" ]; then text=$(cat "$STUB_DIR/err-text"); fi
+    jq -cn --arg t "$text" '{jsonrpc:"2.0",id:2,result:{content:[{type:"text",text:$t}],isError:true}}'
+    printf '200'
+    return
+  fi
   if [ -f "$STUB_DIR/legacy" ] && printf '%s' "$args" | jq -e 'has("since") or has("include_body")' >/dev/null; then
     printf '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"1 validation error for call[get_messages]\\nsince\\n  Unexpected keyword argument [type=unexpected_keyword_argument]"}],"isError":true}}\n200'
     return

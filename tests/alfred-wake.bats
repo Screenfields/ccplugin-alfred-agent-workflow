@@ -1719,13 +1719,13 @@ nonwin_path() {
   ! grep -qF 'winget install jqlang.jq' "$BATS_TEST_TMPDIR/pf.err" || false
 }
 
-@test "CCW-203 AC7+AC8: token auth shows from token when AGENT_ID is unset or empty, the id when set" {
+@test "CCW-203 AC7+AC8: token auth shows agent=unset (AGENT_ID empty) when AGENT_ID is unset or empty, the id when set" {
   unset ALFRED_WAKE_MCP_JSON
   unset AGENT_ID
   run bash -c "timeout 60 '$WAKE' check 2>&1 </dev/null"
-  [[ "$output" == *"agent-messaging auth: env AGENT_MESSAGING_TOKEN (agent=from token)"* ]]
+  [[ "$output" == *"agent-messaging auth: env AGENT_MESSAGING_TOKEN (agent=unset (AGENT_ID empty))"* ]]
   AGENT_ID="" run bash -c "timeout 60 '$WAKE' check 2>&1 </dev/null"
-  [[ "$output" == *"agent-messaging auth: env AGENT_MESSAGING_TOKEN (agent=from token)"* ]]
+  [[ "$output" == *"agent-messaging auth: env AGENT_MESSAGING_TOKEN (agent=unset (AGENT_ID empty))"* ]]
   AGENT_ID=tester run bash -c "timeout 60 '$WAKE' check 2>&1 </dev/null"
   [[ "$output" == *"agent-messaging auth: env AGENT_MESSAGING_TOKEN (agent=tester)"* ]]
 }
@@ -1737,11 +1737,101 @@ nonwin_path() {
   [[ "$output" == *"NONE (agent=unset)"* ]]
 }
 
-@test "CCW-203 AC10: .mcp.json source with AGENT_ID unset shows from token" {
+@test "CCW-203 AC10: .mcp.json source with AGENT_ID unset shows agent=unset (AGENT_ID empty)" {
   unset AGENT_MESSAGING_TOKEN AGENT_ID
   local f="$BATS_TEST_TMPDIR/mcp.json"
   printf '{"mcpServers":{"agent-messaging":{"url":"http://stub.invalid/mcp/","headers":{"Authorization":"Bearer x"}}}}\n' > "$f"
   export ALFRED_WAKE_MCP_JSON="$f"
   run bash -c "timeout 60 '$WAKE' check 2>&1 </dev/null"
-  [[ "$output" == *"agent-messaging auth: $f (agent=from token)"* ]]
+  [[ "$output" == *"agent-messaging auth: $f (agent=unset (AGENT_ID empty))"* ]]
+}
+
+# --- CCW-282: check names a missing AGENT_ID instead of claiming from token --
+
+# check_run — run `check` with stdout and stderr apart (ck.out, ck.err).
+check_run() {
+  timeout 60 "$WAKE" check >"$BATS_TEST_TMPDIR/ck.out" 2>"$BATS_TEST_TMPDIR/ck.err" </dev/null
+}
+
+@test "CCW-282 AC1: a server error without AGENT_ID is shown with a separate AGENT_ID hint" {
+  touch "$STUB_DIR/needs-agent"
+  unset AGENT_ID
+  run check_run
+  [ "$status" -eq 0 ]
+  [ ! -s "$BATS_TEST_TMPDIR/ck.out" ]
+  grep -qE '^alfred-wake: agent-messaging failed: .*X-Agent-ID header is required' "$BATS_TEST_TMPDIR/ck.err"
+  [ "$(grep -c 'AGENT_ID is not set' "$BATS_TEST_TMPDIR/ck.err")" -eq 1 ]
+  ! grep 'AGENT_ID is not set' "$BATS_TEST_TMPDIR/ck.err" | grep -q 'failed:' || false
+}
+
+@test "CCW-282 AC2: with AGENT_ID set there is no hint and no failure" {
+  touch "$STUB_DIR/needs-agent"
+  run check_run
+  [ "$status" -eq 0 ]
+  grep -qF '(agent=tester)' "$BATS_TEST_TMPDIR/ck.err"
+  grep -q 'seeded cursor (unread=0)' "$BATS_TEST_TMPDIR/ck.err"
+  ! grep -q 'AGENT_ID is not set' "$BATS_TEST_TMPDIR/ck.err" || false
+  ! grep -q 'failed:' "$BATS_TEST_TMPDIR/ck.err" || false
+}
+
+@test "CCW-282 AC3: no from token claim on the env path or the .mcp.json path" {
+  unset ALFRED_WAKE_MCP_JSON AGENT_ID
+  run check_run
+  grep -qF 'agent-messaging auth: env AGENT_MESSAGING_TOKEN (agent=unset (AGENT_ID empty))' "$BATS_TEST_TMPDIR/ck.err"
+  ! grep -q 'from token' "$BATS_TEST_TMPDIR/ck.err" || false
+  AGENT_ID="" run check_run
+  grep -qF '(agent=unset (AGENT_ID empty))' "$BATS_TEST_TMPDIR/ck.err"
+  unset AGENT_MESSAGING_TOKEN
+  local f="$BATS_TEST_TMPDIR/mcp.json"
+  printf '{"mcpServers":{"agent-messaging":{"url":"http://stub.invalid/mcp/","headers":{"Authorization":"Bearer x"}}}}\n' > "$f"
+  export ALFRED_WAKE_MCP_JSON="$f"
+  run check_run
+  grep -qF "agent-messaging auth: $f (agent=unset (AGENT_ID empty))" "$BATS_TEST_TMPDIR/ck.err"
+  ! grep -q 'from token' "$BATS_TEST_TMPDIR/ck.err" || false
+}
+
+@test "CCW-282 AC4: no credential keeps NONE (agent=unset)" {
+  unset AGENT_MESSAGING_TOKEN AGENT_ID
+  export ALFRED_WAKE_MCP_JSON=/nonexistent
+  run check_run
+  grep -qF 'NONE (agent=unset)' "$BATS_TEST_TMPDIR/ck.err"
+  ! grep -q 'AGENT_ID empty' "$BATS_TEST_TMPDIR/ck.err" || false
+}
+
+@test "CCW-282 AC5: the hint is for the server-error path only" {
+  unset AGENT_ID
+  touch "$STUB_DIR/fail"
+  run check_run
+  grep -q 'failed: initialize http 500' "$BATS_TEST_TMPDIR/ck.err"
+  ! grep -q 'AGENT_ID is not set' "$BATS_TEST_TMPDIR/ck.err" || false
+  rm "$STUB_DIR/fail"
+  touch "$STUB_DIR/legacy"
+  run check_run
+  grep -q 'no cursor API on this server' "$BATS_TEST_TMPDIR/ck.err"
+  ! grep -q 'AGENT_ID is not set' "$BATS_TEST_TMPDIR/ck.err" || false
+}
+
+@test "CCW-282 AC6: the WAKE-ERROR stdout line is unchanged" {
+  touch "$STUB_DIR/needs-agent"
+  unset AGENT_ID
+  export ALFRED_WAKE_FAIL_THRESHOLD=1
+  run timeout 20 "$WAKE" wait </dev/null 2>/dev/null
+  [ "$status" -eq 2 ]
+  [ "$output" = "WAKE-ERROR agent-messaging: get_messages returned an error" ]
+}
+
+@test "CCW-282 AC7: the server text is one capped line without control characters" {
+  touch "$STUB_DIR/needs-agent"
+  unset AGENT_ID
+  { printf 'first line\n\033[31m'; head -c 500 /dev/zero | tr '\0' 'x'; } > "$STUB_DIR/err-text"
+  run check_run
+  [ "$status" -eq 0 ]
+  [ ! -s "$BATS_TEST_TMPDIR/ck.out" ]
+  [ "$(grep -c 'agent-messaging failed:' "$BATS_TEST_TMPDIR/ck.err")" -eq 1 ]
+  local line text
+  line=$(grep 'agent-messaging failed:' "$BATS_TEST_TMPDIR/ck.err")
+  text="${line#*agent-messaging failed: }"
+  [ "${#text}" -le 200 ]
+  [[ "$text" == "first line"* ]]
+  ! printf '%s' "$line" | grep -q '[[:cntrl:]]' || false
 }

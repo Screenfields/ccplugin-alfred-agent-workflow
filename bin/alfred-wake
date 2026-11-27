@@ -81,7 +81,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.11.2"
+VERSION="1.11.3"
 
 # Tools beside this script that are also linked into the bin dir, so a running
 # session reaches a tool added after it started (CCW-224). A fixed list: a new
@@ -181,6 +181,7 @@ MCP_BODY=""
 AM_CFG=""
 AM_RESULT=""
 AM_ERR=""
+AM_SERVER_TEXT=""   # server error text, one capped line; shown by `check` only
 
 TAB=$'\t'
 
@@ -264,7 +265,7 @@ expand_placeholders() {
 # ---------------------------------------------------------------------------
 
 record_result() {
-  local source="$1" ok="$2" reason="${3:-}"
+  local source="$1" ok="$2" reason="${3:-}" detail="${4:-}"
   local state now consecutive reported last_ts elapsed
   state=$(read_json_state "$FAILURES_FILE" '{}')
   consecutive=$(printf '%s' "$state" | jq -r --arg s "$source" '.[$s].consecutive // 0')
@@ -279,7 +280,7 @@ record_result() {
     state=$(printf '%s' "$state" | jq --arg s "$source" \
       '.[$s] = {"consecutive":0,"reported":false,"last_error_ts":0}')
   else
-    diag "$source failed: $reason"
+    diag "$source failed: ${detail:-$reason}"
     consecutive=$((consecutive + 1))
     if [ "$consecutive" -ge "$FAIL_THRESHOLD" ]; then
       elapsed=$((now - last_ts))
@@ -458,6 +459,7 @@ am_write_auth_headers() {
 am_call() {
   local args="$1" structured
   AM_RESULT=""
+  AM_SERVER_TEXT=""
   if ! mcp_tool_call "$AM_URL" "$AM_CFG" "get_messages" "$args"; then
     AM_ERR="get_messages http $MCP_HTTP_CODE"
     return 1
@@ -465,6 +467,10 @@ am_call() {
   if printf '%s' "$MCP_BODY" | jq -e '.result.isError == true' >/dev/null 2>&1; then
     if printf '%s' "$MCP_BODY" | grep -qiE 'unexpected.keyword'; then return 2; fi
     AM_ERR="get_messages returned an error"
+    # Diag-only detail for `check`: first text item, control characters
+    # stripped (so one line), capped at 200 characters. Never reaches AM_ERR.
+    AM_SERVER_TEXT=$(printf '%s' "$MCP_BODY" | jq -r '.result.content[0].text // empty' 2>/dev/null \
+      | tr -d '[:cntrl:]' | cut -c1-200)
     return 1
   fi
   structured=$(printf '%s' "$MCP_BODY" | jq -c '.result.structuredContent // empty' 2>/dev/null)
@@ -622,7 +628,10 @@ check_agent_messaging() {
   if [ "$rc" -eq 0 ]; then
     record_result "agent-messaging" true
   else
-    record_result "agent-messaging" false "${AM_ERR:-get_messages failed}"
+    record_result "agent-messaging" false "${AM_ERR:-get_messages failed}" "$AM_SERVER_TEXT"
+    if [ -z "${AGENT_ID:-}" ] && [ "${AM_ERR:-}" = "get_messages returned an error" ]; then
+      diag "AGENT_ID is not set: the service may reject get_messages without an X-Agent-ID header - set AGENT_ID"
+    fi
   fi
 }
 
@@ -1164,7 +1173,7 @@ cmd_check() {
   auth_mode=$(am_auth_mode)
   if [ -n "${AGENT_ID:-}" ]; then agent_text="$AGENT_ID"
   elif [ "$auth_mode" = "NONE" ]; then agent_text="unset"
-  else agent_text="from token"; fi
+  else agent_text="unset (AGENT_ID empty)"; fi
   diag "agent-messaging auth: $auth_mode (agent=$agent_text)"
   if buzz_probe; then
     BUZZ_ENABLED=true
