@@ -1654,7 +1654,7 @@ nonwin_path() {
     [ "$status" -eq 1 ]
     [ ! -s "$BATS_TEST_TMPDIR/pf.out" ]
     grep -q 'jq' "$BATS_TEST_TMPDIR/pf.err"
-    ! grep -Eqi 'curl|winget' "$BATS_TEST_TMPDIR/pf.err"
+    ! grep -Eqi 'curl|winget' "$BATS_TEST_TMPDIR/pf.err" || false
   done
 }
 
@@ -1664,13 +1664,13 @@ nonwin_path() {
   [ "$status" -eq 1 ]
   [ ! -s "$BATS_TEST_TMPDIR/pf.out" ]
   grep -q 'curl' "$BATS_TEST_TMPDIR/pf.err"
-  ! grep -q 'jq' "$BATS_TEST_TMPDIR/pf.err"
+  ! grep -q 'jq' "$BATS_TEST_TMPDIR/pf.err" || false
   as_windows MINGW64_NT-10.0-22631 curl
   run preflight_run "$WIN_PATH" check
   [ "$status" -eq 1 ]
   [ ! -s "$BATS_TEST_TMPDIR/pf.out" ]
   grep -q 'curl' "$BATS_TEST_TMPDIR/pf.err"
-  ! grep -q 'jq' "$BATS_TEST_TMPDIR/pf.err"
+  ! grep -q 'jq' "$BATS_TEST_TMPDIR/pf.err" || false
 }
 
 @test "CCW-203 AC3: both missing names both, hint only on Windows" {
@@ -1679,7 +1679,7 @@ nonwin_path() {
   [ "$status" -eq 1 ]
   grep -q 'curl' "$BATS_TEST_TMPDIR/pf.err"
   grep -q 'jq' "$BATS_TEST_TMPDIR/pf.err"
-  ! grep -qi 'winget' "$BATS_TEST_TMPDIR/pf.err"
+  ! grep -qi 'winget' "$BATS_TEST_TMPDIR/pf.err" || false
   as_windows MINGW64_NT-10.0-22631 curl jq
   run preflight_run "$WIN_PATH" check
   [ "$status" -eq 1 ]
@@ -1716,7 +1716,7 @@ nonwin_path() {
   run preflight_run "$WIN_PATH" check
   [ "$status" -eq 1 ]
   grep -q 'curl' "$BATS_TEST_TMPDIR/pf.err"
-  ! grep -qF 'winget install jqlang.jq' "$BATS_TEST_TMPDIR/pf.err"
+  ! grep -qF 'winget install jqlang.jq' "$BATS_TEST_TMPDIR/pf.err" || false
 }
 
 @test "CCW-203 AC7+AC8: token auth shows from token when AGENT_ID is unset or empty, the id when set" {
