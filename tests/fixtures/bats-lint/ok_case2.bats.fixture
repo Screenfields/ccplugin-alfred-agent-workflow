@@ -1,0 +1,19 @@
+@test "multi-line arm bang last, another arm after" {
+  v=a
+  case $v in
+    a)
+      true
+      ! true
+      ;;
+    b) true ;;
+  esac
+}
+@test "multi-line arm bang last, sole arm, esac last" {
+  v=a
+  case $v in
+    a)
+      true
+      ! true
+      ;;
+  esac
+}

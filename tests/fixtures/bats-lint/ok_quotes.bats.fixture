@@ -1,0 +1,7 @@
+@test "nested quotes with an apostrophe and a hash" {
+  x="$(echo "it's")"
+  y="$(printf '%s' "a # b")"
+  z="$(echo "! not a command")"
+  [ "$x" = "it's" ]
+  ! true || false
+}

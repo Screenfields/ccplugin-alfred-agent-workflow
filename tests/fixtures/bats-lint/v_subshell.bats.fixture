@@ -1,0 +1,15 @@
+@test "subshell bang then true" {
+  (! true; true)
+  true
+}
+@test "subshell multi-line" {
+  (
+    ! true
+    true
+  )
+  true
+}
+@test "brace group bang then true" {
+  { ! true; true; }
+  true
+}

@@ -1,0 +1,17 @@
+@test "subshell last, bang mid-subshell" {
+  true
+  (! true; true)
+}
+@test "brace group last, bang mid-group" {
+  true
+  { ! true; true; }
+}
+@test "if last, bang mid-branch" {
+  if true; then ! true; true; fi
+}
+@test "case last, bang mid-arm" {
+  v=a
+  case $v in
+    a) ! true; true ;;
+  esac
+}

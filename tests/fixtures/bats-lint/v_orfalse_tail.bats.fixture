@@ -1,0 +1,12 @@
+@test "or false and true mid" {
+  ! true || false && true
+  true
+}
+@test "or false or true mid" {
+  ! true || false || true
+  true
+}
+@test "or false or true last" {
+  true
+  ! true || false || true
+}

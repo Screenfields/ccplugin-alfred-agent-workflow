@@ -1,0 +1,15 @@
+@test "shift by a name inside parens" {
+  a=1; N=3
+  n=$(( (a+2) << N ))
+  (( m = (1+2) << N ))
+  [ "$n" -eq 24 ]
+  ! true || false
+}
+@test "heredoc after arithmetic on the same line" {
+  (( n = 1 )); cat <<EOF2
+! not a command
+}
+EOF2
+  [ "$n" -eq 1 ]
+  ! true || false
+}

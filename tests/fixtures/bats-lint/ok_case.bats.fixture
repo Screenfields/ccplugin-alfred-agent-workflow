@@ -1,0 +1,20 @@
+@test "case arms last, case last" {
+  v=a
+  case $v in
+    a) ! true ;;
+    b) ! false ;;
+  esac
+}
+@test "case arm no double semicolon" {
+  v=a
+  case $v in
+    a) ! true
+  esac
+}
+@test "case arm or false mid" {
+  v=a
+  case $v in
+    a) ! true || false ;;
+  esac
+  true
+}

@@ -1,0 +1,5 @@
+@test "bang after a nested quote" {
+  x="$(echo "it's")"
+  ! true
+  true
+}
