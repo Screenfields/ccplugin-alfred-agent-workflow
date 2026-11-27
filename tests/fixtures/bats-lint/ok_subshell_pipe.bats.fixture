@@ -1,0 +1,12 @@
+@test "subshell bang last stage, last" {
+  echo x | (! true)
+}
+@test "subshell bang last in last stage" {
+  true | (true; ! true)
+}
+@test "group bang last in last stage" {
+  true | { true; ! true; }
+}
+@test "subshell bang last stage, redirect" {
+  echo x | (! true) >/dev/null
+}

@@ -1,0 +1,14 @@
+@test "fallthrough into an arm with a command" {
+  v=a
+  case $v in
+    a) ! true ;&
+    b) true ;;
+  esac
+}
+@test "fallthrough into an empty arm" {
+  v=a
+  case $v in
+    a) ! true ;&
+    b) ;;
+  esac
+}

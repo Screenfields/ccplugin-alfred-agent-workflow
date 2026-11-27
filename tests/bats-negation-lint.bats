@@ -214,6 +214,70 @@ assert_clean() {
   [[ "$output" == *"err_quote_nested.bats.fixture:2: unterminated quote"* ]]
 }
 
+@test "redirects after a compound: last compound stays last, mid-compound bang still flagged (CCW-269)" {
+  assert_clean ok_redirect_compound
+  assert_flagged v_redirect_compound 4 10 15 18 21
+}
+
+@test "a subshell bang in a non-final pipeline stage is flagged, in the last stage it is accepted (CCW-269)" {
+  assert_flagged v_subshell_pipe 2 6 9 12 15
+  assert_clean ok_subshell_pipe
+}
+
+@test "a bang last in a case arm before ;& is flagged, with || false or in the final arm it is not (CCW-269)" {
+  assert_flagged v_case_fallthrough 4 11
+  assert_clean ok_case_fallthrough
+}
+
+@test "a bang before ;;& is flagged when another arm follows; the C4 false positive is pinned (CCW-269)" {
+  assert_flagged v_case_continue 4
+  assert_flagged lim_case_continue 4
+  assert_clean ok_case_continue
+}
+
+@test "functions defined inside a test follow the helper rule; the call site is not tracked (CCW-269)" {
+  assert_flagged v_func_inline 2 6 10 15
+  assert_clean ok_func_inline
+  assert_clean lim_func_callsite
+}
+
+@test "an indented @test head is checked, closing at a } no deeper than the head (CCW-267)" {
+  assert_flagged v_indented_test 2 6 10 17 20 22
+  assert_clean ok_indented_test
+}
+
+@test "an indented helper head is checked (CCW-269)" {
+  assert_flagged v_indented_helper 2 6 10
+  assert_clean ok_indented_helper
+}
+
+@test "indented heads inside a quoted string or heredoc are data (CCW-269)" {
+  assert_clean ok_indented_head_in_quote
+}
+
+@test "the header carries the CCW-269 rule strings and not the stale subshell sentence" {
+  local doc s
+  doc=$(sed -n '2,/^"""$/p' "$LINT")
+  local strings=(
+    'accepted when the subshell ends its chain and is the last stage of its pipeline'
+    'flagged before `;&`'
+    'before `;;&` when another arm follows'
+    'a documented false positive for `;;&`'
+    '! cmd || false'
+    'functions defined inside a test follow the helper rule; the call site is not tracked'
+    'an indented @test or helper head is checked'
+    'closes at a `}` alone on its line, no deeper than the head'
+    'a tab counts as one column'
+    'a head inside a quoted string or heredoc is data'
+    'an indented head with `{` on the next line is not read'
+  )
+  for s in "${strings[@]}"; do
+    grep -qF -- "$s" <<<"$doc" || { echo "missing header string: $s"; return 1; }
+  done
+  run grep -qF -- 'accepted wherever the subshell stands' <<<"$doc"
+  [ "$status" -eq 1 ]
+}
+
 @test "the lint is green on this self-test and on the real tests tree" {
   cd "$BATS_TEST_DIRNAME/.."
   run lint

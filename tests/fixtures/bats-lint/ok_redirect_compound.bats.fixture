@@ -1,0 +1,32 @@
+@test "case arm bang last, case last, stdout redirect" {
+  v=a
+  case $v in
+    a) ! true ;;
+  esac >/dev/null
+}
+@test "brace group bang last, group last, redirect" {
+  { true; ! true; } >/dev/null
+}
+@test "if branch bang last, if last, redirect" {
+  if true; then ! true; fi >/dev/null
+}
+@test "for loop bang last, loop last, stdin redirect" {
+  for i in 1; do ! true; done </dev/null
+}
+@test "case with fd duplication" {
+  v=a
+  case $v in
+    a) ! true ;;
+  esac 2>&1
+}
+@test "loop with here-string" {
+  for i in 1; do ! true; done <<< "x"
+}
+@test "loop with heredoc" {
+  while read -r l; do ! true; done <<EOF2
+x
+EOF2
+}
+@test "loop with process substitution" {
+  while read -r l; do ! true; done < <(echo x)
+}

@@ -1,0 +1,4 @@
+@test "function with bang last, call rescued by || true" {
+  f() { true; ! true; }
+  f || true
+}

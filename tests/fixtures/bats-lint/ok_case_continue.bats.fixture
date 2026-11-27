@@ -1,0 +1,20 @@
+@test "continue-testing, bang with || false, later arm matches" {
+  v=a
+  case $v in
+    a) ! true || false ;;&
+    *) true ;;
+  esac
+}
+@test "continue-testing, run !, later arm matches" {
+  v=a
+  case $v in
+    a) run ! true ;;&
+    *) true ;;
+  esac
+}
+@test "continue-testing on the final arm" {
+  v=a
+  case $v in
+    a) ! true ;;&
+  esac
+}

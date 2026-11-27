@@ -1,0 +1,14 @@
+  last_bang() {
+    true
+    ! true
+  }
+	last_bang_b() {
+	true
+	! true
+}
+@test "calls the helper" {
+  last_bang
+}
+@test "calls the tab helper" {
+  last_bang_b
+}
