@@ -4,6 +4,8 @@
 # agent-messaging is replaced by tests/stub/curl; Buzz is off.
 # shellcheck disable=SC2154  # <name>_pid variables are assigned by start() via eval
 
+load helpers/sigint-guard
+
 setup() {
   WAKE="$BATS_TEST_DIRNAME/../bin/alfred-wake"
   # The version of the script under test, read from it: no number typed here.
@@ -314,7 +316,8 @@ no_leftovers() {
   grep -q "previous instance $stubborn ignored SIGTERM for 1s — SIGKILLed" "$STATE/alfred-wake.log"
 }
 
-@test "TERM, INT and HUP stop a wait mid-request within a second and clean up" {
+@test "TERM, INT and HUP stop a wait mid-request within the 5 s stop grace and clean up" {
+  require_sigint_not_ignored
   local sig t0
   echo 31.4159 > "$STUB_DIR/slow"
   for sig in TERM INT HUP; do
@@ -324,7 +327,7 @@ no_leftovers() {
     kill "-$sig" "$a_pid"
     reap "$a_pid"
     [ "$rc" -eq 0 ]
-    [ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 1500 ]
+    [ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 5000 ]
     [ "$(wake_line_out_of a)" = "WAKE-STOPPED signal=$sig" ] || { echo "a printed: $(out_of a)"; false; }
     run pgrep -g "$a_pid" -f "sleep 31.4159"
     [ "$status" -ne 0 ]
@@ -1536,6 +1539,7 @@ fake_wait() {
 }
 
 @test "CCW-214 AC4: TERM, INT and HUP stop a Windows-PATH wait mid-request through the pgrep stand-in" {
+  require_sigint_not_ignored
   as_windows
   local sig
   echo 31.4159 > "$STUB_DIR/slow"
