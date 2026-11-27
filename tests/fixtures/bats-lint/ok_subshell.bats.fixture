@@ -1,0 +1,12 @@
+@test "bang last in subshell" {
+  (! true)
+  true
+}
+@test "command then bang last in subshell" {
+  (true; ! true)
+  true
+}
+@test "subshell or false" {
+  (! true || false)
+  true
+}

@@ -144,6 +144,76 @@ assert_clean() {
   [[ "$output" == *"checked 1 file(s), 0 finding(s)"* ]]
 }
 
+@test "|| false followed by || or && is flagged mid-test and for ||, last" {
+  assert_flagged v_orfalse_tail 2 6 11
+}
+
+@test "|| false; and a last && chain after || false pass" {
+  assert_clean ok_orfalse_tail
+}
+
+@test "a ! mid-subshell or mid-brace-group is flagged, one line and multi-line" {
+  assert_flagged v_subshell 2 7 13
+}
+
+@test "a ! last in a subshell passes, one line and multi-line (both mirrors)" {
+  assert_clean ok_subshell
+  assert_clean ok_subshell2
+}
+
+@test "a ! in a case arm followed by more is flagged" {
+  assert_flagged v_case 4 12
+}
+
+@test "case arms with ! last pass, one-line and multi-line, case last" {
+  assert_clean ok_case
+  assert_clean ok_case2
+}
+
+@test "helpers with the brace on the next line are checked (name(), function name, setup())" {
+  assert_flagged v_helper_brace 3 8 13
+}
+
+@test "a last ! in a next-line-brace helper passes" {
+  assert_clean ok_helper_brace
+}
+
+@test "name() with no brace after it is not a function head" {
+  assert_flagged v_notfunc 7
+}
+
+@test "if/elif/else branches with ! last pass when the if is last" {
+  assert_clean ok_ifelse_last
+}
+
+@test "if/else branches followed by another command are flagged" {
+  assert_flagged v_ifelse_mid 3 5
+}
+
+@test "a ! mid-compound is flagged when the compound is itself the last command" {
+  assert_flagged v_last_compound 3 7 10 15
+}
+
+@test "form 5 pinned: last ! in a multi-line \$( is flagged (plain and local)" {
+  assert_flagged v_subst 4 11
+}
+
+@test "arithmetic shift by a name is not a heredoc" {
+  assert_clean ok_arith
+  assert_flagged v_arith 5
+}
+
+@test "nested quotes inside \$( inside double quotes parse" {
+  assert_clean ok_quotes
+  assert_flagged v_quotes 3
+}
+
+@test "a really unterminated nested quote exits 2 naming file and start line" {
+  run lint "$FX/err_quote_nested.bats.fixture"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"err_quote_nested.bats.fixture:2: unterminated quote"* ]]
+}
+
 @test "the lint is green on this self-test and on the real tests tree" {
   cd "$BATS_TEST_DIRNAME/.."
   run lint

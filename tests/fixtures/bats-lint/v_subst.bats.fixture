@@ -1,0 +1,14 @@
+@test "bang last in multi-line subst, plain assignment" {
+  out=$(
+    echo hi
+    ! true
+  )
+  [ "$out" = hi ]
+}
+@test "bang last in multi-line subst, local" {
+  local out=$(
+    echo hi
+    ! true
+  )
+  true
+}

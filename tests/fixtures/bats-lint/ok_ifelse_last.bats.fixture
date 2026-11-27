@@ -1,0 +1,12 @@
+@test "if else last one-line" {
+  if true; then ! true; else ! false; fi
+}
+@test "if elif else last multi-line" {
+  if false; then
+    true
+  elif true; then
+    ! true
+  else
+    ! false
+  fi
+}

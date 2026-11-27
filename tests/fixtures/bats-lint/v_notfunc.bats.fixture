@@ -1,0 +1,9 @@
+subfn() (
+  true
+)
+iffn()
+if true; then true; fi
+@test "bang after non-brace function heads" {
+  ! true
+  true
+}

@@ -1,0 +1,7 @@
+@test "multi-line mirror then command" {
+  (
+    true
+    ! true
+  )
+  true
+}

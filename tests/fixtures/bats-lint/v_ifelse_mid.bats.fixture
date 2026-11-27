@@ -1,0 +1,8 @@
+@test "if else mid" {
+  if true; then
+    ! true
+  else
+    ! false
+  fi
+  true
+}

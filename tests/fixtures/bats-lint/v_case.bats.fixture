@@ -1,0 +1,18 @@
+@test "case arm bang mid" {
+  v=a
+  case $v in
+    a) ! true ;;
+  esac
+  true
+}
+@test "case arm multi-line then more in arm" {
+  v=a
+  case $v in
+    a|b)
+      ! true
+      true
+      ;;
+    *) ;;
+  esac
+  true
+}

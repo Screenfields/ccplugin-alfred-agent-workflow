@@ -1,0 +1,7 @@
+@test "shift by a name inside parens" {
+  a=1; N=3
+  n=$(( (a+2) << N ))
+  (( m = (1+2) << N ))
+  ! true
+  true
+}

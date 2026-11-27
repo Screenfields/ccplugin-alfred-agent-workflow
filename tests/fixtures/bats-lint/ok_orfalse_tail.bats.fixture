@@ -1,0 +1,7 @@
+@test "or false then semicolon" {
+  ! true || false; true
+}
+@test "or false and true last" {
+  true
+  ! true || false && true
+}
