@@ -12,15 +12,31 @@ Rule (the one home of it; tested on bats 1.8.2):
              a bare `!` as the last command of a @test body or helper function
              (its status is the status of the test or function)
   Flagged:   a bare `!` at the start of a command, or after ;  &&  ||  then
-             do  else, when it is neither the last command nor directly
-             followed by `|| false`. `|| true`, `|| :`, `|| return 1` and
-             `&& false` are not accepted.
+             do  else  ( {  or a case arm pattern, when it is neither the last
+             command nor directly followed by `|| false`. `|| true`, `|| :`,
+             `|| return 1` and `&& false` mid-test are not accepted. After
+             `! x || false`, a following `||` is flagged anywhere and a
+             following `&&` mid-test; `! x || false && y` as the last command
+             is accepted (the false's status is the test's).
+  "Last" is decided per enclosing block: a `!` inside `if`, `case`, a loop or
+  a `{ }` group is accepted only when that compound is itself the last
+  command, and then only as the last command of its branch or arm. A `!`
+  last in a `( )` subshell is accepted wherever the subshell stands, because
+  a failing subshell trips errexit itself; a `!` mid-subshell is flagged.
   Not a command start, so not flagged: [ ! -f f ], [[ ! x ]], if ! cmd,
   while ! cmd, $(...), run ! cmd, and a `!` inside a quoted string, a
   comment or a heredoc body.
-  Helper functions (setup, teardown, any name() { at column 0) follow the
-  same rule as @test bodies. A `!` outside any test or function is not
-  checked.
+  Helper functions (setup, teardown, any name() { or name() with the { alone
+  on the next line, at column 0) follow the same rule as @test bodies. A `!`
+  outside any test or function is not checked.
+
+Known limits (not coded; bats 1.8.2 behaviour):
+  - A test whose `{` is on the next line (`@test "x"` then `{`) is not a test
+    to bats (it prints `1..0` or fails the file), so its `!` never runs and
+    the lint does not read it. Put `{` on the @test line.
+  - A `!` that is last inside a multi-line `$(` ... `)` assignment is flagged
+    although bats enforces it for a plain `out=$(`. Write `! cmd || false`
+    there. The same `!` under `local out=$(` is vacuous, and flagged rightly.
 
 Usage: bats-negation.py [file ...]
   No arguments: tests/*.bats and tests/*/*.bats relative to the cwd.
@@ -42,6 +58,25 @@ class ParseError(Exception):
     pass
 
 
+def in_arith(buf):
+    """True when the end of buf is inside `((` ... `))` (so `<<` is a shift)."""
+    st = []
+    i = 0
+    while i < len(buf):
+        if buf.startswith('((', i):
+            st.append('A')
+            i += 2
+            continue
+        if buf[i] == '(':
+            st.append('P')
+        elif buf[i] == ')' and st:
+            top = st.pop()
+            if top == 'A' and buf[i + 1:i + 2] == ')':
+                i += 1
+        i += 1
+    return 'A' in st
+
+
 def logical_lines(text, path):
     """Return [(masked_text, marks, col0)] per logical command line.
 
@@ -54,7 +89,7 @@ def logical_lines(text, path):
     n = len(lines)
     out = []
     i = 0
-    q = None
+    stack = []
     qline = 0
     cur = ''
     marks = []
@@ -74,25 +109,59 @@ def logical_lines(text, path):
         L = len(ln)
         while j < L:
             c = ln[j]
-            if q == "'":
-                if c == "'":
-                    q = None
-                    buf += "'"
-                else:
+            if stack:
+                # Inside a quote. Quoted text is masked to 'x'; a quote that
+                # opens inside "$( ... )" nests, so its characters stay masked
+                # until the outermost quote closes.
+                top = stack[-1]
+                if top[0] == "'":
+                    if c == "'":
+                        stack.pop()
+                        buf += "'" if not stack else 'x'
+                    else:
+                        buf += 'x'
+                    j += 1
+                elif top[0] == '"':
+                    if c == '\\' and j + 1 < L:
+                        buf += 'xx'
+                        j += 2
+                    elif c == '"':
+                        stack.pop()
+                        buf += '"' if not stack else 'x'
+                        j += 1
+                    elif c == '$' and ln[j + 1:j + 2] == '(':
+                        stack.append(['cmd', 1])
+                        buf += 'xx'
+                        j += 2
+                    else:
+                        buf += 'x'
+                        j += 1
+                elif top[0] == "$'":
+                    if c == '\\' and j + 1 < L:
+                        buf += 'xx'
+                        j += 2
+                    else:
+                        if c == "'":
+                            stack.pop()
+                            buf += "'" if not stack else 'x'
+                        else:
+                            buf += 'x'
+                        j += 1
+                else:  # 'cmd': code inside "$( ... )"
+                    if c == '\\' and j + 1 < L:
+                        buf += 'xx'
+                        j += 2
+                        continue
+                    if c in ('"', "'"):
+                        stack.append([c])
+                    elif c == '(':
+                        top[1] += 1
+                    elif c == ')':
+                        top[1] -= 1
+                        if top[1] == 0:
+                            stack.pop()
                     buf += 'x'
-                j += 1
-                continue
-            if q in ('"', "$'"):
-                if c == '\\' and j + 1 < L:
-                    buf += 'xx'
-                    j += 2
-                    continue
-                if c == q[-1]:
-                    q = None
-                    buf += c
-                else:
-                    buf += 'x'
-                j += 1
+                    j += 1
                 continue
             if c == '\\':
                 if j == L - 1:
@@ -102,18 +171,15 @@ def logical_lines(text, path):
                 buf += 'xx'
                 j += 2
                 continue
-            if c == "'":
-                q, qline = "'", lineno
-                buf += c
-                j += 1
-                continue
-            if c == '"':
-                q, qline = '"', lineno
+            if c == "'" or c == '"':
+                stack.append([c])
+                qline = lineno
                 buf += c
                 j += 1
                 continue
             if c == '$' and ln[j + 1:j + 2] == "'":
-                q, qline = "$'", lineno
+                stack.append(["$'"])
+                qline = lineno
                 buf += "$'"
                 j += 2
                 continue
@@ -123,7 +189,7 @@ def logical_lines(text, path):
                 buf += '<<<'
                 j += 3
                 continue
-            if c == '<' and ln[j:j + 2] == '<<' and not re.search(r'\(\([^)]*$', buf):
+            if c == '<' and ln[j:j + 2] == '<<' and not in_arith(buf):
                 m = re.match(r'<<(-?)[ \t]*(?:"([^"]*)"|\'([^\']*)\'|\\?([A-Za-z_][A-Za-z0-9_]*))', ln[j:])
                 if m:
                     d = m.group(2) or m.group(3) or m.group(4)
@@ -135,9 +201,9 @@ def logical_lines(text, path):
             j += 1
         cur += buf
         i += 1
-        if q is not None or cont:
+        if stack or cont:
             cur += ' '
-        if q is None and pending:
+        if not stack and pending:
             for d, strip, hline in pending:
                 while True:
                     if i >= n:
@@ -147,7 +213,7 @@ def logical_lines(text, path):
                     if (body.lstrip('\t') if strip else body) == d:
                         break
             pending = []
-        if q is None and not cont:
+        if not stack and not cont:
             s = cur.rstrip()
             if s.endswith(('|', '&&', '||')) and i < n:
                 cur += ' '
@@ -159,7 +225,7 @@ def logical_lines(text, path):
             cur = ''
             marks = []
             started = False
-    if q is not None:
+    if stack:
         raise ParseError('%s:%d: unterminated quote' % (path, qline))
     if cur.strip():
         raise ParseError('%s:%d: unterminated continuation at end of file' % (path, marks[0][1]))
@@ -209,64 +275,255 @@ def mask_nested(s):
     return ''.join(out)
 
 
-SEP = re.compile(r';;|;|&&|\|\||\n')
-LEAD = re.compile(r'(?:then|do|else|\{)(?:\s+|$)')
-BANG = re.compile(r'!(?:\s|$)')
-CLOSERS = {'fi', 'done', 'esac', '}', ')'}
+KEYWORD = re.compile(r'(?:[a-z]+|\})(?=[\s;&|)]|$)')
+IN_WORD = re.compile(r'\sin(?=[\s;]|$)')
+TERMS = {'then', 'elif', 'else', 'fi', 'do', 'done', 'esac', '}'}
+COMPOUNDS = {'if', 'while', 'until', 'for', 'select', 'case'}
 
 
-def statements(text, marks):
-    """Yield (lineno, stmt_text, sep) for each simple statement of one logical line."""
-    text = mask_nested(text)
-    offsets = [m[0] for m in marks]
-    pos = 0
-    sep = ''
-    pieces = []
-    for m in SEP.finditer(text):
-        pieces.append((pos, text[pos:m.start()], sep))
-        pos, sep = m.end(), m.group()
-    pieces.append((pos, text[pos:], sep))
-    for start, piece, sp in pieces:
-        stripped = piece.lstrip()
-        start += len(piece) - len(stripped)
-        stripped = stripped.rstrip()
+class Item:
+    def __init__(self, kind, text='', lists=()):
+        self.kind = kind          # simple | subshell | group | compound
+        self.text = text
+        self.lists = list(lists)  # nested command lists (each a list of chains)
+        self.bang = False
+        self.line = 0
+
+
+class Parser:
+    """Recursive-descent parse of one test or function body (masked text).
+
+    A chain is (items, ops): commands joined by && or ||. A list is a list of
+    chains. Unknown or unbalanced input is tolerated: it never raises.
+    """
+
+    def __init__(self, text):
+        self.t = text
+        self.i = 0
+        self.n = len(text)
+
+    def ws(self, nl=False):
+        while self.i < self.n and (self.t[self.i] in ' \t' or (nl and self.t[self.i] == '\n')):
+            self.i += 1
+
+    def word(self):
+        m = KEYWORD.match(self.t, self.i)
+        return m.group() if m else None
+
+    def seps(self):
+        while self.i < self.n and self.t[self.i] in ' \t\n;' and not self.t.startswith((';;', ';&'), self.i):
+            self.i += 1
+
+    def expect(self, w):
+        self.seps()
+        if self.word() == w:
+            self.i += len(w)
+
+    def body(self):
+        chains = []
         while True:
-            m = LEAD.match(stripped)
-            if not m:
+            chains.extend(self.lst())
+            if self.i >= self.n:
+                return chains
+            if self.t.startswith((';;', ';&'), self.i):
+                self.i += 2
+            elif self.t[self.i] == ')':
+                self.i += 1
+            else:
+                self.i += max(len(self.word() or ''), 1)
+
+    def lst(self):
+        chains = []
+        while True:
+            self.seps()
+            if self.i >= self.n or self.t.startswith((';;', ';&'), self.i) or self.t[self.i] == ')':
                 break
-            start += m.end()
-            stripped = stripped[m.end():]
-        if not stripped:
-            continue
-        lineno = marks[max(bisect.bisect_right(offsets, start) - 1, 0)][1]
-        yield lineno, stripped, sp
+            if self.word() in TERMS:
+                break
+            start = self.i
+            chains.append(self.chain())
+            if self.i == start:
+                self.i += 1
+        return chains
 
-
-def check_block(stmts):
-    """stmts: [(lineno, text, sep)] of one test or function body. Return finding line numbers."""
-    found = []
-    for k, (lineno, t, _sep) in enumerate(stmts):
-        if not BANG.match(t):
-            continue
-        nxt = stmts[k + 1] if k + 1 < len(stmts) else None
-        if nxt and nxt[2] == '||':
-            if nxt[1] == 'false':
+    def chain(self):
+        items, ops = [], []
+        while True:
+            items.append(self.item())
+            self.ws()
+            if self.t.startswith(('&&', '||'), self.i):
+                ops.append(self.t[self.i:self.i + 2])
+                self.i += 2
+                self.ws(nl=True)
                 continue
-            found.append(lineno)
-            continue
-        # `a && ! b && ! c` as the last command: a failing `!` stops the chain,
-        # so the chain's status is the test's or function's status.
-        j = k
-        while j + 1 < len(stmts) and stmts[j + 1][2] == '&&':
-            j += 1
-        if all(s[1] in CLOSERS for s in stmts[j + 1:]):
-            continue
-        found.append(lineno)
+            return items, ops
+
+    def item(self):
+        self.ws()
+        start = self.i
+        bang = False
+        if self.t[self.i:self.i + 1] == '!' and (self.i + 1 >= self.n or self.t[self.i + 1] in ' \t\n'):
+            bang = True
+            self.i += 1
+            self.ws()
+        it = self.command()
+        it.bang = bang
+        it.start = start
+        return it
+
+    def simple(self):
+        start = self.i
+        depth = 0
+        t = self.t
+        while self.i < self.n:
+            c = t[self.i]
+            if c in '\n;' or t.startswith(('&&', '||'), self.i):
+                break
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                if depth == 0:
+                    break
+                depth -= 1
+            self.i += 1
+        return Item('simple', t[start:self.i].strip())
+
+    def command(self):
+        t = self.t
+        c = t[self.i:self.i + 1]
+        if c == '(' and t[self.i + 1:self.i + 2] != '(':
+            self.i += 1
+            lst = self.lst()
+            self.ws(nl=True)
+            if t[self.i:self.i + 1] == ')':
+                self.i += 1
+            return Item('subshell', lists=[lst])
+        if c == '{' and (self.i + 1 >= self.n or t[self.i + 1] in ' \t\n'):
+            self.i += 1
+            lst = self.lst()
+            self.expect('}')
+            return Item('group', lists=[lst])
+        w = self.word()
+        if w not in COMPOUNDS:
+            return self.simple()
+        self.i += len(w)
+        if w == 'if':
+            self.lst()
+            self.expect('then')
+            lists = [self.lst()]
+            while True:
+                self.seps()
+                k = self.word()
+                if k == 'elif':
+                    self.i += 4
+                    self.lst()
+                    self.expect('then')
+                    lists.append(self.lst())
+                elif k == 'else':
+                    self.i += 4
+                    lists.append(self.lst())
+                else:
+                    break
+            self.expect('fi')
+            return Item('compound', lists=lists)
+        if w in ('while', 'until'):
+            self.lst()
+            self.expect('do')
+        elif w in ('for', 'select'):
+            self.simple()
+            self.expect('do')
+        else:  # case
+            m = IN_WORD.search(t, self.i)
+            if m:
+                self.i = m.end()
+            else:
+                self.simple()
+            lists = []
+            while True:
+                before = self.i
+                self.seps()
+                if self.i >= self.n:
+                    break
+                if self.word() == 'esac':
+                    self.i += 4
+                    break
+                j = t.find(')', self.i)
+                if j < 0:
+                    self.i = self.n
+                    break
+                self.i = j + 1
+                lists.append(self.lst())
+                if t.startswith((';;&', ';;'), self.i):
+                    self.i += 3 if t.startswith(';;&', self.i) else 2
+                elif t.startswith(';&', self.i):
+                    self.i += 2
+                elif t[self.i:self.i + 1] == ')':
+                    self.i += 1
+                if self.i == before:
+                    self.i += 1
+            return Item('compound', lists=lists)
+        lists = [self.lst()]
+        self.expect('done')
+        return Item('compound', lists=lists)
+
+
+def is_false(it):
+    return it.kind == 'simple' and not it.bang and it.text == 'false'
+
+
+def check_list(chains, tail, line_of, found):
+    """tail: this list's last status becomes the status of the enclosing
+    errexit-checked region (the test, function or subshell body)."""
+    for ci, (items, ops) in enumerate(chains):
+        tc = tail and ci == len(chains) - 1
+        for k, it in enumerate(items):
+            used = tc and all(o == '&&' for o in ops[k:])
+            if it.bang:
+                nxt = ops[k] if k < len(ops) else None
+                if nxt == '||':
+                    # `! x || false` fails the test unless something follows
+                    # the false: `|| ...` never; `&& ...` only as the last command.
+                    after = ops[k + 1] if k + 1 < len(ops) else None
+                    if is_false(items[k + 1]):
+                        ok = after is None or (after == '&&' and tc and all(o == '&&' for o in ops[k + 1:]))
+                    else:
+                        ok = False
+                else:
+                    ok = used
+                if not ok:
+                    found.append(line_of(it.start))
+            if it.kind == 'subshell':
+                # A failing subshell trips errexit itself, so its last
+                # command counts whenever the subshell is not rescued.
+                inner = k == len(items) - 1 or used
+            else:
+                inner = used and not it.bang
+            for lst in it.lists:
+                check_list(lst, inner, line_of, found)
+
+
+def check_body(body):
+    """body: [(masked_text, marks)] of one test or function. Return finding lines."""
+    text = ''
+    allmarks = []
+    for btext, bmarks in body:
+        allmarks.extend((len(text) + o, ln) for o, ln in bmarks)
+        text += mask_nested(btext) + '\n'
+    offsets = [m[0] for m in allmarks]
+
+    def line_of(off):
+        return allmarks[max(bisect.bisect_right(offsets, off) - 1, 0)][1]
+
+    found = []
+    check_list(Parser(text).body(), True, line_of, found)
     return found
 
 
+NAME = r'[A-Za-z_][\w:.-]*'
 TEST_HEAD = re.compile(r'@test\s+(?:"[^"]*"|\'[^\']*\'|\S+)\s*\{(.*)$')
-FUNC_HEAD = re.compile(r'(?:function\s+[A-Za-z_][\w:.-]*(?:\s*\(\))?|[A-Za-z_][\w:.-]*\s*\(\))\s*\{(.*)$')
+FUNC_HEAD = re.compile(r'(?:function\s+%s(?:\s*\(\))?|%s\s*\(\))\s*\{(.*)$' % (NAME, NAME))
+FUNC_NAME = re.compile(r'(?:function\s+%s(?:\s*\(\))?|%s\s*\(\))\s*$' % (NAME, NAME))
+BRACE_NEXT = re.compile(r'\{(?:\s(.*))?$')
 ONE_LINE = re.compile(r'^(.*?)[;\s]\s*\}\s*$')
 
 
@@ -281,12 +538,20 @@ def check_file(path):
         s, marks, col0 = ll[i]
         s = s.strip()
         m = (TEST_HEAD.match(s) or FUNC_HEAD.match(s)) if col0 else None
-        if not m:
+        rest = None
+        if m:
+            rest = m.group(1)
+        elif col0 and FUNC_NAME.match(s) and i + 1 < N and ll[i + 1][2]:
+            # `name()` or `function name` with the `{` alone on the next line.
+            nb = BRACE_NEXT.match(ll[i + 1][0].strip())
+            if nb:
+                rest = nb.group(1) or ''
+                i += 1
+        if rest is None:
             i += 1
             continue
         hline = marks[0][1]
         kind = 'test' if s.startswith('@test') else 'function'
-        rest = m.group(1)
         one = ONE_LINE.match(rest + ' ') if rest.strip() else None
         body = []
         if one:
@@ -302,10 +567,7 @@ def check_file(path):
             if i >= N:
                 raise ParseError('%s:%d: %s has no closing } at column 0' % (path, hline, kind))
             i += 1
-        stmts = []
-        for btext, bmarks in body:
-            stmts.extend(statements(btext, bmarks))
-        findings.extend(check_block(stmts))
+        findings.extend(check_body(body))
     return findings
 
 
