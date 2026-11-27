@@ -324,6 +324,6 @@ broken_case() {
   grep -q 'same trust as settings.local.json' docs/baseline/watcher-override.md
 }
 
-@test "SC11: the version is 2.55.0" {
-  [ "$(jq -r .version "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json")" = "2.55.0" ]
+@test "SC11: the plugin version is a N.N.N number (no typed version, CCW-262)" {
+  jq -er '.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")' "$BATS_TEST_DIRNAME/../.claude-plugin/plugin.json"
 }

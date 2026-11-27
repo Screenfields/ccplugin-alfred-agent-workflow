@@ -1431,11 +1431,21 @@ without_flock() {
   NOLOCK_PATH="$BATS_TEST_DIRNAME/stub:$BATS_TEST_TMPDIR/nolock-bin"
 }
 
-# as_windows — without_flock plus a uname that says MINGW64_NT for -s.
+# as_windows [uname-name [excluded-name...]] — without_flock plus a uname that
+# says MINGW64_NT (or the given name) for -s. Excluded names are left out of the
+# PATH dir and the stubs are dropped when curl is excluded (the stub dir holds a curl).
 as_windows() {
+  local uname_name="${1:-MINGW64_NT-10.0-22631}"
+  [ $# -gt 0 ] && shift
   without_flock
+  if [ $# -gt 0 ]; then
+    rm -rf "$BATS_TEST_TMPDIR/nolock-bin"
+    build_path "$BATS_TEST_TMPDIR/nolock-bin" flock pgrep pkill "$@"
+    NOLOCK_PATH="$BATS_TEST_TMPDIR/nolock-bin"
+    case " $* " in *" curl "*) ;; *) NOLOCK_PATH="$BATS_TEST_DIRNAME/stub:$NOLOCK_PATH" ;; esac
+  fi
   mkdir -p "$BATS_TEST_TMPDIR/uname-shim"
-  printf '#!/bin/bash\nif [ "${1:-}" = "-s" ]; then echo MINGW64_NT-10.0-22631; else exec /usr/bin/uname "$@"; fi\n' \
+  printf '#!/bin/bash\nif [ "${1:-}" = "-s" ]; then echo %s; else exec /usr/bin/uname "$@"; fi\n' "$uname_name" \
     > "$BATS_TEST_TMPDIR/uname-shim/uname"
   chmod +x "$BATS_TEST_TMPDIR/uname-shim/uname"
   WIN_PATH="$BATS_TEST_TMPDIR/uname-shim:$NOLOCK_PATH"
@@ -1616,4 +1626,122 @@ fake_wait() {
     [ "$status" -eq 2 ]
     [ "$output" = "WAKE-ERROR alfred-wake: requires flock and pgrep (util-linux, procps)" ]
   done
+}
+
+
+# --- CCW-203: pre-flight names the missing tool; check shows agent=from token --
+
+# preflight_run <path> <sub> — run the script with PATH set, stdout and stderr apart.
+preflight_run() {
+  PATH="$1" timeout 60 "$WAKE" "$2" >"$BATS_TEST_TMPDIR/pf.out" 2>"$BATS_TEST_TMPDIR/pf.err" </dev/null
+}
+
+# nonwin_path <excluded...> — set NW_PATH: real uname, the given tools removed.
+nonwin_path() {
+  rm -rf "$BATS_TEST_TMPDIR/nw-bin"
+  build_path "$BATS_TEST_TMPDIR/nw-bin" "$@"
+  case " $* " in
+    *" curl "*) NW_PATH="$BATS_TEST_TMPDIR/nw-bin" ;;
+    *) NW_PATH="$BATS_TEST_DIRNAME/stub:$BATS_TEST_TMPDIR/nw-bin" ;;
+  esac
+}
+
+@test "CCW-203 AC1: jq missing off Windows names jq only, stdout empty, exit 1" {
+  nonwin_path jq
+  local sub
+  for sub in check wait; do
+    run preflight_run "$NW_PATH" "$sub"
+    [ "$status" -eq 1 ]
+    [ ! -s "$BATS_TEST_TMPDIR/pf.out" ]
+    grep -q 'jq' "$BATS_TEST_TMPDIR/pf.err"
+    ! grep -Eqi 'curl|winget' "$BATS_TEST_TMPDIR/pf.err" || false
+  done
+}
+
+@test "CCW-203 AC2: curl missing names curl only, on both PATHs" {
+  nonwin_path curl
+  run preflight_run "$NW_PATH" check
+  [ "$status" -eq 1 ]
+  [ ! -s "$BATS_TEST_TMPDIR/pf.out" ]
+  grep -q 'curl' "$BATS_TEST_TMPDIR/pf.err"
+  ! grep -q 'jq' "$BATS_TEST_TMPDIR/pf.err" || false
+  as_windows MINGW64_NT-10.0-22631 curl
+  run preflight_run "$WIN_PATH" check
+  [ "$status" -eq 1 ]
+  [ ! -s "$BATS_TEST_TMPDIR/pf.out" ]
+  grep -q 'curl' "$BATS_TEST_TMPDIR/pf.err"
+  ! grep -q 'jq' "$BATS_TEST_TMPDIR/pf.err" || false
+}
+
+@test "CCW-203 AC3: both missing names both, hint only on Windows" {
+  nonwin_path curl jq
+  run preflight_run "$NW_PATH" check
+  [ "$status" -eq 1 ]
+  grep -q 'curl' "$BATS_TEST_TMPDIR/pf.err"
+  grep -q 'jq' "$BATS_TEST_TMPDIR/pf.err"
+  ! grep -qi 'winget' "$BATS_TEST_TMPDIR/pf.err" || false
+  as_windows MINGW64_NT-10.0-22631 curl jq
+  run preflight_run "$WIN_PATH" check
+  [ "$status" -eq 1 ]
+  grep -q 'curl' "$BATS_TEST_TMPDIR/pf.err"
+  grep -q 'jq' "$BATS_TEST_TMPDIR/pf.err"
+  grep -qF 'winget install jqlang.jq' "$BATS_TEST_TMPDIR/pf.err"
+}
+
+@test "CCW-203 AC4: Windows with jq missing gives the hint and PATH note on check and wait" {
+  as_windows MINGW64_NT-10.0-22631 jq
+  local sub
+  for sub in check wait; do
+    run preflight_run "$WIN_PATH" "$sub"
+    [ "$status" -eq 1 ]
+    [ ! -s "$BATS_TEST_TMPDIR/pf.out" ]
+    grep -qF 'winget install jqlang.jq' "$BATS_TEST_TMPDIR/pf.err"
+    grep -qF 'WinGet/Links' "$BATS_TEST_TMPDIR/pf.err"
+    grep -qF 'restart Claude Code' "$BATS_TEST_TMPDIR/pf.err"
+  done
+}
+
+@test "CCW-203 AC5: MINGW, MSYS and CYGWIN all count as Windows" {
+  local n
+  for n in MINGW64_NT-10.0-22631 MSYS_NT-10.0-22631 CYGWIN_NT-10.0-22631; do
+    as_windows "$n" jq
+    run preflight_run "$WIN_PATH" check
+    [ "$status" -eq 1 ]
+    grep -qF 'winget install jqlang.jq' "$BATS_TEST_TMPDIR/pf.err"
+  done
+}
+
+@test "CCW-203 AC6: Windows with only curl missing prints no jq hint" {
+  as_windows MINGW64_NT-10.0-22631 curl
+  run preflight_run "$WIN_PATH" check
+  [ "$status" -eq 1 ]
+  grep -q 'curl' "$BATS_TEST_TMPDIR/pf.err"
+  ! grep -qF 'winget install jqlang.jq' "$BATS_TEST_TMPDIR/pf.err" || false
+}
+
+@test "CCW-203 AC7+AC8: token auth shows from token when AGENT_ID is unset or empty, the id when set" {
+  unset ALFRED_WAKE_MCP_JSON
+  unset AGENT_ID
+  run bash -c "timeout 60 '$WAKE' check 2>&1 </dev/null"
+  [[ "$output" == *"agent-messaging auth: env AGENT_MESSAGING_TOKEN (agent=from token)"* ]]
+  AGENT_ID="" run bash -c "timeout 60 '$WAKE' check 2>&1 </dev/null"
+  [[ "$output" == *"agent-messaging auth: env AGENT_MESSAGING_TOKEN (agent=from token)"* ]]
+  AGENT_ID=tester run bash -c "timeout 60 '$WAKE' check 2>&1 </dev/null"
+  [[ "$output" == *"agent-messaging auth: env AGENT_MESSAGING_TOKEN (agent=tester)"* ]]
+}
+
+@test "CCW-203 AC9: no credential keeps NONE (agent=unset)" {
+  unset AGENT_MESSAGING_TOKEN AGENT_ID
+  export ALFRED_WAKE_MCP_JSON=/nonexistent
+  run bash -c "timeout 60 '$WAKE' check 2>&1 </dev/null"
+  [[ "$output" == *"NONE (agent=unset)"* ]]
+}
+
+@test "CCW-203 AC10: .mcp.json source with AGENT_ID unset shows from token" {
+  unset AGENT_MESSAGING_TOKEN AGENT_ID
+  local f="$BATS_TEST_TMPDIR/mcp.json"
+  printf '{"mcpServers":{"agent-messaging":{"url":"http://stub.invalid/mcp/","headers":{"Authorization":"Bearer x"}}}}\n' > "$f"
+  export ALFRED_WAKE_MCP_JSON="$f"
+  run bash -c "timeout 60 '$WAKE' check 2>&1 </dev/null"
+  [[ "$output" == *"agent-messaging auth: $f (agent=from token)"* ]]
 }

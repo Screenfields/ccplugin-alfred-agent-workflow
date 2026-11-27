@@ -81,7 +81,7 @@
 set -uo pipefail
 umask 077
 
-VERSION="1.11.1"
+VERSION="1.11.2"
 
 # Tools beside this script that are also linked into the bin dir, so a running
 # session reaches a tool added after it started (CCW-224). A fixed list: a new
@@ -1160,7 +1160,12 @@ cmd_check() {
   diag "version $VERSION"
   diag "state dir: $STATE_DIR (dry run — cursors NOT written)"
   diag "agent-messaging url: $AM_URL"
-  diag "agent-messaging auth: $(am_auth_mode) (agent=${AGENT_ID:-unset})"
+  local auth_mode agent_text
+  auth_mode=$(am_auth_mode)
+  if [ -n "${AGENT_ID:-}" ]; then agent_text="$AGENT_ID"
+  elif [ "$auth_mode" = "NONE" ]; then agent_text="unset"
+  else agent_text="from token"; fi
+  diag "agent-messaging auth: $auth_mode (agent=$agent_text)"
   if buzz_probe; then
     BUZZ_ENABLED=true
     diag "buzz: enabled via $BUZZ_MCP_URL"
@@ -1577,9 +1582,23 @@ after handling each wake:
 EOF
 }
 
+# The install hint printed when jq is missing on a Windows shell. The winget id
+# and the WinGet/Links path come from a field report and are not verified.
+windows_jq_hint() {
+  echo "alfred-wake: on Windows install jq with: winget install jqlang.jq"
+  echo "alfred-wake: winget adds the new WinGet/Links dir (%LOCALAPPDATA%/Microsoft/WinGet/Links) to PATH, but an already running Claude Code shell does not see it."
+  echo "alfred-wake: add that dir to PATH by hand, or restart Claude Code."
+}
+
 main() {
-  if ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
-    echo "alfred-wake: requires curl and jq" >&2
+  local missing=""
+  command -v curl >/dev/null 2>&1 || missing="curl"
+  command -v jq >/dev/null 2>&1 || missing="${missing:+$missing and }jq"
+  if [ -n "$missing" ]; then
+    echo "alfred-wake: requires $missing (not found on PATH)" >&2
+    if is_windows_shell && ! command -v jq >/dev/null 2>&1; then
+      windows_jq_hint >&2
+    fi
     exit 1
   fi
   case "${1:-}" in
