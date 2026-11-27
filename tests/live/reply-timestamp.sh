@@ -206,7 +206,7 @@ stop_child() {
   CHILD=""
 }
 
-# shellcheck disable=SC2317  # runs from the traps below
+# shellcheck disable=SC2317,SC2329  # runs from the traps below
 cleanup() {
   trap '' EXIT TERM INT HUP
   stop_child
