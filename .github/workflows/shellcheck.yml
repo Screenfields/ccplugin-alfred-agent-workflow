@@ -12,6 +12,7 @@ on:
     paths:
       - 'bin/**'
       - 'hooks/**'
+      - 'lib/**'
       - 'config/**'
       - 'agreement/**'
       - 'rules/**'
@@ -25,6 +26,7 @@ on:
     paths:
       - 'bin/**'
       - 'hooks/**'
+      - 'lib/**'
       - 'config/**'
       - 'agreement/**'
       - 'rules/**'
@@ -47,7 +49,7 @@ jobs:
         run: shellcheck --version
 
       - name: Lint shipped scripts and test helpers
-        run: shellcheck bin/* hooks/*.sh tests/stub/*
+        run: shellcheck bin/* hooks/*.sh tests/stub/* tests/live/*.sh tests/helpers/* lib/*.sh tests/specialists/run.sh
 
       # A syntax error in a hook exits 2, which Claude Code reads as a block,
       # so every shipped script and hook is parsed here, not only linted.
