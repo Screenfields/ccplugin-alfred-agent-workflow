@@ -9,6 +9,9 @@
 
 load helpers/ecr-gateway
 
+# the prompt path the shipped template holds; only make_template and the AC 2 test use it
+DEFAULT_PROMPT=/tmp/ecr-prompt.txt
+
 setup() {
   gw_setup
   SKILL="$BATS_TEST_DIRNAME/../skills/ecr/SKILL.md"
@@ -202,7 +205,8 @@ make_template() {
     case "$line" in
       PANEL=*) printf 'PANEL=%q\n' "$1" >> "$BATS_TEST_TMPDIR/template.sh" ;;
       SLOT=*) printf 'SLOT=%q\n' "$2" >> "$BATS_TEST_TMPDIR/template.sh" ;;
-      *) printf '%s\n' "$line" >> "$BATS_TEST_TMPDIR/template.sh" ;;
+      *) line=${line//"$DEFAULT_PROMPT"/$(printf '%q' "${PROMPT_F:-$BATS_TEST_TMPDIR/no-prompt-saved}")}
+         printf '%s\n' "$line" >> "$BATS_TEST_TMPDIR/template.sh" ;;
     esac
   done < "$BATS_TEST_TMPDIR/fence.sh"
 }
@@ -213,15 +217,32 @@ run_template() { # panel slot -> run
 }
 
 save_prompt() {
-  SAVED=""
-  if [ -e /tmp/ecr-prompt.txt ]; then SAVED="$BATS_TEST_TMPDIR/prompt.saved"; cp -p /tmp/ecr-prompt.txt "$SAVED"; fi
-  echo "fixture prompt" > /tmp/ecr-prompt.txt
+  PROMPT_F="$BATS_TEST_TMPDIR/ecr-prompt.txt"
+  echo "fixture prompt" > "$PROMPT_F"
 }
 
-teardown() {
-  if [ -n "${SAVED+x}" ]; then
-    if [ -n "$SAVED" ]; then cp -p "$SAVED" /tmp/ecr-prompt.txt; else rm -f /tmp/ecr-prompt.txt; fi
-  fi
+@test "CCW-242 the template reads the per-test prompt path and the shipped default is unchanged" {
+  mk_panel r1
+  unset PROMPT_F
+  make_template "$PANEL_F" ecr-openai
+  [ "$(grep -F -o -- "$DEFAULT_PROMPT" "$BATS_TEST_TMPDIR/fence.sh" | wc -l)" -eq 4 ]
+  [ "$(grep -F -o -- "$DEFAULT_PROMPT" "$BATS_TEST_TMPDIR/template.sh" | wc -l)" -eq 0 ]
+  save_prompt
+  make_template "$PANEL_F" ecr-openai
+  [ "$(grep -F -o -- "$DEFAULT_PROMPT" "$BATS_TEST_TMPDIR/template.sh" | wc -l)" -eq 0 ]
+  [ "$(grep -F -o -- "$PROMPT_F" "$BATS_TEST_TMPDIR/template.sh" | wc -l)" -eq 4 ]
+  unset PROMPT_F
+  run_template "$PANEL_F" ecr-openai
+  [ "$status" -ne 0 ]
+  [ ! -s "$STUB_DIR/calls" ]
+}
+
+@test "CCW-242 save_prompt writes a 15-byte fixture under this test's own temp dir" {
+  save_prompt
+  [[ "$PROMPT_F" == "$BATS_TEST_TMPDIR"/* ]]
+  [ -f "$PROMPT_F" ]
+  [ "$(wc -c < "$PROMPT_F")" -eq 15 ]
+  [ "$(cat "$PROMPT_F")" = "fixture prompt" ]
 }
 
 @test "template: model, max_tokens and the settings come from the panel file; the request body has no reasoning_effort" {
@@ -463,7 +484,7 @@ GUARD
 
 @test "24 ecr-panel-resolve --clean removes a run directory with its markers" {
   save_prompt
-  run "$RES" --prompt /tmp/ecr-prompt.txt
+  run "$RES" --prompt "$PROMPT_F"
   [ "$status" -eq 0 ]
   f=$(panel_file)
   run_template "$f" ecr-openai
@@ -488,7 +509,7 @@ GUARD
 
 @test "4 --models x,y: the chat stub records requests whose model is exactly x and y" {
   save_prompt
-  run "$RES" --models other-route,ecr-google --prompt /tmp/ecr-prompt.txt
+  run "$RES" --models other-route,ecr-google --prompt "$PROMPT_F"
   [ "$status" -eq 0 ]
   f=$(panel_file)
   run_template "$f" override-1
@@ -500,7 +521,7 @@ GUARD
 
 @test "15 --quick: the template run sends requests for exactly the first two slots" {
   save_prompt
-  run "$RES" --quick --prompt /tmp/ecr-prompt.txt
+  run "$RES" --quick --prompt "$PROMPT_F"
   [ "$status" -eq 0 ]
   f=$(panel_file)
   run_template "$f" ecr-openai
