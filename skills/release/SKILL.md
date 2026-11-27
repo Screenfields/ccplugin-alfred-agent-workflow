@@ -245,7 +245,9 @@ Capture and report the PR URL.
 
 ## Step 7 — Wait for CI and merge
 
-Poll CI status:
+Wait for CI as `ci-wait-is-one-bounded-call` says.
+An exit 0 of the watch is not the pass.
+Then query the result directly:
 
 ```bash
 PR_NUMBER={pr-number}
@@ -254,7 +256,7 @@ gh pr checks "$PR_NUMBER" --repo Screenfields/alfred-cc-tools
 
 **Evaluation:**
 - If all checks pass (`SUCCESS` or `SKIPPED`) → proceed to merge.
-- If any check is `IN_PROGRESS` or `QUEUED` → wait and re-poll. Do not merge prematurely.
+- If any check is `IN_PROGRESS` or `QUEUED` → CI outlasted the wait. Report the PR as pending, keep `$CATALOG_DIR` for the merge, and stop. Do not merge.
 - If any check is `FAILURE`, `CANCELLED`, or `TIMED_OUT` → stop:
 
 ```
