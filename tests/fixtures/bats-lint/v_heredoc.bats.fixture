@@ -1,0 +1,34 @@
+@test "heredoc hides nothing" {
+  cat > f <<EOF2
+! body line
+}
+EOF2
+  ! grep -q x f
+  true
+}
+@test "heredoc variants" {
+  cat <<-EOF2
+	! tab body
+	}
+	EOF2
+  cat <<'EOF2'
+! body
+}
+EOF2
+  cat <<"EOF2"
+! body
+}
+EOF2
+  cat <<\EOF2
+! body
+}
+EOF2
+  cat <<< "x"
+  ! grep -q x f
+  true
+}
+@test "arithmetic shift is not a heredoc" {
+  n=$(( 1 << 3 ))
+  ! grep -q x f
+  true
+}

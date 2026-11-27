@@ -1,0 +1,17 @@
+@test "bang inside text" {
+  cat > f <<EOF2
+! heredoc body
+}
+EOF2
+  bash -c '
+! single quoted
+'
+  echo "
+! double quoted
+"
+  x=$'
+! dollar quoted
+'
+  y="a # not a comment" ; ! grep -q x f || false
+  true
+}

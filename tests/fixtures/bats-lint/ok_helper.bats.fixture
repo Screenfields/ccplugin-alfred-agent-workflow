@@ -1,0 +1,14 @@
+last_bang() {
+  true
+  ! grep -q x f
+}
+chain() {
+  [ ! -e "$A" ] &&
+    [ ! -e "$B" ] &&
+    ! compgen -G "$C" > /dev/null &&
+    ! compgen -G "$D" > /dev/null
+}
+function kw {
+  true
+  ! grep -q x f
+}

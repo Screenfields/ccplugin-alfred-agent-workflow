@@ -1,0 +1,12 @@
+@test "or true" {
+  ! grep -q x f || true
+  true
+}
+@test "or colon" {
+  ! grep -q x f || :
+  true
+}
+@test "and false" {
+  ! grep -q x f && false
+  true
+}

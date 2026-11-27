@@ -1,0 +1,13 @@
+h() {
+  ! grep -q x f
+  true
+}
+setup() {
+  ! grep -q x f
+  true
+}
+teardown() {
+  ! grep -q x f
+  true
+}
+one() { ! cmd; true; }

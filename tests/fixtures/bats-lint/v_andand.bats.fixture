@@ -1,0 +1,5 @@
+@test "and-and bang then command" {
+  true
+  a && ! grep -q x f
+  true
+}
