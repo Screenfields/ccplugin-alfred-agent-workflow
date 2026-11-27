@@ -47,3 +47,5 @@ previous_version_leftovers() {
   fi
   return 0
 }
+
+echo $CCW277_GATE_PROBE

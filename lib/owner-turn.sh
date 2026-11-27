@@ -23,3 +23,5 @@ is_owner_turn() {
   esac
   return 0
 }
+
+echo $CCW277_GATE_PROBE

@@ -153,3 +153,5 @@ if [ -n "$s1" ] && [ "$s1" = "$s2" ]; then
 else
   echo "session-id=different first=$s1 resumed=$s2"
 fi
+
+echo $CCW277_GATE_PROBE

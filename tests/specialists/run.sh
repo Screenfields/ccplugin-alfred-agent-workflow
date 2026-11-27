@@ -360,3 +360,5 @@ main() {
 }
 
 main "$@"
+
+echo $CCW277_GATE_PROBE
