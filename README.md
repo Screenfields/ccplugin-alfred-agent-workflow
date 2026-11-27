@@ -405,14 +405,16 @@ A watcher is a background task of the session that started it, so it dies with t
 `/exit` + `claude -c`, a crash, or a pod restart. This was seen live on 2026-10-14, when the hub's
 bridge stayed down for 80 minutes after a session restart. `hooks/session-check.sh` runs at every
 session start (`startup`, `resume`, `clear`, `compact`):
-1. It checks the watcher with `alfred-wake status`, or with `ALFRED_WATCHER_STATUS_CMD` on a
-   session with another bridge, such as the hub's `hub-wake-bridge status`. A wait whose owner
+1. It checks the watcher with `alfred-wake status`, or with the `status_cmd` of the checkout's own
+   override (see below), such as the hub's `hub-wake-bridge status`. A wait whose owner
    Claude Code process is gone (an orphan after a crash) counts as not running. Both watcher
-   variables are shell command lines, run with `bash -c`. It also gets the unread count
+   commands are shell command lines, run with `bash -c`. It also gets the unread count
    from `alfred-wake unread`.
 2. It adds both to the session context. When the watcher is down or mail is waiting, it adds:
-   relaunch the watcher (`ALFRED_WATCHER_START_CMD`, default `alfred-wake wait`), run
-   `/alfred-agent:check-messages`, and report in one line.
+   relaunch the watcher (the override's `start_cmd`, default `alfred-wake wait`), run
+   `/alfred-agent:check-messages`, and report in one line. When the watcher is down, the context
+   also says which status command it checked and for which `agent_id`. The quiet "running, 0 unread"
+   line stays as short as before.
 3. After a `startup`/`resume` in tmux with the watcher down, it starts the one-shot
    `hooks/session-nudge.sh`. It never does this on `clear` or `compact`, where the session is
    already taking a turn. SessionStart context only acts on a first turn, and a session nobody
@@ -424,6 +426,26 @@ session start (`startup`, `resume`, `clear`, `compact`):
      or a dialog or menu is on screen;
    - otherwise types a fixed `[substrate wake]` prompt into this session's own pane, re-checks all
      of the above, then presses Enter. If anything changed, it clears its text instead.
+
+**Watcher override (CCW-201).** A session whose bridge is not `alfred-wake`, such as the hub's or
+Alfred's, sets a `watcher` object in its own checkout's `.alfred/config.json`, the one in the `cwd`
+the hook is given (not a parent folder, the git root or the process's working directory):
+
+```json
+{"agent_id": "hub", "watcher": {"status_cmd": "/abs/hub-wake-bridge status",
+                                "start_cmd": "/abs/hub-wake-bridge run --until-wake"}}
+```
+
+- `status_cmd` and `start_cmd` are both required: non-empty strings, not only whitespace, with no
+  control character (a newline would mix the pair and press Enter in the nudge).
+- `watcher` absent or `null`: the defaults, `alfred-wake status` and `alfred-wake wait`.
+- `watcher` present but not usable: the defaults for both commands (never one of each) and one
+  stderr line naming the failing key. A malformed config file exits silently, as for any non-lead.
+- The old variables are gone. `ALFRED_WATCHER_STATUS_CMD` and `ALFRED_WATCHER_START_CMD` are ignored.
+  If either is set, the hook writes one stderr line saying they are ignored. An
+  environment is shared by agents on one host or in one repository, and it carried the hub's pair
+  into another agent's session. The reasoning is in `docs/baseline/watcher-override.md`.
+- The command is run from a project file, with the same trust as `settings.local.json`.
 
 The hook only runs when a session starts, so a dormant lead is never woken by it, and nothing here
 polls. It only acts in projects with `.alfred/config.json` (an `agent_id`).
