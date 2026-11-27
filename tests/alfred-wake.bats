@@ -45,7 +45,12 @@ teardown() {
       kill -KILL "$pid" 2>/dev/null || true
     fi
   done
-  pkill -f "sleep 31.4159" 2>/dev/null || true
+  # Only sleeps of this test's state dir: another run's sleep is not ours.
+  for pid in $(pgrep -f "sleep 31.4159" 2>/dev/null); do
+    if grep -qzxF "ALFRED_WAKE_STATE_DIR=$STATE" "/proc/$pid/environ" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
 }
 
 # inbox [<id>:<from> ...] — set what get_messages returns as unread.
@@ -92,6 +97,8 @@ until_true() {
 gone() { [ -z "$({ tr -d '\0' < "/proc/$1/cmdline"; } 2>/dev/null)" ]; }
 # A plain `! cmd` never fails a bats test (errexit ignores it), hence alive().
 alive() { ! gone "$1"; }
+# gone_group <pgid> — no process is left in that process group.
+gone_group() { ! pgrep -g "$1" >/dev/null; }
 # reap <pid> — bounded wait for a background start to exit; sets $rc. (`run
 # wait` cannot work: run uses a subshell, which cannot wait on our children.)
 reap() {
@@ -312,17 +319,57 @@ no_leftovers() {
   echo 31.4159 > "$STUB_DIR/slow"
   for sig in TERM INT HUP; do
     start a wait
-    until_true 50 pgrep -f "sleep 31.4159"
+    until_true 50 pgrep -g "$a_pid" -f "sleep 31.4159"
     t0=$(date +%s%N)
     kill "-$sig" "$a_pid"
     reap "$a_pid"
     [ "$rc" -eq 0 ]
     [ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 1500 ]
     [ "$(wake_line_out_of a)" = "WAKE-STOPPED signal=$sig" ] || { echo "a printed: $(out_of a)"; false; }
-    run pgrep -f "sleep 31.4159"
+    run pgrep -g "$a_pid" -f "sleep 31.4159"
     [ "$status" -ne 0 ]
     no_leftovers
   done
+}
+
+@test "CCW-266: the stub sleep is matched by group; a foreign sleep with the same delay is ignored and an orphan is seen" {
+  local decoy orphan_pid
+  ALFRED_WAKE_STATE_DIR=/nonexistent-other-run sleep 31.4159 &
+  decoy=$!
+  FAKE_PIDS+=("$decoy")
+  echo 31.4159 > "$STUB_DIR/slow"
+  # Positive control, before the test's own wait starts: an orphaned pass of
+  # a second wait is still found by the group match, then its group is stopped.
+  start c wait
+  until_true 50 pgrep -g "$c_pid" -f "sleep 31.4159"
+  kill -KILL "$c_pid"
+  reap "$c_pid" || true
+  pgrep -g "$c_pid" -f "sleep 31.4159"
+  kill -KILL -- "-$c_pid"
+  until_true 50 gone_group "$c_pid"
+  rm -rf "$STATE"
+
+  start a wait
+  until_true 50 pgrep -g "$a_pid" -f "sleep 31.4159"
+  kill -TERM "$a_pid"
+  reap "$a_pid"
+  [ "$rc" -eq 0 ]
+  [ "$(wake_line_out_of a)" = "WAKE-STOPPED signal=TERM" ] || { echo "a printed: $(out_of a)"; false; }
+  run pgrep -g "$a_pid" -f "sleep 31.4159"
+  [ "$status" -ne 0 ]
+  alive "$decoy"
+}
+
+@test "CCW-266: teardown kills this test's sleeps and no foreign sleep" {
+  local decoy own
+  ALFRED_WAKE_STATE_DIR=/nonexistent-other-run sleep 31.4159 &
+  decoy=$!
+  sleep 31.4159 &
+  own=$!
+  teardown
+  until_true 30 gone "$own"
+  alive "$decoy"
+  FAKE_PIDS+=("$decoy")
 }
 
 @test "legacy run is single-instance too, and is replaced without printing" {
@@ -1494,12 +1541,12 @@ fake_wait() {
   echo 31.4159 > "$STUB_DIR/slow"
   for sig in TERM INT HUP; do
     start_with "$WIN_PATH" a wait
-    until_true 50 pgrep -f "sleep 31.4159"
+    until_true 50 pgrep -g "$a_pid" -f "sleep 31.4159"
     kill "-$sig" "$a_pid"
     reap "$a_pid"
     [ "$rc" -eq 0 ]
     [ "$(wake_line_out_of a)" = "WAKE-STOPPED signal=$sig" ] || { echo "a printed: $(out_of a)"; false; }
-    run pgrep -f "sleep 31.4159"
+    run pgrep -g "$a_pid" -f "sleep 31.4159"
     [ "$status" -ne 0 ]
     no_leftovers
   done
@@ -1550,7 +1597,7 @@ fake_wait() {
   reap "$a_pid"
   grep -q '^flock -w' "$d/calls"
   grep -q '^flock -u' "$d/calls"
-  until_true 50 pgrep -f "sleep 31.4159"
+  until_true 50 pgrep -g "$b_pid" -f "sleep 31.4159"
   kill -TERM "$b_pid"
   reap "$b_pid"
   grep -q '^pgrep -P' "$d/calls"
