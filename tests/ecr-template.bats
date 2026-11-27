@@ -234,7 +234,7 @@ save_prompt() {
   unset PROMPT_F
   run_template "$PANEL_F" ecr-openai
   [ "$status" -ne 0 ]
-  [ "$(calls_count chat)" -eq 0 ]
+  [ ! -s "$STUB_DIR/calls" ]
 }
 
 @test "CCW-242 save_prompt writes a 15-byte fixture under this test's own temp dir" {
