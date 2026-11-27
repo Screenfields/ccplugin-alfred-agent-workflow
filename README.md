@@ -319,6 +319,13 @@ Delete the state dir to force a fresh seed.
   needed. Linux and macOS are unchanged: Linux keeps `flock` and `pgrep`, and
   a shell that is not MINGW, MSYS or Cygwin and lacks either still gets
   `WAKE-ERROR alfred-wake: requires flock and pgrep (util-linux, procps)`.
+- **jq install (CCW-203):** when jq is missing, `alfred-wake` stops with exit 1
+  and names only the missing tool(s). On a Windows shell it adds the hint
+  `winget install jqlang.jq`. winget puts the new `WinGet/Links` dir
+  (`%LOCALAPPDATA%/Microsoft/WinGet/Links`) on PATH, but an already running
+  Claude Code shell does not see it: add that dir to PATH by hand, or
+  `restart Claude Code`. The winget id and the `WinGet/Links` path come from a
+  field report and are not verified on Windows.
 - **No lock:** on a Windows shell without `flock` the pidfile is the only
   arbiter. A new wait replaces the running one as on Linux, and every wait
   checks the pidfile at the top of each loop and stops with
