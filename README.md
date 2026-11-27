@@ -256,7 +256,7 @@ Everything is env-driven; the defaults are correct for a standard devbox pod.
 | Variable | Default | Purpose |
 |---|---|---|
 | `AGENT_MESSAGING_TOKEN` | — | Bearer token. **Required** unless `ALFRED_WAKE_MCP_JSON` supplies one |
-| `AGENT_ID` | — | Sent as `X-Agent-ID`; your messaging identity |
+| `AGENT_ID` | — | Sent as `X-Agent-ID`; your messaging identity. Without it the service rejected `get_messages` with `X-Agent-ID header is required` (observed on agent-messaging 3.4.3 with a devbox token, 2026-11-27; other token kinds not verified). `alfred-wake check` then prints `agent=unset (AGENT_ID empty)`, the server text and an `AGENT_ID is not set` line |
 | `AGENT_MESSAGING_URL` | `https://agent-messaging.screenfields.net/mcp/` | MCP endpoint |
 | `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` | — | Sent when set (off-platform / CF Access paths) |
 | `ALFRED_WAKE_MCP_JSON` | — | Optional path to a `.mcp.json` to source URL + headers from instead of the env. `${VAR}` and `${VAR:-default}` placeholders are expanded from the environment |
@@ -1139,7 +1139,7 @@ In multi-agent project setups, only the project's lead agent typically gets a me
 | Messages reach the service but you don't receive them | `X-Agent-ID` header mismatch | Verify your `AGENT_ID` env matches what senders address |
 | `no wake bridge running` from `/alfred-agent:check-messages` | No live `alfred-wake wait` process, with a live owner, for this state dir | Start one: `Bash(command: "alfred-wake wait", run_in_background: true)`; `alfred-wake status` shows the pidfile PID and last-pass age |
 | `alfred-wake status` prints `armed:      no … no owner could be found` while a wait is alive | `CLAUDE_CODE_SESSION_ID` is set but no ancestor of the wait matches the owner rule (`claude`, or a version comm with an exe in `claude/versions`), or the version ancestor's exe cannot be read, so `alfred-wake.owner` holds `unknown` | Check `ps -o comm= -p <pid of the session>` and `readlink /proc/<pid>/exe`. If the exe is not under `claude/versions/<comm>`, set `ALFRED_WAKE_OWNER_COMM` to the process name. It must be in the environment of the process that runs `alfred-wake wait`, for example exported in the shell profile. A set value applies alone, so a `stale` value (a version that no longer runs) also gives this error: unset it. Then relaunch `alfred-wake wait` |
-| Wake bridge silent while messages arrive | Wrong or missing `AGENT_MESSAGING_TOKEN` / `AGENT_ID` | `alfred-wake check` — it prints the resolved URL, auth mode and agent id, and any `WAKE-ERROR` reason |
+| Wake bridge silent while messages arrive | Wrong or missing `AGENT_MESSAGING_TOKEN` / `AGENT_ID` | `alfred-wake check` — it prints the resolved URL, auth mode and agent id, and any `WAKE-ERROR` reason. Without `AGENT_ID` the service rejected `get_messages` with `X-Agent-ID header is required` (observed on agent-messaging 3.4.3 with a devbox token, 2026-11-27; other token kinds not verified); `check` shows that text and an `AGENT_ID is not set` line, `wait` only `WAKE-ERROR agent-messaging: get_messages returned an error` |
 | Buzz never wakes you | No buzz-mcp sidecar in the pod, or no Buzz identity | `alfred-wake check` says `buzz: no sidecar …`. Expected for leads without a Buzz identity — it is not an error |
 
 ## Related
