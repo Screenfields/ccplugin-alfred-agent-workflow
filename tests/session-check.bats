@@ -29,7 +29,7 @@ STUB
 #!/bin/bash
 echo "alfred-wake \$*" >> "$T/log-wake"
 case "\$1" in
-  unread) echo 0 ;;
+  unread) cat "$T/unread" 2>/dev/null || echo 0 ;;
   status) exit \$(cat "$T/rc-wake" 2>/dev/null || echo 1) ;;
 esac
 STUB
@@ -208,6 +208,21 @@ settle() { sleep 1.7; }
   [ "$(ctx_of)" = "Wake watcher: running. Inbox: 0 unread. Nothing to do for this check; do not mention it." ]
 }
 
+@test "SC6c: the Checked line appears only when the watcher is NOT running" {
+  mkproj "$T/p" agent-zed "$(wcfg alfred)"
+  echo 0 > "$T/rc-alfred"
+  echo 3 > "$T/unread"
+  run --separate-stderr run_hook "$T/p" clear
+  [ "$status" -eq 0 ]
+  one_object
+  [[ "$(ctx_of)" == *"inbox has 3 unread"* ]]
+  [[ "$(ctx_of)" == *"/alfred-agent:check-messages"* ]]
+  [[ "$(ctx_of)" != *"Checked:"* ]]
+  echo 1 > "$T/rc-alfred"
+  run --separate-stderr run_hook "$T/p" clear
+  [[ "$(ctx_of)" == *"Checked: $T/bridge-alfred status (agent agent-zed)."* ]]
+}
+
 @test "SC7: the old variables are ignored and said so, off the model's channel" {
   mkproj "$T/p" agent-lead
   hub_env
@@ -253,6 +268,11 @@ broken_case() {
   broken_case "$(jq -n --arg s "$S" '{status_cmd:$s, start_cmd:7}')" start_cmd
   broken_case '"watcher-string"' watcher
   broken_case '{}' status_cmd
+  broken_case false watcher
+  broken_case 0 watcher
+  broken_case '[]' watcher
+  broken_case "$(jq -n --arg s "$S" '{status_cmd:$s, start_cmd:"a\tb run"}')" start_cmd
+  broken_case "$(jq -n --arg s "$S" '{status_cmd:$s, start_cmd:"a\u007fb run"}')" start_cmd
   broken_case '{"status_cmd":"","start_cmd":""}' status_cmd
   # null counts as absent: the defaults and no stderr line
   unset ALFRED_WATCHER_STATUS_CMD ALFRED_WATCHER_START_CMD
