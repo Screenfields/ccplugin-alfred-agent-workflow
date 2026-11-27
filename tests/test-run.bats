@@ -11,6 +11,8 @@
 
 bats_require_minimum_version 1.5.0
 
+load helpers/sigint-guard
+
 setup() {
   ROOT="$BATS_TEST_DIRNAME/.."
   TR="$ROOT/bin/alfred-test-run"
@@ -447,6 +449,18 @@ sig_run() {
   done
   local t0=$SECONDS
   kill "-$1" "$pid"
+  # Bounded wait: 15 s after the signal, SIGKILL the tool's process group and fail.
+  for i in $(seq 1 150); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    set +m
+    echo "SIG$1: alfred-test-run did not exit within 15 s of the signal"
+    false
+  fi
   local rc=0; wait "$pid" || rc=$?
   set +m
   printf '%s\n%s\n' "$(cat "$T/sig.out")" "$(cat "$T/sig.err")" >> "$T/all.out"
@@ -458,7 +472,7 @@ sig_run() {
   sig_run TERM 143
   grep -q '^build: https://buildkite.com' "$T/sig.out"
 }
-@test "AC10: INT gives 130" { sig_run INT 130; grep -q '^build:' "$T/sig.out"; }
+@test "AC10: INT gives 130" { require_sigint_not_ignored; sig_run INT 130; grep -q '^build:' "$T/sig.out"; }
 @test "AC10: HUP gives 129" { sig_run HUP 129; grep -q '^build:' "$T/sig.out"; }
 @test "AC10: TERM while a build GET hangs gives 143" { sig_run TERM 143 hang; }
 
