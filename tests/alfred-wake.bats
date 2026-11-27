@@ -1629,7 +1629,7 @@ fake_wait() {
 }
 
 
-# --- CCW-203: pre-flight names the missing tool; check shows agent=from token --
+# --- CCW-203: pre-flight names the missing tool; check shows agent=unset (AGENT_ID empty) --
 
 # preflight_run <path> <sub> — run the script with PATH set, stdout and stderr apart.
 preflight_run() {
@@ -1805,6 +1805,11 @@ check_run() {
   grep -q 'failed: initialize http 500' "$BATS_TEST_TMPDIR/ck.err"
   ! grep -q 'AGENT_ID is not set' "$BATS_TEST_TMPDIR/ck.err" || false
   rm "$STUB_DIR/fail"
+  touch "$STUB_DIR/fail-get"
+  run check_run
+  grep -q 'failed: get_messages http 500' "$BATS_TEST_TMPDIR/ck.err"
+  ! grep -q 'AGENT_ID is not set' "$BATS_TEST_TMPDIR/ck.err" || false
+  rm "$STUB_DIR/fail-get"
   touch "$STUB_DIR/legacy"
   run check_run
   grep -q 'no cursor API on this server' "$BATS_TEST_TMPDIR/ck.err"

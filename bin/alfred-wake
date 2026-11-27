@@ -468,7 +468,7 @@ am_call() {
     if printf '%s' "$MCP_BODY" | grep -qiE 'unexpected.keyword'; then return 2; fi
     AM_ERR="get_messages returned an error"
     # Diag-only detail for `check`: first text item, control characters
-    # stripped (so one line), capped at 200 characters. Never reaches AM_ERR.
+    # stripped (so one line), capped at 200 bytes. Never reaches AM_ERR.
     AM_SERVER_TEXT=$(printf '%s' "$MCP_BODY" | jq -r '.result.content[0].text // empty' 2>/dev/null \
       | tr -d '[:cntrl:]' | cut -c1-200)
     return 1
