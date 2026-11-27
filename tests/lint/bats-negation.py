@@ -21,14 +21,33 @@ Rule (the one home of it; tested on bats 1.8.2):
   "Last" is decided per enclosing block: a `!` inside `if`, `case`, a loop or
   a `{ }` group is accepted only when that compound is itself the last
   command, and then only as the last command of its branch or arm. A `!`
-  last in a `( )` subshell is accepted wherever the subshell stands, because
-  a failing subshell trips errexit itself; a `!` mid-subshell is flagged.
+  last in a `( )` subshell is
+  accepted when the subshell ends its chain and is the last stage of its pipeline,
+  because a failing subshell trips errexit itself; a `!` mid-subshell is flagged,
+  as is one in a non-final pipeline stage (`(! x) | cat`). A redirect after a
+  compound (`esac >f`, `done <f`, `fi 2>&1`, a heredoc or `< <(cmd)`) belongs to
+  the compound, which stays last.
+  In a case arm a `!` last in the arm is
+  flagged before `;&`, and flagged
+  before `;;&` when another arm follows the arm. The latter is
+  a documented false positive for `;;&` when no later pattern matches (bats
+  enforces it then); write `! cmd || false` there. A `;;&` on the final arm is
+  accepted.
   Not a command start, so not flagged: [ ! -f f ], [[ ! x ]], if ! cmd,
   while ! cmd, $(...), run ! cmd, and a `!` inside a quoted string, a
   comment or a heredoc body.
   Helper functions (setup, teardown, any name() { or name() with the { alone
   on the next line, at column 0) follow the same rule as @test bodies. A `!`
   outside any test or function is not checked.
+  Heads, spaces or a tab:
+    - an indented @test or helper head is checked
+    - a tab counts as one column
+    - the body closes at a `}` alone on its line, no deeper than the head
+    - a head inside a quoted string or heredoc is data, never read
+    - an indented head with `{` on the next line is not read
+  In-test functions:
+    - functions defined inside a test follow the helper rule; the call site is not tracked
+    (so `f || true` after `f() { true; ! x; }` is accepted)
 
 Known limits (not coded; bats 1.8.2 behaviour):
   - A test whose `{` is on the next line (`@test "x"` then `{`) is not a test
@@ -78,11 +97,12 @@ def in_arith(buf):
 
 
 def logical_lines(text, path):
-    """Return [(masked_text, marks, col0)] per logical command line.
+    """Return [(masked_text, marks, indent)] per logical command line.
 
     Quoted content is masked to 'x', comments and heredoc bodies are dropped,
-    backslash and trailing-operator (| && ||) continuations are joined, and
-    `marks` maps character offsets to physical line numbers. Length is
+    backslash and trailing-operator (| && ||) continuations are joined,
+    `indent` counts the leading blanks of the first physical line (a space and
+    a tab each count as one), and `marks` maps character offsets to physical line numbers. Length is
     preserved 1:1 between the masked text and its marks.
     """
     lines = text.split('\n')
@@ -93,7 +113,7 @@ def logical_lines(text, path):
     qline = 0
     cur = ''
     marks = []
-    col0 = False
+    col0 = 0
     started = False
     pending = []
     while i < n:
@@ -101,7 +121,7 @@ def logical_lines(text, path):
         lineno = i + 1
         if not started:
             started = True
-            col0 = bool(ln) and not ln[0].isspace()
+            col0 = len(ln) - len(ln.lstrip(' \t'))
         marks.append((len(cur), lineno))
         buf = ''
         cont = False
@@ -275,19 +295,24 @@ def mask_nested(s):
     return ''.join(out)
 
 
+NAME = r'[A-Za-z_][\w:.-]*'
 KEYWORD = re.compile(r'(?:[a-z]+|\})(?=[\s;&|)]|$)')
 IN_WORD = re.compile(r'\sin(?=[\s;]|$)')
 TERMS = {'then', 'elif', 'else', 'fi', 'do', 'done', 'esac', '}'}
+REDIR = re.compile(r'[0-9]*(?:<<<|<<-?|&>>?|>>|>&|<&|<>|>\||[<>])')
+FUNCDEF = re.compile(r'(?:function[ \t]+%s(?:[ \t]*\([ \t]*\))?|%s[ \t]*\([ \t]*\))' % (NAME, NAME))
 COMPOUNDS = {'if', 'while', 'until', 'for', 'select', 'case'}
 
 
 class Item:
     def __init__(self, kind, text='', lists=()):
-        self.kind = kind          # simple | subshell | group | compound
+        self.kind = kind          # simple | subshell | group | compound | func | pipeline
         self.text = text
         self.lists = list(lists)  # nested command lists (each a list of chains)
         self.bang = False
         self.line = 0
+        self.stages = []          # pipeline: the stage items
+        self.arm_flag = []        # case: per arm, True when it falls through
 
 
 class Parser:
@@ -349,7 +374,7 @@ class Parser:
     def chain(self):
         items, ops = [], []
         while True:
-            items.append(self.item())
+            items.append(self.pipeline())
             self.ws()
             if self.t.startswith(('&&', '||'), self.i):
                 ops.append(self.t[self.i:self.i + 2])
@@ -358,7 +383,7 @@ class Parser:
                 continue
             return items, ops
 
-    def item(self):
+    def pipeline(self):
         self.ws()
         start = self.i
         bang = False
@@ -366,10 +391,51 @@ class Parser:
             bang = True
             self.i += 1
             self.ws()
-        it = self.command()
+        stages = [self.command()]
+        while True:
+            self.ws()
+            if self.t[self.i:self.i + 1] == '|' and self.t[self.i + 1:self.i + 2] != '|':
+                self.i += 2 if self.t[self.i + 1:self.i + 2] == '&' else 1
+                self.ws(nl=True)
+                stages.append(self.command())
+            else:
+                break
+        if len(stages) == 1:
+            it = stages[0]
+        else:
+            it = Item('pipeline')
+            it.stages = stages
         it.bang = bang
         it.start = start
         return it
+
+    def redirects(self):
+        """Skip redirect tokens after a compound (a heredoc is the word HEREDOC)."""
+        t = self.t
+        while True:
+            self.ws()
+            if t.startswith('HEREDOC', self.i):
+                self.i += 7
+                continue
+            m = REDIR.match(t, self.i)
+            if not m:
+                return
+            self.i = m.end()
+            self.ws()
+            while self.i < self.n and t[self.i] not in ' \t\n;|&()<>':
+                self.i += 1
+            if t[self.i:self.i + 2] in ('<(', '>(') or (t[self.i:self.i + 1] in '<>' and t[self.i + 1:self.i + 2] == '('):
+                d = 0
+                self.i += 1
+                while self.i < self.n:
+                    if t[self.i] == '(':
+                        d += 1
+                    elif t[self.i] == ')':
+                        d -= 1
+                        if d == 0:
+                            self.i += 1
+                            break
+                    self.i += 1
 
     def simple(self):
         start = self.i
@@ -378,6 +444,8 @@ class Parser:
         while self.i < self.n:
             c = t[self.i]
             if c in '\n;' or t.startswith(('&&', '||'), self.i):
+                break
+            if c == '|' and depth == 0:
                 break
             if c == '(':
                 depth += 1
@@ -389,8 +457,25 @@ class Parser:
         return Item('simple', t[start:self.i].strip())
 
     def command(self):
+        it = self.command_core()
+        if it.kind in ('subshell', 'group', 'compound'):
+            self.redirects()
+        return it
+
+    def command_core(self):
         t = self.t
         c = t[self.i:self.i + 1]
+        fm = FUNCDEF.match(t, self.i)
+        if fm:
+            j = fm.end()
+            while j < self.n and t[j] in ' \t\n':
+                j += 1
+            if t[j:j + 1] == '{' and (j + 1 >= self.n or t[j + 1] in ' \t\n') or \
+                    (t[j:j + 1] == '(' and t[j + 1:j + 2] != '('):
+                self.i = j
+                body = self.command_core()
+                it = Item('func', lists=body.lists)
+                return it
         if c == '(' and t[self.i + 1:self.i + 2] != '(':
             self.i += 1
             lst = self.lst()
@@ -433,6 +518,7 @@ class Parser:
             self.simple()
             self.expect('do')
         else:  # case
+            arms = []
             m = IN_WORD.search(t, self.i)
             if m:
                 self.i = m.end()
@@ -453,15 +539,24 @@ class Parser:
                     break
                 self.i = j + 1
                 lists.append(self.lst())
-                if t.startswith((';;&', ';;'), self.i):
-                    self.i += 3 if t.startswith(';;&', self.i) else 2
-                elif t.startswith(';&', self.i):
+                if t.startswith(';;&', self.i):
+                    arms.append(';;&')
+                    self.i += 3
+                elif t.startswith(';;', self.i):
+                    arms.append(';;')
                     self.i += 2
-                elif t[self.i:self.i + 1] == ')':
-                    self.i += 1
+                elif t.startswith(';&', self.i):
+                    arms.append(';&')
+                    self.i += 2
+                else:
+                    arms.append('')
+                    if t[self.i:self.i + 1] == ')':
+                        self.i += 1
                 if self.i == before:
                     self.i += 1
-            return Item('compound', lists=lists)
+            it = Item('compound', lists=lists)
+            it.arm_flag = [a == ';&' or (a == ';;&' and k + 1 < len(lists)) for k, a in enumerate(arms)]
+            return it
         lists = [self.lst()]
         self.expect('done')
         return Item('compound', lists=lists)
@@ -469,6 +564,20 @@ class Parser:
 
 def is_false(it):
     return it.kind == 'simple' and not it.bang and it.text == 'false'
+
+
+def descend(it, at_end, used, bang, line_of, found):
+    if it.kind == 'func':
+        inner = True
+    elif it.kind == 'subshell':
+        # A failing subshell trips errexit itself, so its last command counts
+        # whenever the subshell ends its chain and its pipeline.
+        inner = at_end or used
+    else:
+        inner = used and not bang
+    for li, lst in enumerate(it.lists):
+        flag = li < len(it.arm_flag) and it.arm_flag[li]
+        check_list(lst, inner and not flag, line_of, found)
 
 
 def check_list(chains, tail, line_of, found):
@@ -492,14 +601,14 @@ def check_list(chains, tail, line_of, found):
                     ok = used
                 if not ok:
                     found.append(line_of(it.start))
-            if it.kind == 'subshell':
-                # A failing subshell trips errexit itself, so its last
-                # command counts whenever the subshell is not rescued.
-                inner = k == len(items) - 1 or used
+            if it.kind == 'pipeline':
+                # The pipeline status is its last stage's; only that stage can
+                # trip errexit, and not when the pipeline is negated.
+                for si, st in enumerate(it.stages):
+                    fin = si == len(it.stages) - 1 and not it.bang
+                    descend(st, fin and k == len(items) - 1, fin and used, it.bang, line_of, found)
             else:
-                inner = used and not it.bang
-            for lst in it.lists:
-                check_list(lst, inner, line_of, found)
+                descend(it, k == len(items) - 1, used, it.bang, line_of, found)
 
 
 def check_body(body):
@@ -519,7 +628,6 @@ def check_body(body):
     return found
 
 
-NAME = r'[A-Za-z_][\w:.-]*'
 TEST_HEAD = re.compile(r'@test\s+(?:"[^"]*"|\'[^\']*\'|\S+)\s*\{(.*)$')
 FUNC_HEAD = re.compile(r'(?:function\s+%s(?:\s*\(\))?|%s\s*\(\))\s*\{(.*)$' % (NAME, NAME))
 FUNC_NAME = re.compile(r'(?:function\s+%s(?:\s*\(\))?|%s\s*\(\))\s*$' % (NAME, NAME))
@@ -535,13 +643,13 @@ def check_file(path):
     i = 0
     N = len(ll)
     while i < N:
-        s, marks, col0 = ll[i]
+        s, marks, indent = ll[i]
         s = s.strip()
-        m = (TEST_HEAD.match(s) or FUNC_HEAD.match(s)) if col0 else None
+        m = TEST_HEAD.match(s) or FUNC_HEAD.match(s)
         rest = None
         if m:
             rest = m.group(1)
-        elif col0 and FUNC_NAME.match(s) and i + 1 < N and ll[i + 1][2]:
+        elif indent == 0 and FUNC_NAME.match(s) and i + 1 < N and ll[i + 1][2] == 0:
             # `name()` or `function name` with the `{` alone on the next line.
             nb = BRACE_NEXT.match(ll[i + 1][0].strip())
             if nb:
@@ -561,11 +669,11 @@ def check_file(path):
             if rest.strip():
                 body.append((rest, [(0, hline)]))
             i += 1
-            while i < N and not (ll[i][2] and ll[i][0].strip() == '}'):
+            while i < N and not (ll[i][2] <= indent and ll[i][0].strip() == '}'):
                 body.append((ll[i][0], ll[i][1]))
                 i += 1
             if i >= N:
-                raise ParseError('%s:%d: %s has no closing } at column 0' % (path, hline, kind))
+                raise ParseError('%s:%d: %s has no closing } at column %d or less' % (path, hline, kind, indent))
             i += 1
         findings.extend(check_body(body))
     return findings
