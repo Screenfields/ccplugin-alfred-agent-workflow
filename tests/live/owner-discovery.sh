@@ -5,8 +5,16 @@
 #
 #   owner-discovery.sh <branch-dir>
 #
-# Prints `owner=<pid> ancestor=<pid>` (exit 1 when they differ or are missing)
-# and then `session-id=same|different` with both values (information only).
+# Prints `owner=<pid> ancestor=<pid> status=<n>`: owner is the first field of
+# alfred-wake.owner, ancestor the pid find_owner returns from the step-2 shell,
+# n the exit code of `alfred-wake status` run there while the wait runs. Exit 1
+# unless owner is a pid, owner equals ancestor and status is 0; exit 2 when a
+# piece of the owner rule is missing from bin/alfred-wake. Then it prints
+# `session-id=same|different` with both values (information only).
+#
+# The owner rule has one home, bin/alfred-wake. This script extracts stat_rest,
+# owner_versioned, find_owner and the OWNER_COMM= line from it (bin/alfred-wake
+# ends in an unconditional main, so it cannot be sourced) and calls them.
 #
 # Isolation:
 #   - everything lives in T=$(mktemp -d /tmp/ccw170-live-XXXXXX); the live state
@@ -71,11 +79,31 @@ claude_p() {
 }
 
 WAIT_CMD="env PATH=\"$BRANCH/tests/stub:\$PATH\" STUB_DIR=\"$T/stub\" AGENT_MESSAGING_URL=http://stub.invalid/mcp/ AGENT_MESSAGING_TOKEN=test-token AGENT_ID=owner-live-check ALFRED_WAKE_BUZZ=off $BRANCH/bin/alfred-wake wait"
+# The bridge's own owner rule, extracted from bin/alfred-wake into $T/owner-rule.sh.
+RULE="$T/owner-rule.sh"
+: > "$RULE"
+for fn in stat_rest owner_versioned find_owner; do
+  piece=$(sed -n "/^$fn() {\$/,/^}\$/p" "$BRANCH/bin/alfred-wake")
+  case "$piece" in
+    "$fn() {"*"}") printf '%s\n' "$piece" >> "$RULE" ;;
+    *) echo "bin/alfred-wake: $fn is missing or incomplete" >&2; exit 2 ;;
+  esac
+done
+oc=$(grep '^OWNER_COMM=' "$BRANCH/bin/alfred-wake")
+case "$oc" in
+  OWNER_COMM=*) [ "$(printf '%s\n' "$oc" | wc -l)" -eq 1 ] || { echo "bin/alfred-wake: more than one OWNER_COMM= line" >&2; exit 2; } ;;
+  *) echo "bin/alfred-wake: the OWNER_COMM= line is missing" >&2; exit 2 ;;
+esac
+printf '%s\n' "$oc" >> "$RULE"
+bash -n "$RULE" || { echo "bin/alfred-wake: the extracted owner rule does not parse" >&2; exit 2; }
+
 read -r -d '' WALK <<'EOF2'
-sleep 2; p=$$; while [ "$p" -gt 1 ]; do [ "$(cat /proc/$p/comm)" = claude ] && break; p=$(sed 's/.*) //' /proc/$p/stat | awk '{print $2}'); done; echo "owner=$(cut -d' ' -f1 "$ALFRED_WAKE_STATE_DIR/alfred-wake.owner") ancestor=$p"; touch STEP2_MARKER
+i=0; while [ ! -s "$ALFRED_WAKE_STATE_DIR/alfred-wake.owner" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done; . OWNER_RULE; a=$(find_owner); a=${a%% *}; BRANCH_DIR/bin/alfred-wake status >/dev/null 2>&1; s=$?; echo "owner=$(cut -d' ' -f1 "$ALFRED_WAKE_STATE_DIR/alfred-wake.owner" 2>/dev/null) ancestor=$a status=$s"; touch STEP2_MARKER
 EOF2
 WALK=${WALK%$'\n'}
 WALK=${WALK//STEP2_MARKER/$T/step2-done}
+WALK=${WALK//OWNER_RULE/$RULE}
+WALK=${WALK//BRANCH_DIR/$BRANCH}
 
 PROMPT="Do these two steps in order.
 Step 1: start this command as a background Bash task (run_in_background: true), exactly as written:
@@ -107,13 +135,12 @@ if kill -0 "$CLAUDE_PID" 2>/dev/null; then
 fi
 CLAUDE_PID=""
 
-o="" a=""
-read -r o a < <(sed -n 's/^owner=\([0-9]*\) ancestor=\([0-9]*\)$/\1 \2/p' "$T/out.txt" | tail -1)
-if [ -z "$o" ] || [ "$o" != "$a" ]; then
-  echo "owner=${o:-} ancestor=${a:-}"
+o="" a="" st=""
+IFS='|' read -r o a st < <(sed -n 's/^owner=\([0-9a-z]*\) ancestor=\([0-9]*\) status=\([0-9]*\)$/\1|\2|\3/p' "$T/out.txt" | tail -1)
+echo "owner=${o:-} ancestor=${a:-} status=${st:-}"
+if ! [[ "$o" =~ ^[0-9]+$ ]] || [ "$o" != "$a" ] || [ "$st" != 0 ]; then
   exit 1
 fi
-echo "owner=$o ancestor=$a"
 
 # shellcheck disable=SC2016  # the backticks and $ are for claude, not this shell
 SID_PROMPT='run `echo "$CLAUDE_CODE_SESSION_ID"` in Bash and reply with that output only'
